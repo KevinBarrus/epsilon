@@ -1385,7 +1385,7 @@ def test_mouse_support_enables_complete_protocol() -> None:
 
     _enable_mouse_support(_Output())
 
-    assert written == ["\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1004h\x1b[?1006h"]
+    assert written == ["\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h"]
 
 
 def test_mouse_support_disables_complete_protocol() -> None:
@@ -1401,4 +1401,4 @@ def test_mouse_support_disables_complete_protocol() -> None:
 
     _disable_mouse_support(_Output())
 
-    assert written == ["\x1b[?1006l\x1b[?1004l\x1b[?1003l\x1b[?1002l\x1b[?1000l"]
+    assert written == ["\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l"]

@@ -302,13 +302,13 @@ def _create_ui_output() -> Output:
 def _enable_mouse_support(self) -> None:
     """启用完整鼠标协议。"""
 
-    self.write_raw("\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1004h\x1b[?1006h")
+    self.write_raw("\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h")
 
 
 def _disable_mouse_support(self) -> None:
     """关闭完整鼠标协议，恢复外层终端行为。"""
 
-    self.write_raw("\x1b[?1006l\x1b[?1004l\x1b[?1003l\x1b[?1002l\x1b[?1000l")
+    self.write_raw("\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l")
 
 
 class _TrackedContainer(Container):
