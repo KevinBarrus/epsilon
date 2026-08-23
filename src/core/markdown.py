@@ -18,7 +18,7 @@ _INLINE_RE = re.compile(
 )
 _LINK_RE = re.compile(r"^\[([^\]]+)\]\([^)]+\)$")
 _CODE_BLOCK_DELIMITER = "```"
-_TABLE_CELL_RE = re.compile(r"^\s*\|.*\|\s*$")
+_TABLE_CELL_RE = re.compile(r"^\s*(?P<delimiter>[|│]).*(?P=delimiter)\s*$")
 _TABLE_SEPARATOR_RE = re.compile(r"^[\s:|-]+$")
 
 
@@ -54,10 +54,14 @@ def render_markdown(text: str, *, streaming: bool = False) -> StyleAndTextTuples
             code_language = line.strip()[len(_CODE_BLOCK_DELIMITER) :].strip()
             # 开始围栏不产生可见内容或额外换行
             add_newline = False
-        elif _TABLE_CELL_RE.match(line):
+        elif table_match := _TABLE_CELL_RE.match(line):
             # 表格行由整表渲染统一换行，不在行内单独插入
             add_newline = False
-            cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+            delimiter = table_match.group("delimiter")
+            cells = [
+                cell.strip()
+                for cell in line.strip().strip(delimiter).split(delimiter)
+            ]
             if table_rows is None:
                 table_rows = [cells]
             else:

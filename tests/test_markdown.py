@@ -219,6 +219,20 @@ def test_table_renders_aligned_with_borders() -> None:
     assert "---" not in text
 
 
+def test_unicode_border_table_uses_table_renderer() -> None:
+    """测试 Unicode 边框表格与标准管道表格共用渲染逻辑。"""
+
+    table = "│ 层次 │ 内容 │\n│ 经典 RL │ 表格法 │\n│ 深度强化学习 │ 神经网络 │"
+
+    fragments = render_markdown(table)
+    text = "".join(content for _, content in fragments)
+
+    assert fragments[0][0] == "class:md-table-header"
+    assert "│ 层次         │ 内容     │" in text
+    assert "│ 经典 RL      │ 表格法   │" in text
+    assert "│ 深度强化学习 │ 神经网络 │" in text
+
+
 def test_table_flows_with_streaming_rows() -> None:
     """测试流式输出时表格逐行累积渲染（容错）。"""
 
