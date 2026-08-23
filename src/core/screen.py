@@ -536,10 +536,13 @@ class ChatScreen:
         entry = self._conversation[index]
         if entry.committed:
             return False
-        self._assistant_streams.pop(entry.control, None)
+        stream = self._assistant_streams.pop(entry.control, None)
         self._conversation[index] = replace(entry, committed=True)
         self._set_entry_content(index, entry.content)
-        self._publish_entry(index)
+        if self._inline_mode and stream is not None and stream.stable_end:
+            self._queue_history_fragments(_render_assistant_content(stream.tail_source))
+        else:
+            self._publish_entry(index)
         self._sync_conversation()
         self.application.invalidate()
         return True

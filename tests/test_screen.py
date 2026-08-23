@@ -257,6 +257,31 @@ def test_inline_stream_moves_complete_lines_out_of_active_control(tmp_path: Path
     assert screen._conversation[index].content == "稳定行\n尾部"
     assert to_plain_text(screen._conversation[index].control.text) == "尾部"
     assert to_plain_text(screen._inline_history._pending[0]) == "稳定行\n"
+
+
+def test_inline_stream_keeps_active_tail_bounded_for_long_reply(tmp_path: Path) -> None:
+    """测试大量完整行不会累积在活动文本控件中。"""
+
+    class EmptyLogo:
+        """提供空 Logo。"""
+
+        def render(self) -> str:
+            """返回空文本。"""
+
+            return ""
+
+    screen = ChatScreen(
+        create_status_info("test-model", "n/a", tmp_path),
+        logo_provider=EmptyLogo(),
+    )
+    index = screen.add_active_entry("assistant", "")
+    reply = "".join(f"第 {number} 行\n" for number in range(2_000))
+
+    screen.append_to_entry(index, reply)
+
+    assert screen._conversation[index].content == reply
+    assert to_plain_text(screen._conversation[index].control.text) == ""
+    assert len(screen._assistant_streams[screen._conversation[index].control].tail_source) == 0
 @pytest.mark.asyncio
 async def test_running_screen_finalizes_assistant_highlight_in_background(
     tmp_path: Path,
