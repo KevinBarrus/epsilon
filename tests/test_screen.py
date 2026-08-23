@@ -975,10 +975,10 @@ def test_status_copy_hint_provider(tmp_path: Path) -> None:
     assert row1_right == "Copied 42 chars to clipboard"
 
 
-def test_selection_pane_ctrl_wheel_zooms_instead_of_scrolling(
+def test_selection_pane_ctrl_wheel_is_left_to_terminal(
     tmp_path: Path,
 ) -> None:
-    """测试 Ctrl+滚轮触发缩放回调，普通滚轮仍然滚动。"""
+    """测试 Ctrl+滚轮不进入应用逻辑，普通滚轮仍然滚动。"""
 
     from prompt_toolkit.layout.screen import Point
     from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType, MouseModifier
@@ -986,7 +986,6 @@ def test_selection_pane_ctrl_wheel_zooms_instead_of_scrolling(
     from core.screen import SelectionPane
 
     scrolled: list[int] = []
-    zoomed: list[int] = []
 
     class _Content:
         """被包裹的最小内容容器。"""
@@ -1011,7 +1010,6 @@ def test_selection_pane_ctrl_wheel_zooms_instead_of_scrolling(
     pane = SelectionPane(
         _Content(),
         scroll_handler=scrolled.append,
-        zoom_handler=zoomed.append,
     )
 
     ctrl_wheel_up = MouseEvent(
@@ -1020,9 +1018,7 @@ def test_selection_pane_ctrl_wheel_zooms_instead_of_scrolling(
         button=MouseButton.NONE,
         modifiers=frozenset([MouseModifier.CONTROL]),
     )
-    pane._mouse_handler(ctrl_wheel_up)
-
-    assert zoomed == [1]
+    assert pane._mouse_handler(ctrl_wheel_up) is NotImplemented
     assert scrolled == []
 
     plain_wheel_down = MouseEvent(
@@ -1034,34 +1030,6 @@ def test_selection_pane_ctrl_wheel_zooms_instead_of_scrolling(
     pane._mouse_handler(plain_wheel_down)
 
     assert scrolled == [3]
-
-
-def test_zoom_font_writes_osc50_sequence(tmp_path: Path) -> None:
-    """测试缩放字体时输出 iTerm2 OSC 50 序列。"""
-
-    from prompt_toolkit.layout.screen import Point
-    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType, MouseModifier
-
-    screen = _create_screen(tmp_path)
-    written: list[str] = []
-
-    class _RecordingOutput:
-        """记录 write_raw 调用的假输出。"""
-
-        def write_raw(self, text: str) -> None:
-            written.append(text)
-
-        def flush(self) -> None:
-            return None
-
-    screen.application.output = _RecordingOutput()
-
-    screen._zoom_font(1)
-
-    assert written == ["\x1b]50;SetFontSize=14\x07"]
-
-    screen._zoom_font(-1)
-    assert written[-1] == "\x1b]50;SetFontSize=13\x07"
 
 
 def test_user_message_renders_markdown(tmp_path: Path) -> None:
@@ -1302,8 +1270,8 @@ def test_auto_copy_can_be_disabled(tmp_path: Path) -> None:
     assert copied == []
 
 
-def test_mouse_support_enables_sgr_and_drag() -> None:
-    """测试自定义输出启用基础、拖选与 SGR 鼠标模式（不启用任意移动 1003）。"""
+def test_mouse_support_enables_basic_and_drag_modes() -> None:
+    """测试自定义输出启用基础与拖选模式，不拦截终端缩放。"""
 
     from core.screen import _enable_mouse_support
 
@@ -1317,5 +1285,5 @@ def test_mouse_support_enables_sgr_and_drag() -> None:
 
     assert "\x1b[?1000h" in written
     assert "\x1b[?1002h" in written
-    assert "\x1b[?1006h" in written
+    assert "\x1b[?1006h" not in written
     assert not any("1003" in item for item in written)

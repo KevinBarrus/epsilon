@@ -30,7 +30,7 @@ from prompt_toolkit.layout.containers import (
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.layout.screen import Char, Screen, WritePosition
-from prompt_toolkit.mouse_events import MouseEvent, MouseModifier
+from prompt_toolkit.mouse_events import MouseEvent
 from prompt_toolkit.output import Output, create_output
 from prompt_toolkit.output.vt100 import Vt100_Output
 from prompt_toolkit.styles import Style
@@ -103,15 +103,13 @@ class SelectionPane(Container):
         content: Container,
         scroll_handler: Callable[[int], None],
         on_copy: Callable[[str], None] | None = None,
-        zoom_handler: Callable[[int], None] | None = None,
         skip_region: Callable[[], tuple[int, int] | None] | None = None,
     ) -> None:
-        """包裹对话内容，滚轮交给滚动处理器，Ctrl+滚轮交给缩放处理器。"""
+        """包裹对话内容，滚轮交给滚动处理器。"""
 
         self.content = content
         self._scroll_handler = scroll_handler
         self._on_copy = on_copy
-        self._zoom_handler = zoom_handler
         self._skip_region = skip_region
         self._anchor: tuple[int, int] | None = None
         self._focus: tuple[int, int] | None = None
@@ -199,21 +197,13 @@ class SelectionPane(Container):
         """处理对话区鼠标：Ctrl+滚轮缩放，普通滚轮滚动，左键拖选复制。"""
 
         if mouse_event.event_type.name == "SCROLL_UP":
-            if (
-                self._zoom_handler is not None
-                and MouseModifier.CONTROL in mouse_event.modifiers
-            ):
-                self._zoom_handler(1)
-                return None
+            if mouse_event.modifiers:
+                return NotImplemented
             self._scroll_handler(-3)
             return None
         if mouse_event.event_type.name == "SCROLL_DOWN":
-            if (
-                self._zoom_handler is not None
-                and MouseModifier.CONTROL in mouse_event.modifiers
-            ):
-                self._zoom_handler(-1)
-                return None
+            if mouse_event.modifiers:
+                return NotImplemented
             self._scroll_handler(3)
             return None
         # 输入区（随对话滚动的内容末尾）点击/拖选放行给 TextArea 自身处理
@@ -295,8 +285,7 @@ _MAX_TOOL_LINES = 8
 def _create_ui_output() -> Output:
     """创建终端输出：定制鼠标模式序列。
 
-    保留 SGR 1006（滚轮与容错解析，未知手势不崩溃），用 1002 拖选
-    替代 1003 任意移动（减少触摸板手势产生的多余事件）。
+    使用基础鼠标模式和拖选模式，避免拦截终端的 Ctrl+滚轮缩放。
     """
 
     output = create_output()
@@ -308,11 +297,10 @@ def _create_ui_output() -> Output:
 
 
 def _enable_mouse_support(self) -> None:
-    """启用基础、拖选与 SGR 鼠标模式（不启用任意移动模式 1003）。"""
+    """启用基础和拖选鼠标模式，不启用 SGR 1006 与任意移动模式 1003。"""
 
     self.write_raw("\x1b[?1000h")
     self.write_raw("\x1b[?1002h")
-    self.write_raw("\x1b[?1006h")
 
 
 class _TrackedContainer(Container):
@@ -553,8 +541,6 @@ class ChatScreen:
         self._conversation: list[ConversationEntry] = []
         self._input_history = InMemoryHistory()
         self._last_input_length = 0
-        # 终端字体缩放：iTerm2 等通过 OSC 50 调整，Windows Terminal 原生缩放
-        self._font_size = 13
         self.input_area = TextArea(
             prompt="",
             multiline=True,
@@ -590,13 +576,12 @@ class ChatScreen:
             self._conversation_content,
             reserved_height=self._get_reserved_height,
         )
-        # 对话区外包选区容器：拖选反色高亮、松开自动复制，Ctrl+滚轮缩放字体；
-        # 输入区区域点击/拖选放行给 TextArea，滚轮仍滚动对话区
+        # 对话区外包选区容器：拖选反色高亮、松开自动复制；
+        # 输入区区域点击/拖选放行给 TextArea，普通滚轮滚动对话区
         self.selection_pane = SelectionPane(
             self.conversation_view,
             self.conversation_view.scroll_by,
             on_copy=self._on_copy,
-            zoom_handler=self._zoom_font,
             skip_region=self._input_region,
         )
         # 两行式状态栏（对齐 Pi footer）：整行渲染，行一左工作区右复制提示、行二左信息右模型
@@ -971,15 +956,6 @@ class ChatScreen:
         if hidden <= 0:
             return "─" * 4096
         return f"─── ↑ {hidden} more " + "─" * 4096
-
-    def _zoom_font(self, direction: int) -> None:
-        """通过终端字体大小序列缩放（iTerm2 OSC 50），不支持时静默。"""
-
-        self._font_size = max(6, min(48, self._font_size + direction))
-        self.application.output.write_raw(
-            f"\x1b]50;SetFontSize={self._font_size}\x07"
-        )
-        self.application.output.flush()
 
     def _hidden_input_lines(self) -> int:
         """计算输入框内容被隐藏的行数（超出最大行数后顶部滚出的行）。"""
