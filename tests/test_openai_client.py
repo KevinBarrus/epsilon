@@ -69,6 +69,16 @@ def _settings() -> Settings:
     )
 
 
+def _deepseek_settings() -> Settings:
+    """构造直连 DeepSeek 的测试配置。"""
+
+    return Settings(
+        base_url="https://api.deepseek.com/",
+        model_name="deepseek-test",
+        api_key="test-key",
+    )
+
+
 async def _collect(client: OpenAICompatibleClient, thinking_level: str | None = None) -> str:
     """收集客户端产生的全部文本片段。"""
 
@@ -140,6 +150,36 @@ async def test_client_omits_reasoning_effort_for_off() -> None:
 
     await _collect(client, thinking_level="off")
 
+    assert "reasoning_effort" not in fake_sdk.completions.received
+
+
+@pytest.mark.asyncio
+async def test_client_uses_deepseek_thinking_protocol() -> None:
+    """测试直连 DeepSeek 时同时启用推理与传递强度。"""
+
+    fake_sdk = FakeClient(
+        [SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content="好"))])]
+    )
+    client = OpenAICompatibleClient(_deepseek_settings(), fake_sdk)  # type: ignore[arg-type]
+
+    await _collect(client, thinking_level="high")
+
+    assert fake_sdk.completions.received["thinking"] == {"type": "enabled"}
+    assert fake_sdk.completions.received["reasoning_effort"] == "high"
+
+
+@pytest.mark.asyncio
+async def test_client_disables_deepseek_thinking_for_off() -> None:
+    """测试直连 DeepSeek 时 off 显式关闭推理。"""
+
+    fake_sdk = FakeClient(
+        [SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content="好"))])]
+    )
+    client = OpenAICompatibleClient(_deepseek_settings(), fake_sdk)  # type: ignore[arg-type]
+
+    await _collect(client, thinking_level="off")
+
+    assert fake_sdk.completions.received["thinking"] == {"type": "disabled"}
     assert "reasoning_effort" not in fake_sdk.completions.received
 
 
@@ -694,3 +734,22 @@ async def test_client_streams_reasoning_content() -> None:
 
     assert reasoning == ["分析"]
     assert content == ["结论"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["reasoning", "reasoning_text"])
+async def test_client_streams_openai_compatible_reasoning_fields(field: str) -> None:
+    """测试客户端兼容非标准推理字段。"""
+
+    fake_sdk = FakeClient(
+        [
+            SimpleNamespace(
+                choices=[SimpleNamespace(delta=SimpleNamespace(**{field: "分析"}))]
+            )
+        ]
+    )
+    client = OpenAICompatibleClient(_settings(), fake_sdk)  # type: ignore[arg-type]
+
+    events = [event async for event in client.stream_response([Message(role="user", content="hi")])]
+
+    assert events == [TextDelta("", reasoning="分析")]

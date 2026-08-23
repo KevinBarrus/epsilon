@@ -4,6 +4,7 @@ import asyncio
 import json
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
 from openai import AsyncOpenAI
 
@@ -40,6 +41,7 @@ class OpenAICompatibleClient:
         """根据配置创建客户端，也允许注入测试客户端。"""
 
         self._model_name = settings.model_name
+        self._is_deepseek = _is_deepseek_endpoint(settings.base_url)
         self._first_byte_timeout_seconds = settings.first_byte_timeout_seconds
         self._stream_idle_timeout_seconds = settings.stream_idle_timeout_seconds
         self._stream_usage = settings.stream_usage
@@ -81,9 +83,7 @@ class OpenAICompatibleClient:
         }
         if tools:
             request["tools"] = list(tools)
-        # 推理强度：off 不传 reasoning_effort，其余档位直接透传
-        if thinking_level and thinking_level != "off":
-            request["reasoning_effort"] = thinking_level
+        _apply_thinking_options(request, thinking_level, self._is_deepseek)
         if self._stream_usage:
             request["stream_options"] = {"include_usage": True}
 
@@ -100,7 +100,7 @@ class OpenAICompatibleClient:
                 content = getattr(delta, "content", None)
                 if content:
                     yield TextDelta(content)
-                reasoning = getattr(delta, "reasoning_content", None)
+                reasoning = _reasoning_delta(delta)
                 if reasoning:
                     yield TextDelta("", reasoning=reasoning)
                 for tool_call_delta in getattr(delta, "tool_calls", None) or ():
@@ -141,6 +141,39 @@ class OpenAICompatibleClient:
             except StopAsyncIteration:
                 return
             yield chunk
+
+
+def _is_deepseek_endpoint(base_url: str) -> bool:
+    """判断当前请求是否直连 DeepSeek 服务。"""
+
+    hostname = urlparse(base_url).hostname or ""
+    return hostname == "deepseek.com" or hostname.endswith(".deepseek.com")
+
+
+def _apply_thinking_options(
+    request: dict[str, object],
+    thinking_level: str | None,
+    is_deepseek: bool,
+) -> None:
+    """按服务端协议写入推理开关与强度参数。"""
+
+    if is_deepseek and thinking_level == "off":
+        request["thinking"] = {"type": "disabled"}
+        return
+    if thinking_level and thinking_level != "off":
+        if is_deepseek:
+            request["thinking"] = {"type": "enabled"}
+        request["reasoning_effort"] = thinking_level
+
+
+def _reasoning_delta(delta: object) -> str | None:
+    """读取 OpenAI-compatible 服务常用的推理分片字段。"""
+
+    for field in ("reasoning_content", "reasoning", "reasoning_text"):
+        value = getattr(delta, field, None)
+        if isinstance(value, str) and value:
+            return value
+    return None
 
 
 def _to_model_error(error: BaseException) -> ModelClientError:
