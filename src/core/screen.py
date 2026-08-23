@@ -31,8 +31,7 @@ from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.layout.screen import Char, Screen, WritePosition
 from prompt_toolkit.mouse_events import MouseEvent
-from prompt_toolkit.output import Output, create_output
-from prompt_toolkit.output.vt100 import Vt100_Output
+from prompt_toolkit.output import create_output
 from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets import TextArea
 from wcwidth import wcswidth
@@ -281,35 +280,6 @@ ConversationRole = Literal["user", "assistant", "tool", "logo", "thinking", "wor
 _WORKING_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 # 工具输出折叠阈值（超过时显示省略提示，对齐 Pi）
 _MAX_TOOL_LINES = 8
-
-
-def _create_ui_output() -> Output:
-    """创建终端输出：定制鼠标模式序列。
-
-    启用完整鼠标协议，让终端将滚轮和触摸板事件交给界面解析。
-    """
-
-    output = create_output()
-    if isinstance(output, Vt100_Output):
-        output.enable_mouse_support = _enable_mouse_support.__get__(  # type: ignore[method-assign]
-            output
-        )
-        output.disable_mouse_support = _disable_mouse_support.__get__(  # type: ignore[method-assign]
-            output
-        )
-    return output
-
-
-def _enable_mouse_support(self) -> None:
-    """启用完整鼠标协议。"""
-
-    self.write_raw("\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h")
-
-
-def _disable_mouse_support(self) -> None:
-    """关闭完整鼠标协议，恢复外层终端行为。"""
-
-    self.write_raw("\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l")
 
 
 class _TrackedContainer(Container):
@@ -605,10 +575,10 @@ class ChatScreen:
             key_bindings=self._key_bindings,
             style=style or create_ui_style(),
             full_screen=not inline_mode,
-            mouse_support=True,
+            mouse_support=False,
             cursor=CursorShape.BLINKING_BEAM,
             clipboard=Osc52Clipboard(),
-            output=_create_ui_output(),
+            output=create_output(),
         )
         # Logo 作为对话区第一条内容，随对话增长自然上移出屏幕
         if self._has_logo():

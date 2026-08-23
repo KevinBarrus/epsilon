@@ -45,13 +45,13 @@ def _binding_key(binding) -> str:
     return key.value if hasattr(key, "value") else key
 
 
-def test_chat_screen_uses_full_screen_and_mouse_support(tmp_path: Path) -> None:
-    """测试界面启用全屏模式和鼠标支持。"""
+def test_chat_screen_uses_full_screen_without_application_mouse_support(tmp_path: Path) -> None:
+    """测试兼容全屏界面不再接管终端鼠标事件。"""
 
     screen = _create_screen(tmp_path)
 
     assert screen.application.full_screen is True
-    assert screen.application.mouse_support() is True
+    assert screen.application.mouse_support() is False
 
 
 @pytest.mark.asyncio
@@ -1177,7 +1177,6 @@ def test_selection_pane_ctrl_wheel_is_left_to_terminal(
 
     assert scrolled == [3]
 
-
 def test_user_message_renders_markdown(tmp_path: Path) -> None:
     """测试用户消息中的加粗等 Markdown 标记被渲染。"""
 
@@ -1379,35 +1378,3 @@ def test_selection_pane_releases_click_on_input_region(tmp_path: Path) -> None:
     screen.selection_pane._mouse_handler(wheel_in_input)
 
     assert scrolled == [3]
-
-
-def test_mouse_support_enables_complete_protocol() -> None:
-    """测试自定义输出启用完整鼠标协议。"""
-
-    from core.screen import _enable_mouse_support
-
-    written: list[str] = []
-
-    class _Output:
-        def write_raw(self, text: str) -> None:
-            written.append(text)
-
-    _enable_mouse_support(_Output())
-
-    assert written == ["\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h"]
-
-
-def test_mouse_support_disables_complete_protocol() -> None:
-    """测试退出时关闭完整鼠标协议。"""
-
-    from core.screen import _disable_mouse_support
-
-    written: list[str] = []
-
-    class _Output:
-        def write_raw(self, text: str) -> None:
-            written.append(text)
-
-    _disable_mouse_support(_Output())
-
-    assert written == ["\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l"]
