@@ -358,20 +358,3 @@ async def test_thinking_toggle_command_switches_state() -> None:
 
     assert agent_loop.show_thinking is False
     assert "Thinking display: hidden" in screen.entries[0][1]
-
-
-@pytest.mark.asyncio
-async def test_auto_copy_command_toggles() -> None:
-    """测试 /auto-copy 切换输入框自动复制开关。"""
-
-    from core.commands import auto_copy_command_slash
-
-    screen = _Screen()
-    screen._auto_copy = True
-    screen.set_auto_copy = lambda enabled: setattr(screen, "_auto_copy", enabled)
-    context = _context(screen=screen)
-
-    await auto_copy_command_slash.handler(context)
-
-    assert screen._auto_copy is False
-    assert "Auto-copy: off" in screen.entries[0][1]

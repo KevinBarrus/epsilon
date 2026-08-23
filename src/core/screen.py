@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Literal
 
 from prompt_toolkit.application import Application
-from prompt_toolkit.clipboard import Clipboard, ClipboardData
+from prompt_toolkit.clipboard import Clipboard
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.cursor_shapes import CursorShape
 from prompt_toolkit.formatted_text import (
@@ -552,8 +552,6 @@ class ChatScreen:
         self._working_entry_index: int | None = None
         self._expanded_entries: set[int] = set()
         self._last_tool_index: int | None = None
-        self._auto_copy = True
-        self._last_input_copy = ""
         self._conversation: list[ConversationEntry] = []
         self._input_history = InMemoryHistory()
         self._input_history_cursor: int | None = None
@@ -575,10 +573,6 @@ class ChatScreen:
         )
         # 删除字符不会触发 complete_while_typing，需要手动重新启动补全
         self.input_area.buffer.on_text_changed += self._on_input_text_changed
-        # 输入框拖选时自动复制（/auto-copy 控制开关）
-        self.input_area.buffer.on_cursor_position_changed += (
-            self._on_input_selection_changed
-        )
         # 补全状态变化时同步底部区域的补全列表
         self.input_area.buffer.on_completions_changed += self._on_completions_changed
         self._conversation_content = HSplit(
@@ -866,27 +860,6 @@ class ChatScreen:
         if buffer.selection_state is None:
             return
         self.application.clipboard.set_data(buffer.copy_selection())
-
-    def _on_input_selection_changed(self, buffer) -> None:
-        """输入框拖选移动/松开时自动复制选区（由 /auto-copy 控制）。"""
-
-        if not self._auto_copy:
-            return
-        state = buffer.selection_state
-        if state is None:
-            return
-        document = buffer.document
-        start = min(document.cursor_position, state.original_cursor_position)
-        end = max(document.cursor_position, state.original_cursor_position)
-        selection = document.text[start:end]
-        if selection and selection != self._last_input_copy:
-            self._last_input_copy = selection
-            self.application.clipboard.set_data(ClipboardData(selection))
-
-    def set_auto_copy(self, enabled: bool) -> None:
-        """切换输入框拖选自动复制开关。"""
-
-        self._auto_copy = enabled
 
     def paste_to_input(self) -> None:
         """将剪贴板内容粘贴到输入框当前位置。"""

@@ -1381,65 +1381,6 @@ def test_selection_pane_releases_click_on_input_region(tmp_path: Path) -> None:
     assert scrolled == [3]
 
 
-def test_input_selection_auto_copies_on_change(tmp_path: Path) -> None:
-    """测试输入框拖选时自动复制选区文本。"""
-
-    from prompt_toolkit.clipboard import ClipboardData
-
-    screen = _create_screen(tmp_path)
-    copied: list[ClipboardData] = []
-
-    class _RecordingClipboard:
-        def set_data(self, data: ClipboardData) -> None:
-            copied.append(data)
-
-        def get_data(self) -> ClipboardData:
-            return ClipboardData("")
-
-        def rotate(self) -> None:
-            return None
-
-    screen.application.clipboard = _RecordingClipboard()
-
-    buffer = screen.input_area.buffer
-    buffer.text = "选中这段文字"
-    buffer.cursor_position = 2
-    buffer.start_selection()
-    buffer.cursor_position = 4
-
-    assert copied and copied[-1].text == "这段"
-
-
-def test_auto_copy_can_be_disabled(tmp_path: Path) -> None:
-    """测试关闭自动复制后拖选不再复制。"""
-
-    from prompt_toolkit.clipboard import ClipboardData
-
-    screen = _create_screen(tmp_path)
-    copied: list[ClipboardData] = []
-
-    class _RecordingClipboard:
-        def set_data(self, data: ClipboardData) -> None:
-            copied.append(data)
-
-        def get_data(self) -> ClipboardData:
-            return ClipboardData("")
-
-        def rotate(self) -> None:
-            return None
-
-    screen.application.clipboard = _RecordingClipboard()
-    screen.set_auto_copy(False)
-
-    buffer = screen.input_area.buffer
-    buffer.text = "选中这段文字"
-    buffer.cursor_position = 2
-    buffer.start_selection()
-    buffer.cursor_position = 4
-
-    assert copied == []
-
-
 def test_mouse_support_enables_complete_protocol() -> None:
     """测试自定义输出启用完整鼠标协议。"""
 
