@@ -1,6 +1,7 @@
 """实现全屏终端对话界面"""
 
 import asyncio
+from dataclasses import dataclass
 from pathlib import Path
 
 from .agent_loop import (
@@ -62,6 +63,14 @@ from .tools import (
 AGENT_SYSTEM_PROMPT = load_prompt("agent")
 
 
+@dataclass(frozen=True)
+class ChatExitInfo:
+    """描述一次界面结束后可由启动层输出的最小信息"""
+
+    session_id: str | None
+    usage_totals: UsageTotals | None
+
+
 def _default_command_registry() -> CommandRegistry:
     """创建注册了全部内置命令的注册表。"""
 
@@ -97,7 +106,7 @@ async def run_chat(
     mcp_provider: StdioMcpProvider | None = None,
     max_tool_rounds: int = 10,
     agent_loop: AgentLoop | None = None,
-) -> None:
+) -> ChatExitInfo:
     """启动全屏界面，并处理模型的流式回复"""
 
     screen: ChatScreen
@@ -417,6 +426,10 @@ async def run_chat(
             await mcp_provider.close()
         if not session.close():
             screen.set_status_message("Session persistence degraded")
+    return ChatExitInfo(
+        session_id=None if session.deleted else session.session_id,
+        usage_totals=usage_totals if latest_usage is not None else None,
+    )
 
 
 def _tool_call_summary(tool_call) -> str:

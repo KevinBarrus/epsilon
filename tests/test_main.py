@@ -6,8 +6,10 @@ import pytest
 from core import main
 from core.config import McpStdioSettings, Settings
 from core.context import ContextBudget
+from core.cost import UsageTotals
 from core.model import Message
 from core.session_store import SessionStore
+from core.ui import ChatExitInfo
 
 
 class FakePicker:
@@ -24,6 +26,28 @@ class FakePicker:
         """返回预设的会话 ID"""
 
         return self.selected_id
+
+
+def test_format_exit_summary_with_usage_and_resume_instruction() -> None:
+    """测试退出摘要会展示本次真实用量和恢复命令。"""
+
+    usage = UsageTotals(prompt_tokens=120, completion_tokens=30, cached_tokens=40)
+
+    assert main.format_exit_summary(
+        ChatExitInfo("11111111-1111-1111-1111-111111111111", usage)
+    ) == [
+        "Token usage (this run): total=150 input=120 cached=40 output=30",
+        "To continue this session, run epsilon resume "
+        "11111111-1111-1111-1111-111111111111",
+    ]
+
+
+def test_format_exit_summary_without_usage_or_session() -> None:
+    """测试无真实用量和已删除会话不会给出无效恢复指引。"""
+
+    assert main.format_exit_summary(ChatExitInfo(None, None)) == [
+        "Token usage: unavailable"
+    ]
 
 
 @pytest.fixture

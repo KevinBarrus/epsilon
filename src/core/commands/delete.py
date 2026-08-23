@@ -23,6 +23,7 @@ async def delete_command(context: CommandContext) -> None:
         context.screen.add_entry("tool", "Session deleted")
     else:
         context.screen.add_entry("tool", "Session file not found")
+    context.session.mark_deleted()
     context.screen.application.exit()
 
 

@@ -53,6 +53,7 @@ def _context(**overrides) -> CommandContext:
         "screen": _Screen(),
         "session": SimpleNamespace(
             session_id=None,
+            mark_deleted=lambda: None,
             get_messages=lambda: [], get_compactions=lambda: [], add_compaction=lambda r: True
         ),
         "skill_manager": SimpleNamespace(
@@ -313,7 +314,7 @@ async def test_delete_command_confirms_then_exits(
 
     context = replace(
         context,
-        session=SimpleNamespace(session_id=session_id),
+        session=SimpleNamespace(session_id=session_id, mark_deleted=lambda: None),
     )
 
     await delete_command_slash.handler(context)

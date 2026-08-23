@@ -91,7 +91,7 @@ async def test_run_chat_renders_restored_history(
     assert session.flush_persistence()
     monkeypatch.setattr(ui, "ChatScreen", FakeScreen)
 
-    await ui.run_chat(
+    exit_info = await ui.run_chat(
         EmptyClient(),
         create_status_info("test", "暂不可查询", tmp_path),
         settings=Settings("https://example.com", "test", "key"),
@@ -108,6 +108,8 @@ async def test_run_chat_renders_restored_history(
         [("user", "历史问题"), ("assistant", "历史回答")]
     ]
     assert FakeScreen.last.conversation_view.scrolled_to_bottom
+    assert exit_info.session_id == session.session_id
+    assert exit_info.usage_totals is None
 
 
 @pytest.mark.asyncio

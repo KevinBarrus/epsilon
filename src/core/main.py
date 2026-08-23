@@ -17,7 +17,7 @@ from .session_store import SessionStoreError
 from .setup import run_setup_guide
 from .status import create_status_info
 from .tools import StdioMcpProvider
-from .ui import run_chat
+from .ui import ChatExitInfo, run_chat
 
 
 logger = logging.getLogger(__name__)
@@ -27,7 +27,7 @@ async def run(
     session_id: str | None = None,
     resume: bool = False,
     config_path: Path | None = None,
-) -> None:
+) -> ChatExitInfo | None:
     """加载配置、创建模型客户端并启动终端界面"""
 
     workspace = Path.cwd().resolve()
@@ -57,7 +57,7 @@ async def run(
     balance_provider = create_balance_provider(settings.base_url, settings.api_key)
     balance = await balance_provider.get_balance()
     status = create_status_info(settings.model_name, balance)
-    await run_chat(
+    return await run_chat(
         client,
         status,
         settings,
@@ -72,6 +72,27 @@ async def run(
         mcp_provider=mcp_provider,
         max_tool_rounds=settings.max_tool_rounds,
     )
+
+
+def format_exit_summary(exit_info: ChatExitInfo | None) -> list[str]:
+    """格式化界面退出后输出到终端的会话摘要"""
+
+    if exit_info is None:
+        return []
+    if exit_info.usage_totals is None:
+        lines = ["Token usage: unavailable"]
+    else:
+        usage = exit_info.usage_totals
+        lines = [
+            "Token usage (this run): "
+            f"total={usage.total_tokens} input={usage.prompt_tokens} "
+            f"cached={usage.cached_tokens} output={usage.completion_tokens}"
+        ]
+    if exit_info.session_id is not None:
+        lines.append(
+            f"To continue this session, run epsilon resume {exit_info.session_id}"
+        )
+    return lines
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -89,13 +110,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        asyncio.run(
+        exit_info = asyncio.run(
             run(
                 getattr(args, "session_id", None),
                 resume=args.command == "resume",
                 config_path=args.config,
             )
         )
+        for line in format_exit_summary(exit_info):
+            print(line)
     except ConfigError as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
         return 1

@@ -22,6 +22,7 @@ class Session:
         self._compactions: list[CompactionRecord] = []
         self._transient_compactions: list[CompactionRecord] = []
         self._compaction_persistence_degraded = False
+        self._deleted = False
         self._persistence = SessionPersistenceQueue(
             lambda message: self._store.append_message(self.session_id, message),
             persist_pending=lambda message: self._store.append_pending_message(
@@ -98,6 +99,17 @@ class Session:
         """刷新并关闭当前会话的持久化队列"""
 
         return self._persistence.close()
+
+    def mark_deleted(self) -> None:
+        """标记当前会话已删除，供退出时省略恢复指引"""
+
+        self._deleted = True
+
+    @property
+    def deleted(self) -> bool:
+        """返回当前会话是否已由用户删除"""
+
+        return self._deleted
 
     @property
     def persistence_degraded(self) -> bool:
