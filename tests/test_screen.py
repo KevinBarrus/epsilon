@@ -173,6 +173,30 @@ async def test_inline_screen_publishes_only_stable_entries(
     ]
 
 
+def test_inline_clear_keeps_stable_entries_out_of_active_view(tmp_path: Path) -> None:
+    """测试行内 /clear 只移除活动条目，不改写稳定历史。"""
+
+    class EmptyLogo:
+        """提供空 Logo。"""
+
+        def render(self) -> str:
+            """返回空文本。"""
+
+            return ""
+
+    screen = ChatScreen(
+        create_status_info("test-model", "n/a", tmp_path),
+        logo_provider=EmptyLogo(),
+    )
+    screen.add_entry("user", "已提交")
+    screen.add_active_entry("assistant", "活动内容")
+
+    screen.clear_conversation()
+
+    assert [entry.content for entry in screen.committed_entries()] == ["已提交"]
+    assert screen.active_entries() == []
+
+
 def test_chat_screen_commits_active_entry_only_once(tmp_path: Path) -> None:
     """测试活动条目提交后进入稳定历史，重复提交不会重复生效。"""
 

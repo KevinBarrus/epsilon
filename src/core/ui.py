@@ -325,7 +325,7 @@ async def run_chat(
         parts: list[list[tuple[str, str]]] = [
             [("class:startup-hint", "type / to see commands  (/model /compact /skills /mcp …)")],
             [("class:startup-hint", "↑/↓ or mouse to select · Esc to cancel")],
-            [("class:startup-hint", "/background-image to switch wallpaper · Ctrl+wheel to zoom")],
+            [("class:startup-hint", "/background-image to switch wallpaper · terminal controls zoom")],
             [("class:startup-hint", "input supports markdown (**bold**, `code`)")],
             [("class:startup-hint", "c-d exit")],
         ]

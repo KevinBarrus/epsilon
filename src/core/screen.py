@@ -420,7 +420,13 @@ class ChatScreen:
     def clear_conversation(self) -> None:
         """清空对话区展示内容（会话历史保留）。"""
 
-        self._conversation.clear()
+        if self._inline_mode:
+            # 主屏幕回滚区无法安全重写，只清空当前仍可重绘的活动条目
+            self._conversation = [
+                entry for entry in self._conversation if entry.committed
+            ]
+        else:
+            self._conversation.clear()
         self._sync_conversation()
         self.application.invalidate()
 
