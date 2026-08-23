@@ -112,15 +112,13 @@ def test_command_picker_scrolls_to_keep_selection_visible() -> None:
 
     picker = CommandPicker(_completions([f"cmd-{index}" for index in range(20)]))
     picker.move(19)
-    start, end = picker._line_ranges()[19]
     scroll = picker.window.vertical_scroll
 
-    assert start >= scroll
-    assert end <= scroll + CommandPicker._VISIBLE_ROWS
+    assert scroll <= 19 < scroll + CommandPicker._VISIBLE_ROWS
 
 
-def test_command_picker_scroll_uses_rendered_lines() -> None:
-    """测试带描述的候选项按实际终端行数滚动。"""
+def test_command_picker_scroll_uses_item_rows() -> None:
+    """测试带描述的候选项仍按固定单行滚动。"""
 
     picker = CommandPicker(
         [Completion(f"cmd-{index}", display_meta="description") for index in range(10)]
@@ -128,10 +126,8 @@ def test_command_picker_scroll_uses_rendered_lines() -> None:
 
     picker.move(5)
 
-    start, end = picker._line_ranges()[5]
     scroll = picker.window.vertical_scroll
-    assert start >= scroll
-    assert end <= scroll + CommandPicker._VISIBLE_ROWS
+    assert scroll <= 5 < scroll + CommandPicker._VISIBLE_ROWS
 
 
 def test_command_picker_keeps_scroll_after_window_render() -> None:
@@ -153,11 +149,23 @@ def test_command_picker_keeps_scroll_after_window_render() -> None:
         0,
     )
 
-    start, end = picker._line_ranges()[10]
     scroll = picker.window.vertical_scroll
-    assert start >= scroll
-    assert end <= scroll + CommandPicker._VISIBLE_ROWS
+    assert scroll <= 10 < scroll + CommandPicker._VISIBLE_ROWS
     assert scroll > 0
+
+
+def test_command_picker_keeps_window_when_moving_back_inside_it() -> None:
+    """测试向上回到可见区域时不把选中项跳到列表首行。"""
+
+    picker = CommandPicker(_completions([f"cmd-{index}" for index in range(12)]))
+
+    picker.move(CommandPicker._VISIBLE_ROWS)
+    assert picker.window.vertical_scroll == 1
+
+    picker.move(-1)
+
+    assert picker.selected.text == "cmd-7"
+    assert picker.window.vertical_scroll == 1
 
 
 @pytest.mark.asyncio

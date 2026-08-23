@@ -17,8 +17,8 @@ _DESCRIPTION_GAP = 3
 class CommandPicker:
     """渲染补全匹配项，管理选中与滚动。"""
 
-    # 窗口优先高度下可同时展示的行数，用于滚动跟随
-    _VISIBLE_ROWS = 6
+    # 与 Codex 命令弹窗一致，最多同时展示 8 个稳定的单行选项
+    _VISIBLE_ROWS = 8
 
     def __init__(
         self,
@@ -37,9 +37,9 @@ class CommandPicker:
                 show_cursor=False,
                 get_cursor_position=self._cursor_position,
             ),
-            height=Dimension(min=1, preferred=self._VISIBLE_ROWS),
+            height=Dimension(min=1, preferred=self._VISIBLE_ROWS, max=self._VISIBLE_ROWS),
             dont_extend_height=True,
-            wrap_lines=True,
+            wrap_lines=False,
         )
         self.window.vertical_scroll = 0
 
@@ -83,40 +83,24 @@ class CommandPicker:
     def _follow_cursor(self) -> None:
         """滚动窗口让当前光标项始终可见。"""
 
-        ranges = self._line_ranges()
-        if not ranges:
+        if not self._completions:
             self.window.vertical_scroll = 0
             return
 
-        item_start, item_end = ranges[self._cursor]
-        total_lines = ranges[-1][1]
-        max_scroll = max(0, total_lines - self._VISIBLE_ROWS)
+        max_scroll = max(0, len(self._completions) - self._VISIBLE_ROWS)
         scroll = self.window.vertical_scroll
-        if item_start < scroll:
-            scroll = item_start
-        elif item_end > scroll + self._VISIBLE_ROWS:
-            scroll = item_end - self._VISIBLE_ROWS
+        if self._cursor < scroll:
+            scroll = self._cursor
+        elif self._cursor >= scroll + self._VISIBLE_ROWS:
+            scroll = self._cursor - self._VISIBLE_ROWS + 1
         self.window.vertical_scroll = max(0, min(max_scroll, scroll))
 
     def _cursor_position(self) -> Point | None:
         """返回选中项的实际渲染行，让 Window 保持该项可见。"""
 
-        ranges = self._line_ranges()
-        if not ranges:
+        if not self._completions:
             return None
-        return Point(x=0, y=ranges[self._cursor][0])
-
-    def _line_ranges(self) -> list[tuple[int, int]]:
-        """返回每个候选项对应的实际渲染行范围。"""
-
-        ranges: list[tuple[int, int]] = []
-        line = 0
-        for index, completion in enumerate(self._completions):
-            ranges.append((line, line + 1))
-            line += 1
-            if index != self._cursor and completion.display_meta:
-                line += 1
-        return ranges
+        return Point(x=0, y=self._cursor)
 
     def _click(self, index: int) -> None:
         """鼠标点击某行：选中该项并应用补全。"""
@@ -128,7 +112,7 @@ class CommandPicker:
             self._on_apply(self._completions[index])
 
     def _render(self) -> AnyFormattedText:
-        """渲染命令名与描述：name 列按最大宽度对齐，支持鼠标点击应用。"""
+        """渲染固定单行命令项，保持选中状态不改变列表高度。"""
 
         names = [f"/{completion.text}" for completion in self._completions]
         metas = [
@@ -144,15 +128,14 @@ class CommandPicker:
             spacing = " " * max(1, name_width - wcswidth(names[index]) + _DESCRIPTION_GAP)
             handler = lambda event, i=index: self._click(i)
             if index == self._cursor:
-                # 选中项整行亮青（对齐 Pi selectedText）
                 fragments.append(
                     ("class:approval-selected", f"{prefix}{names[index]}{spacing}{metas[index]}", handler)
                 )
             else:
-                fragments.append(("", f"{prefix}{names[index]}", handler))
+                fragments.append(("", f"{prefix}{names[index]}{spacing}", handler))
                 if metas[index]:
                     fragments.append(
-                        ("class:completion-description", f"{spacing}{metas[index]}", handler)
+                        ("class:completion-description", metas[index], handler)
                     )
             fragments.append(("", "\n", handler))
         return fragments
