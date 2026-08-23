@@ -415,6 +415,9 @@ async def run_chat(
     try:
         await screen.application.run_async()
     finally:
+        flush_history = getattr(screen, "flush_history", None)
+        if flush_history is not None:
+            await flush_history()
         if mcp_provider is not None:
             await mcp_provider.close()
         if not session.close():
