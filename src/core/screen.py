@@ -336,6 +336,8 @@ class ChatScreen:
             output=create_output(),
             min_redraw_interval=1 / 60,
         )
+        # prompt-toolkit 显示光标时会关闭终端闪烁，渲染完成后恢复该模式
+        self.application.after_render += self._enable_cursor_blink
         self._inline_history = InlineHistory(
             style=self.application.style,
             output=self.application.output,
@@ -503,6 +505,12 @@ class ChatScreen:
 
         if self._inline_mode:
             self._scrollback_reflow.observe(bool(self.active_entries()))
+
+    def _enable_cursor_blink(self, _application: Application) -> None:
+        """在每次绘制结束后恢复终端的光标闪烁模式。"""
+
+        self.application.output.write_raw("\x1b[?12h")
+        self.application.output.flush()
 
     async def _reflow_history(self) -> None:
         """从已提交条目重建终端回滚区，活动界面由 prompt-toolkit 恢复。"""

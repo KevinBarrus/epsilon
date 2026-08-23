@@ -639,6 +639,22 @@ def test_chat_screen_uses_blinking_cursor(tmp_path: Path) -> None:
     )
 
 
+def test_chat_screen_restores_terminal_cursor_blink_after_render(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """测试绘制结束后恢复终端光标闪烁模式。"""
+
+    screen = _create_screen(tmp_path)
+    writes: list[str] = []
+    monkeypatch.setattr(screen.application.output, "write_raw", writes.append)
+    monkeypatch.setattr(screen.application.output, "flush", lambda: None)
+
+    screen._enable_cursor_blink(screen.application)
+
+    assert writes == ["\x1b[?12h"]
+
+
 def test_user_entry_uses_full_width_gray_style_without_prefix(
     tmp_path: Path,
 ) -> None:
