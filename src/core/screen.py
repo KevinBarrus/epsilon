@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Literal
 
 from prompt_toolkit.application import Application
-from prompt_toolkit.clipboard import Clipboard
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.cursor_shapes import CursorShape
 from prompt_toolkit.formatted_text import (
@@ -29,14 +28,12 @@ from prompt_toolkit.layout.containers import (
 )
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.filters import Condition
-from prompt_toolkit.layout.screen import Char, Screen, WritePosition
-from prompt_toolkit.mouse_events import MouseEvent
 from prompt_toolkit.output import create_output
 from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets import TextArea
 from wcwidth import wcswidth
 
-from .clipboard import Osc52Clipboard, copy_text_to_clipboard
+from .clipboard import Osc52Clipboard
 from .inline_history import InlineHistory
 from .logo import DefaultLogoProvider, LogoProvider
 from .markdown import render_markdown
@@ -91,178 +88,7 @@ class StatusControl(UIControl):
 from .status import StatusInfo
 from .theme import create_ui_style
 from .logo import DefaultLogoProvider, LogoProvider
-from .conversation_view import ConversationView
 from .model import ToolCall
-
-
-class SelectionPane(Container):
-    """对话区选区容器：鼠标拖选反色高亮，松开后自动复制。"""
-
-    def __init__(
-        self,
-        content: Container,
-        scroll_handler: Callable[[int], None],
-        on_copy: Callable[[str], None] | None = None,
-        skip_region: Callable[[], tuple[int, int] | None] | None = None,
-    ) -> None:
-        """包裹对话内容，滚轮交给滚动处理器。"""
-
-        self.content = content
-        self._scroll_handler = scroll_handler
-        self._on_copy = on_copy
-        self._skip_region = skip_region
-        self._anchor: tuple[int, int] | None = None
-        self._focus: tuple[int, int] | None = None
-        self._last_screen: Screen | None = None
-        self._last_position: WritePosition | None = None
-
-    def preferred_width(self, max_available_width: int) -> Dimension:
-        """宽度直接委托给被包裹的内容。"""
-
-        return self.content.preferred_width(max_available_width)
-
-    def preferred_height(
-        self,
-        width: int,
-        max_available_height: int,
-    ) -> Dimension:
-        """高度直接委托给被包裹的内容。"""
-
-        return self.content.preferred_height(width, max_available_height)
-
-    def reset(self) -> None:
-        """重置内部状态。"""
-
-        self.content.reset()
-
-    def get_children(self) -> list[Container]:
-        """返回被包裹的内容。"""
-
-        return [self.content]
-
-    def is_focusable(self) -> bool:
-        """选区容器自身不可聚焦，焦点仍在输入区。"""
-
-        return False
-
-    def write_to_screen(
-        self,
-        screen: Screen,
-        mouse_handlers,
-        write_position: WritePosition,
-        parent_style: str,
-        erase_bg: bool,
-        z_index: int | None,
-    ) -> None:
-        """渲染对话内容，叠加选区反色并接管区域鼠标事件。"""
-
-        self._last_screen = screen
-        self._last_position = write_position
-        self.content.write_to_screen(
-            screen,
-            mouse_handlers,
-            write_position,
-            parent_style,
-            erase_bg,
-            z_index,
-        )
-        self._apply_selection_highlight(screen, write_position)
-        mouse_handlers.set_mouse_handler_for_range(
-            write_position.xpos,
-            write_position.xpos + write_position.width,
-            write_position.ypos,
-            write_position.ypos + write_position.height,
-            self._mouse_handler,
-        )
-
-    def _apply_selection_highlight(
-        self, screen: Screen, write_position: WritePosition
-    ) -> None:
-        """把选区矩形内的字符样式叠加反色。"""
-
-        if self._anchor is None or self._focus is None:
-            return
-        x0, x1 = sorted([self._anchor[0], self._focus[0]])
-        y0, y1 = sorted([self._anchor[1], self._focus[1]])
-        for y in range(y0, y1 + 1):
-            row = screen.data_buffer[y]
-            start = x0 if y == y0 else write_position.xpos
-            end = x1 if y == y1 else write_position.xpos + write_position.width - 1
-            for x in range(start, end + 1):
-                cell = row[x]
-                if cell.char != " ":
-                    row[x] = Char(cell.char, cell.style + " reverse")
-
-    def _mouse_handler(self, mouse_event: MouseEvent):
-        """处理对话区鼠标：Ctrl+滚轮缩放，普通滚轮滚动，左键拖选复制。"""
-
-        if mouse_event.event_type.name == "SCROLL_UP":
-            if mouse_event.modifiers:
-                return NotImplemented
-            self._scroll_handler(-3)
-            return None
-        if mouse_event.event_type.name == "SCROLL_DOWN":
-            if mouse_event.modifiers:
-                return NotImplemented
-            self._scroll_handler(3)
-            return None
-        # 输入区（随对话滚动的内容末尾）点击/拖选放行给 TextArea 自身处理
-        if self._in_skip_region(mouse_event.position.y):
-            return NotImplemented
-        if mouse_event.button.name != "LEFT":
-            return NotImplemented
-        if mouse_event.event_type.name == "MOUSE_DOWN":
-            self._anchor = (mouse_event.position.x, mouse_event.position.y)
-            self._focus = self._anchor
-            return None
-        if self._anchor is None:
-            return NotImplemented
-        if mouse_event.event_type.name == "MOUSE_MOVE":
-            self._focus = (mouse_event.position.x, mouse_event.position.y)
-            return None
-        if mouse_event.event_type.name == "MOUSE_UP":
-            # 松开位置作为选区终点（对齐 Pi release 时更新 focus）
-            self._focus = (mouse_event.position.x, mouse_event.position.y)
-            text = self._extract_selection()
-            self._anchor = None
-            self._focus = None
-            if text and self._on_copy is not None:
-                self._on_copy(text)
-            return None
-        return NotImplemented
-
-    def _in_skip_region(self, y: int) -> bool:
-        """判断鼠标行是否落在输入区渲染范围内。"""
-
-        if self._skip_region is None:
-            return False
-        region = self._skip_region()
-        if region is None:
-            return False
-        start, end = region
-        return start <= y < end
-
-    def _extract_selection(self) -> str:
-        """从最近渲染的屏幕提取选区矩形内的文本，逐行拼接。"""
-        if (
-            self._anchor is None
-            or self._focus is None
-            or self._last_screen is None
-            or self._last_position is None
-        ):
-            return ""
-        x0, x1 = sorted([self._anchor[0], self._focus[0]])
-        y0, y1 = sorted([self._anchor[1], self._focus[1]])
-        lines: list[str] = []
-        for y in range(y0, y1 + 1):
-            row = self._last_screen.data_buffer[y]
-            chars: list[str] = []
-            start = x0 if y == y0 else self._last_position.xpos
-            end = x1 if y == y1 else self._last_position.xpos + self._last_position.width - 1
-            for x in range(start, end + 1):
-                chars.append(row[x].char)
-            lines.append("".join(chars).rstrip())
-        return "\n".join(lines)
 from .command_picker import CommandPicker
 from .skill_picker import SkillPicker
 from .choice_picker import ChoicePicker
@@ -280,67 +106,6 @@ ConversationRole = Literal["user", "assistant", "tool", "logo", "thinking", "wor
 _WORKING_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 # 工具输出折叠阈值（超过时显示省略提示，对齐 Pi）
 _MAX_TOOL_LINES = 8
-
-
-class _TrackedContainer(Container):
-    """包裹输入区，记录最近一次渲染的屏幕行范围供鼠标分流。"""
-
-    def __init__(self, content: Container) -> None:
-        """保存被包裹的输入区容器。"""
-
-        self.content = content
-        self.last_y_range: tuple[int, int] | None = None
-
-    def preferred_width(self, max_available_width: int) -> Dimension:
-        """宽度委托给被包裹内容。"""
-
-        return self.content.preferred_width(max_available_width)
-
-    def preferred_height(
-        self, width: int, max_available_height: int
-    ) -> Dimension:
-        """高度委托给被包裹内容。"""
-
-        return self.content.preferred_height(width, max_available_height)
-
-    def reset(self) -> None:
-        """重置内部状态。"""
-
-        self.content.reset()
-
-    def get_children(self) -> list[Container]:
-        """返回被包裹的内容。"""
-
-        return [self.content]
-
-    def is_focusable(self) -> bool:
-        """可聚焦性委托给被包裹内容。"""
-
-        return self.content.is_focusable()
-
-    def write_to_screen(
-        self,
-        screen: Screen,
-        mouse_handlers,
-        write_position: WritePosition,
-        parent_style: str,
-        erase_bg: bool,
-        z_index: int | None,
-    ) -> None:
-        """记录输入区屏幕行范围后渲染内容。"""
-
-        self.last_y_range = (
-            write_position.ypos,
-            write_position.ypos + write_position.height,
-        )
-        self.content.write_to_screen(
-            screen,
-            mouse_handlers,
-            write_position,
-            parent_style,
-            erase_bg,
-            z_index,
-        )
 
 
 class SlashCommandCompleter(Completer):
@@ -485,7 +250,6 @@ class ChatScreen:
         thinking_level_provider: Callable[[], str] | None = None,
         info_line_provider: Callable[[], str] | None = None,
         copy_hint_provider: Callable[[], str] | None = None,
-        on_copy: Callable[[str], None] | None = None,
         startup_info_provider: Callable[[], list[list[tuple[str, str]]]] | None = None,
         inline_mode: bool = True,
     ) -> None:
@@ -502,7 +266,6 @@ class ChatScreen:
         self._thinking_level_provider = thinking_level_provider
         self._info_line_provider = info_line_provider
         self._copy_hint_provider = copy_hint_provider
-        self._on_copy = on_copy
         self._inline_mode = inline_mode
         self._inline_history = InlineHistory()
         self._history_flush_task: asyncio.Task | None = None
@@ -553,19 +316,7 @@ class ChatScreen:
         )
         # 输入区作为对话区内容末尾（对齐 Pi：随对话滚动，向上滚时下移出屏）
         self._build_input_container()
-        self._input_tracker = _TrackedContainer(self._input_container)
-        self.conversation_view = ConversationView(
-            self._conversation_content,
-            reserved_height=self._get_reserved_height,
-        )
-        # 对话区外包选区容器：拖选反色高亮、松开自动复制；
-        # 输入区区域点击/拖选放行给 TextArea，普通滚轮滚动对话区
-        self.selection_pane = SelectionPane(
-            self.conversation_view,
-            self.conversation_view.scroll_by,
-            on_copy=self._on_copy,
-            skip_region=self._input_region,
-        )
+        self._input_tracker = self._input_container
         # 两行式状态栏（对齐 Pi footer）：整行渲染，行一左工作区右复制提示、行二左信息右模型
         self._status_control = StatusControl(self._status_rows)
         self._layout = Layout(self._create_layout())
@@ -591,7 +342,7 @@ class ChatScreen:
             )
             self._publish_entry(0)
         # 无论有无 Logo 都同步布局：输入区是对话内容的一部分
-        self._sync_conversation_view()
+        self._sync_conversation()
         # 输入区在对话内容末尾，同步后焦点才可用
         self._layout.focus(self.input_area)
 
@@ -602,9 +353,7 @@ class ChatScreen:
             self._create_entry(role, content, style, committed=True)
         )
         self._publish_entry(len(self._conversation) - 1)
-        self._sync_conversation_view()
-        if role == "user":
-            self.conversation_view.scroll_to_bottom()
+        self._sync_conversation()
         self.application.invalidate()
         return len(self._conversation) - 1
 
@@ -616,9 +365,7 @@ class ChatScreen:
         self._conversation.append(
             self._create_entry(role, content, style, committed=False)
         )
-        self._sync_conversation_view()
-        if role == "user":
-            self.conversation_view.scroll_to_bottom()
+        self._sync_conversation()
         self.application.invalidate()
         return len(self._conversation) - 1
 
@@ -630,7 +377,7 @@ class ChatScreen:
             return False
         self._conversation[index] = replace(entry, committed=True)
         self._publish_entry(index)
-        self._sync_conversation_view()
+        self._sync_conversation()
         self.application.invalidate()
         return True
 
@@ -662,8 +409,7 @@ class ChatScreen:
             self._conversation[index] = replace(
                 self._conversation[index], history_published=True
             )
-        self._sync_conversation_view()
-        self.conversation_view.scroll_to_bottom()
+        self._sync_conversation()
         self.application.invalidate()
 
     async def flush_history(self) -> None:
@@ -675,7 +421,7 @@ class ChatScreen:
         """清空对话区展示内容（会话历史保留）。"""
 
         self._conversation.clear()
-        self._sync_conversation_view()
+        self._sync_conversation()
         self.application.invalidate()
 
     @staticmethod
@@ -761,7 +507,7 @@ class ChatScreen:
         if entry.style == style:
             return
         self._conversation[index] = replace(entry, style=style)
-        self._sync_conversation_view()
+        self._sync_conversation()
         self.application.invalidate()
 
     def set_tool_result(self, index: int, content: str) -> None:
@@ -842,7 +588,7 @@ class ChatScreen:
         """创建对话区、输入区和状态栏的垂直布局。"""
 
         self._conversation_container = ConditionalContainer(
-            self.selection_pane,
+            self._conversation_content,
             filter=Condition(lambda: True),
         )
         # 两行式状态栏（对齐 Pi footer）：整行渲染，无背景，右侧右对齐
@@ -910,11 +656,6 @@ class ChatScreen:
         # TextArea 自身已经限制了最大高度，直接放入对话内容 HSplit，
         # 避免用 Window 错误地包裹 Container，导致焦点控件无法被找到。
         self._input_window = self.input_area.window
-
-    def _input_region(self) -> tuple[int, int] | None:
-        """返回输入区最近一次渲染的屏幕行范围。"""
-
-        return self._input_tracker.last_y_range
 
     async def request_approval(
         self,
@@ -997,13 +738,6 @@ class ChatScreen:
             self._text_input = None
             self._layout.focus(self.input_area)
             self.application.invalidate()
-
-    def _get_reserved_height(self, width: int, max_height: int) -> int:
-        """计算对话视口下方的底部区域所需高度（输入区已在对话内容内）。"""
-
-        return self._bottom_container.preferred_height(
-            width, max_height
-        ).preferred
 
     def _has_logo(self) -> bool:
         """判断 Logo 是否有实际内容，空 Logo 不占用布局空间。"""
@@ -1208,7 +942,6 @@ class ChatScreen:
             """按 Codex 规则处理输入框上移与历史恢复。"""
 
             buffer = event.current_buffer
-            self.conversation_view.scroll_to_bottom()
             if self._input_history_cursor is not None or not buffer.text:
                 self._navigate_input_history(-1)
             else:
@@ -1224,7 +957,6 @@ class ChatScreen:
             """按 Codex 规则处理输入框下移与历史恢复。"""
 
             buffer = event.current_buffer
-            self.conversation_view.scroll_to_bottom()
             if self._input_history_cursor is not None:
                 self._navigate_input_history(1)
             else:
@@ -1285,20 +1017,6 @@ class ChatScreen:
             """取消当前请求，输入恢复由请求任务负责。"""
 
             self.cancel_request()
-
-        @key_bindings.add("pageup", filter=~embedded_active)
-        def page_up(event) -> None:
-            """向上翻页滚动对话历史。"""
-
-            self.conversation_view.scroll_page(-1)
-            self.application.invalidate()
-
-        @key_bindings.add("pagedown", filter=~embedded_active)
-        def page_down(event) -> None:
-            """向下翻页滚动对话历史。"""
-
-            self.conversation_view.scroll_page(1)
-            self.application.invalidate()
 
         return key_bindings
 
@@ -1467,7 +1185,7 @@ class ChatScreen:
         except Exception:
             return 0
 
-    def _sync_conversation_view(self) -> None:
+    def _sync_conversation(self) -> None:
         """将对话数据同步到带样式的可滚动视图。"""
 
         children: list[Container] = []
@@ -1526,10 +1244,6 @@ class ChatScreen:
         if not self._inline_mode:
             children.append(self._input_tracker)
         self._conversation_content.children = children
-
-        for child in children:
-            if hasattr(child.content, "mouse_handler"):
-                child.content.mouse_handler = self.conversation_view.handle_mouse_event
 
     def _status_rows(self) -> list[tuple[str, str]]:
         """返回状态栏两行内容（左侧、右侧），供 StatusControl 整行右对齐渲染。"""
@@ -1615,7 +1329,7 @@ class ChatScreen:
             return
         if self._working_entry_index < len(self._conversation):
             self._conversation.pop(self._working_entry_index)
-            self._sync_conversation_view()
+            self._sync_conversation()
         self._working_entry_index = None
 
     def _working_text(self) -> str:

@@ -18,20 +18,6 @@ class FakeApplication:
         """不启动真实终端"""
 
 
-class FakeConversationView:
-    """模拟对话滚动视图"""
-
-    def __init__(self) -> None:
-        """初始化滚动状态"""
-
-        self.scrolled_to_bottom = False
-
-    def scroll_to_bottom(self) -> None:
-        """记录滚动到底部"""
-
-        self.scrolled_to_bottom = True
-
-
 class FakeScreen:
     """记录恢复时的历史展示内容"""
 
@@ -42,7 +28,6 @@ class FakeScreen:
 
         self.entries: list[tuple[str, str]] = []
         self.history_batches: list[list[tuple[str, str]]] = []
-        self.conversation_view = FakeConversationView()
         self.application = FakeApplication()
         FakeScreen.last = self
 
@@ -60,7 +45,6 @@ class FakeScreen:
 
         self.history_batches.append(entries)
         self.entries.extend(entries)
-        self.conversation_view.scroll_to_bottom()
 
     async def request_approval(self, definition, tool_call, allow_session=True) -> ApprovalResult:
         """模拟界面审批回调"""
@@ -83,7 +67,7 @@ async def test_run_chat_renders_restored_history(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """测试恢复会话时历史消息会立即展示并滚动到底部"""
+    """测试恢复会话时历史消息会立即展示"""
 
     session = Session(tmp_path)
     session.add_user_message("历史问题")
@@ -107,7 +91,6 @@ async def test_run_chat_renders_restored_history(
     assert FakeScreen.last.history_batches == [
         [("user", "历史问题"), ("assistant", "历史回答")]
     ]
-    assert FakeScreen.last.conversation_view.scrolled_to_bottom
     assert exit_info.session_id == session.session_id
     assert exit_info.usage_totals is None
 

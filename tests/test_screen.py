@@ -254,19 +254,6 @@ def test_tool_diff_result_without_diff_keeps_summary(tmp_path: Path) -> None:
     assert _render_tool_diff("file written", "") == [("", "file written")]
 
 
-def test_chat_screen_uses_scrollable_conversation_view(
-    tmp_path: Path,
-) -> None:
-    """测试对话区使用支持滚动的内容视图。"""
-
-    screen = _create_screen(tmp_path)
-    index = screen.add_entry("assistant", "第一段回复")
-    screen.append_to_entry(index, "\n第二段回复")
-
-    assert screen.conversation_view.show_scrollbar() is False
-    assert screen._render_entry(index) == "第一段回复\n第二段回复"
-
-
 def test_streaming_entry_update_does_not_rebuild_conversation_layout(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -278,7 +265,7 @@ def test_streaming_entry_update_does_not_rebuild_conversation_layout(
     children = screen._conversation_content.children
     control = children[index].content
     sync_calls = 0
-    original_sync = screen._sync_conversation_view
+    original_sync = screen._sync_conversation
 
     def track_sync() -> None:
         """记录不应发生的全量布局同步。"""
@@ -287,7 +274,7 @@ def test_streaming_entry_update_does_not_rebuild_conversation_layout(
         sync_calls += 1
         original_sync()
 
-    monkeypatch.setattr(screen, "_sync_conversation_view", track_sync)
+    monkeypatch.setattr(screen, "_sync_conversation", track_sync)
 
     screen.append_to_entry(index, "第二段")
     screen.append_to_entry(index, "第三段")
@@ -305,7 +292,7 @@ def test_adding_history_entries_syncs_conversation_layout_once(
 
     screen = _create_screen(tmp_path)
     sync_calls = 0
-    original_sync = screen._sync_conversation_view
+    original_sync = screen._sync_conversation
 
     def track_sync() -> None:
         """记录批量恢复触发的布局同步次数。"""
@@ -314,7 +301,7 @@ def test_adding_history_entries_syncs_conversation_layout_once(
         sync_calls += 1
         original_sync()
 
-    monkeypatch.setattr(screen, "_sync_conversation_view", track_sync)
+    monkeypatch.setattr(screen, "_sync_conversation", track_sync)
 
     screen.add_history_entries(
         [("user", "历史问题"), ("assistant", "历史回答"), ("tool", "工具结果")]
@@ -327,7 +314,6 @@ def test_adding_history_entries_syncs_conversation_layout_once(
         "历史回答",
         "工具结果",
     ]
-    assert screen.conversation_view.follow_output
 
 
 def test_chat_screen_uses_natural_height_for_conversation_and_input(
@@ -337,7 +323,6 @@ def test_chat_screen_uses_natural_height_for_conversation_and_input(
 
     screen = _create_screen(tmp_path)
 
-    assert screen.conversation_view.height is None
     assert screen.input_area.window.dont_extend_height() is True
     assert screen.input_area.window.height.max == 8
 
@@ -707,29 +692,6 @@ def test_input_arrows_restore_history_and_move_multiline_cursor(tmp_path: Path) 
     assert screen.input_area.buffer.document.cursor_position_row == 1
 
 
-def test_input_arrows_restore_conversation_bottom(tmp_path: Path) -> None:
-    """测试输入方向键会让滚动中的对话区恢复到底部。"""
-
-    screen = _create_screen(tmp_path)
-    screen.input_area.text = "输入内容"
-    screen.conversation_view.scroll_by(1)
-
-    class FakeEvent:
-        """提供输入方向键处理器所需的最小事件对象。"""
-
-        current_buffer = screen.input_area.buffer
-
-    binding = next(
-        binding
-        for binding in screen._key_bindings.bindings
-        if _binding_key(binding) == "up"
-        and binding.handler.__name__ == "move_input_up"
-    )
-    binding.handler(FakeEvent())
-
-    assert screen.conversation_view.follow_output is True
-
-
 def test_chat_screen_accepts_logo_provider(tmp_path: Path) -> None:
     """测试 Logo 接口可以向会话顶部提供内容。"""
 
@@ -745,41 +707,6 @@ def test_chat_screen_accepts_logo_provider(tmp_path: Path) -> None:
     screen = ChatScreen(status, logo_provider=TestLogo())
 
     assert to_plain_text(screen._render_logo()).lstrip() == "epsilon"
-
-
-def test_chat_screen_page_keys_scroll_conversation(tmp_path: Path) -> None:
-    """测试 PageUp/PageDown 会按页滚动对话历史。"""
-
-    screen = ChatScreen(create_status_info("test-model", "暂不可查询", tmp_path))
-
-    class FakeView:
-        """记录翻页调用的替身滚动容器。"""
-
-        def __init__(self) -> None:
-            self.calls: list[int] = []
-
-        def scroll_page(self, direction: int) -> None:
-            self.calls.append(direction)
-
-    screen.conversation_view = FakeView()
-
-    class FakeEvent:
-        """提供翻页按键处理器所需的最小应用对象。"""
-
-        app = None
-
-    def invoke(key: str) -> None:
-        binding = next(
-            binding
-            for binding in screen._key_bindings.bindings
-            if _binding_key(binding) == key and binding.filter()
-        )
-        binding.handler(FakeEvent())
-
-    invoke("pageup")
-    invoke("pagedown")
-
-    assert screen.conversation_view.calls == [-1, 1]
 
 
 @pytest.mark.asyncio
@@ -1121,62 +1048,6 @@ def test_status_copy_hint_provider(tmp_path: Path) -> None:
     assert row1_right == "Copied 42 chars to clipboard"
 
 
-def test_selection_pane_ctrl_wheel_is_left_to_terminal(
-    tmp_path: Path,
-) -> None:
-    """测试 Ctrl+滚轮不进入应用逻辑，普通滚轮仍然滚动。"""
-
-    from prompt_toolkit.layout.screen import Point
-    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType, MouseModifier
-
-    from core.screen import SelectionPane
-
-    scrolled: list[int] = []
-
-    class _Content:
-        """被包裹的最小内容容器。"""
-
-        def preferred_width(self, max_available_width):
-            from prompt_toolkit.layout.dimension import Dimension
-            return Dimension(weight=1)
-
-        def preferred_height(self, width, max_available_height):
-            from prompt_toolkit.layout.dimension import Dimension
-            return Dimension(weight=1)
-
-        def reset(self) -> None:
-            return None
-
-        def get_children(self):
-            return []
-
-        def write_to_screen(self, screen, mouse_handlers, write_position, parent_style, erase_bg, z_index):
-            return None
-
-    pane = SelectionPane(
-        _Content(),
-        scroll_handler=scrolled.append,
-    )
-
-    ctrl_wheel_up = MouseEvent(
-        position=Point(0, 0),
-        event_type=MouseEventType.SCROLL_UP,
-        button=MouseButton.NONE,
-        modifiers=frozenset([MouseModifier.CONTROL]),
-    )
-    assert pane._mouse_handler(ctrl_wheel_up) is NotImplemented
-    assert scrolled == []
-
-    plain_wheel_down = MouseEvent(
-        position=Point(0, 0),
-        event_type=MouseEventType.SCROLL_DOWN,
-        button=MouseButton.NONE,
-        modifiers=frozenset(),
-    )
-    pane._mouse_handler(plain_wheel_down)
-
-    assert scrolled == [3]
-
 def test_user_message_renders_markdown(tmp_path: Path) -> None:
     """测试用户消息中的加粗等 Markdown 标记被渲染。"""
 
@@ -1335,46 +1206,3 @@ def test_tool_result_short_output_no_folding(tmp_path: Path) -> None:
     fragments = screen._conversation[index].control.text
     assert ("class:tool-diff-del", "-old") in fragments
     assert ("class:tool-diff-add", "+new") in fragments
-
-
-def test_input_area_is_last_conversation_child(tmp_path: Path) -> None:
-    """测试输入区作为对话内容末尾，参与滚动。"""
-
-    screen = _create_screen(tmp_path)
-
-    children = screen._conversation_content.children
-
-    assert children[-1] is screen._input_tracker
-
-
-def test_selection_pane_releases_click_on_input_region(tmp_path: Path) -> None:
-    """测试输入区区域的鼠标点击放行给 TextArea。"""
-
-    from prompt_toolkit.layout.screen import Point
-    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
-
-    screen = _create_screen(tmp_path)
-    screen._input_tracker.last_y_range = (10, 13)
-    scrolled: list[int] = []
-    screen.selection_pane._scroll_handler = scrolled.append
-
-    click_in_input = MouseEvent(
-        position=Point(5, 11),
-        event_type=MouseEventType.MOUSE_DOWN,
-        button=MouseButton.LEFT,
-        modifiers=frozenset(),
-    )
-    result = screen.selection_pane._mouse_handler(click_in_input)
-
-    assert result is NotImplemented
-
-    # 输入区滚轮仍滚动对话区
-    wheel_in_input = MouseEvent(
-        position=Point(5, 11),
-        event_type=MouseEventType.SCROLL_DOWN,
-        button=MouseButton.NONE,
-        modifiers=frozenset(),
-    )
-    screen.selection_pane._mouse_handler(wheel_in_input)
-
-    assert scrolled == [3]

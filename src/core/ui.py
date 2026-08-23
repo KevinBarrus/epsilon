@@ -37,7 +37,6 @@ from .commands import (
     thinking_toggle_command_slash,
 )
 from .balance import UNAVAILABLE_BALANCE, BalanceProvider
-from .clipboard import copy_text_to_clipboard
 from .config import Settings
 from .cost import UsageTotals, cache_hit_rate, format_tokens
 from .setup import infer_provider
@@ -113,17 +112,6 @@ async def run_chat(
     usage_totals = UsageTotals()
     latest_usage: UsageEvent | None = None
     copy_hint = ""
-
-    async def flash_copy_hint(text: str) -> None:
-        """写入系统剪贴板并显示复制提示 5 秒后自动消失。"""
-
-        nonlocal copy_hint
-        await asyncio.to_thread(copy_text_to_clipboard, text)
-        copy_hint = f"Copied {len(text)} chars to clipboard"
-        screen.application.invalidate()
-        await asyncio.sleep(5)
-        copy_hint = ""
-        screen.application.invalidate()
 
     async def refresh_balance() -> None:
         """每轮对话后刷新余额，失败保留旧值。"""
@@ -382,7 +370,6 @@ async def run_chat(
         thinking_level_provider=lambda: agent_loop.thinking_level,
         info_line_provider=_render_info_line,
         copy_hint_provider=lambda: copy_hint,
-        on_copy=lambda text: asyncio.create_task(flash_copy_hint(text)),
         startup_info_provider=_render_startup_info,
     )
     tool_manager = ToolManager(
