@@ -12,7 +12,12 @@ from prompt_toolkit.layout.containers import VerticalAlign
 from prompt_toolkit.layout.screen import WritePosition
 from prompt_toolkit.output import DummyOutput
 
-from core.screen import ChatScreen, DraftState, SlashCommandCompleter
+from core.screen import (
+    ChatScreen,
+    DraftState,
+    SlashCommandCompleter,
+    _STREAM_RENDER_INTERVAL_SECONDS,
+)
 from core.status import create_status_info
 from core.model import ToolCall
 from core.tools import ApprovalDecision, ToolDefinition
@@ -172,6 +177,44 @@ async def test_inline_screen_publishes_only_stable_entries(
         screen._input_tracker,
         screen._status_window,
     ]
+
+
+@pytest.mark.asyncio
+async def test_running_screen_batches_assistant_stream_updates(
+    tmp_path: Path,
+) -> None:
+    """测试高频助手增量合并后再刷新 Markdown。"""
+
+    screen = _create_screen(tmp_path)
+    screen.application._is_running = True
+    index = screen.add_active_entry("assistant", "")
+
+    screen.append_to_entry(index, "```python\nprint")
+    screen.append_to_entry(index, "(1)")
+
+    assert screen._conversation[index].control.text == []
+    await asyncio.sleep(_STREAM_RENDER_INTERVAL_SECONDS * 2)
+
+    assert ("class:md-code-block", "print(1)") in screen._conversation[index].control.text
+
+
+@pytest.mark.asyncio
+async def test_running_screen_finalizes_assistant_highlight_in_background(
+    tmp_path: Path,
+) -> None:
+    """测试助手结束后异步高亮并再写入稳定历史。"""
+
+    screen = _create_screen(tmp_path)
+    screen.application._is_running = True
+    index = screen.add_active_entry("assistant", "```python\nprint(1)\n```")
+
+    assert screen.commit_entry(index) is True
+    assert screen._conversation[index].finalizing is True
+    assert screen._conversation[index].committed is False
+    await screen.flush_history()
+
+    assert screen._conversation[index].committed is True
+    assert ("class:md-tok-builtin", "print") in screen._conversation[index].control.text
 
 
 def test_inline_clear_keeps_stable_entries_out_of_active_view(tmp_path: Path) -> None:

@@ -106,6 +106,8 @@ ConversationRole = Literal["user", "assistant", "tool", "logo", "thinking", "wor
 _WORKING_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 # 工具输出折叠阈值（超过时显示省略提示，对齐 Pi）
 _MAX_TOOL_LINES = 8
+# 模型高频返回增量时，界面最多每秒重建 30 次 Markdown
+_STREAM_RENDER_INTERVAL_SECONDS = 1 / 30
 
 
 class SlashCommandCompleter(Completer):
@@ -227,6 +229,7 @@ class ConversationEntry:
     style: str = ""
     committed: bool = True
     history_published: bool = False
+    finalizing: bool = False
 
 
 @dataclass(frozen=True)
@@ -273,6 +276,9 @@ class ChatScreen:
         self._inline_mode = inline_mode
         self._last_viewport_size: tuple[int, int] | None = None
         self._history_flush_task: asyncio.Task | None = None
+        self._pending_stream_entries: set[int] = set()
+        self._stream_render_task: asyncio.Task[None] | None = None
+        self._finalize_tasks: set[asyncio.Task[None]] = set()
         self._request_active = False
         self._request_task: asyncio.Task[None] | None = None
         self._submitted_draft: DraftState | None = None
@@ -385,6 +391,24 @@ class ChatScreen:
         """提交活动条目，重复提交不产生新的历史输出。"""
 
         entry = self._conversation[index]
+        if entry.committed or entry.finalizing:
+            return False
+        if entry.role == "assistant" and getattr(self.application, "_is_running", False):
+            self._pending_stream_entries.discard(index)
+            self._set_entry_content(index, entry.content, streaming=True)
+            self._conversation[index] = replace(entry, finalizing=True)
+            task = asyncio.create_task(
+                self._finalize_assistant_entry(entry.control, entry.content)
+            )
+            self._finalize_tasks.add(task)
+            task.add_done_callback(self._finalize_tasks.discard)
+            return True
+        return self._commit_entry_now(index)
+
+    def _commit_entry_now(self, index: int) -> bool:
+        """同步提交条目，供非助手条目和未运行的界面使用。"""
+
+        entry = self._conversation[index]
         if entry.committed:
             return False
         self._conversation[index] = replace(entry, committed=True)
@@ -431,6 +455,8 @@ class ChatScreen:
     async def flush_history(self) -> None:
         """输出启动阶段积累的稳定历史。"""
 
+        if self._finalize_tasks:
+            await asyncio.gather(*self._finalize_tasks, return_exceptions=True)
         await self._inline_history.flush()
 
     def clear_conversation(self) -> None:
@@ -464,7 +490,11 @@ class ChatScreen:
             committed,
         )
 
-    def _publish_entry(self, index: int) -> None:
+    def _publish_entry(
+        self,
+        index: int,
+        fragments: StyleAndTextTuples | None = None,
+    ) -> None:
         """把稳定条目加入终端历史队列，并安排运行中的界面刷新。"""
 
         if not self._inline_mode:
@@ -473,7 +503,9 @@ class ChatScreen:
         if not entry.committed or entry.history_published:
             return
         self._conversation[index] = replace(entry, history_published=True)
-        self._inline_history.add(self._history_fragments(index))
+        self._inline_history.add(
+            fragments if fragments is not None else self._history_fragments(index)
+        )
         if getattr(self.application, "_is_running", False):
             if self._history_flush_task is None or self._history_flush_task.done():
                 self._history_flush_task = asyncio.create_task(self._flush_history())
@@ -587,7 +619,68 @@ class ChatScreen:
         """向指定的对话条目追加流式文本。"""
 
         entry = self._conversation[index]
-        self._set_entry_content(index, entry.content + content)
+        self._conversation[index] = replace(entry, content=entry.content + content)
+        if (
+            entry.role == "assistant"
+            and not entry.committed
+            and not entry.finalizing
+            and getattr(self.application, "_is_running", False)
+        ):
+            self._pending_stream_entries.add(index)
+            if self._stream_render_task is None or self._stream_render_task.done():
+                self._stream_render_task = asyncio.create_task(
+                    self._render_stream_entries()
+                )
+        else:
+            self._set_entry_content(index, self._conversation[index].content)
+        self.application.invalidate()
+
+    async def _render_stream_entries(self) -> None:
+        """合并短时间内的模型增量，只重建一次活动回复。"""
+
+        try:
+            await asyncio.sleep(_STREAM_RENDER_INTERVAL_SECONDS)
+            pending = self._pending_stream_entries
+            self._pending_stream_entries = set()
+            for index in pending:
+                if index >= len(self._conversation):
+                    continue
+                entry = self._conversation[index]
+                if entry.role == "assistant" and not entry.committed and not entry.finalizing:
+                    self._set_entry_content(index, entry.content, streaming=True)
+            self.application.invalidate()
+        finally:
+            self._stream_render_task = None
+
+    async def _finalize_assistant_entry(
+        self,
+        control: FormattedTextControl,
+        content: str,
+    ) -> None:
+        """在后台完成语法高亮，再提交已结束的助手回复。"""
+
+        try:
+            fragments = await asyncio.to_thread(_render_assistant_content, content)
+        except Exception:
+            fragments = _render_assistant_content(content, streaming=True)
+        index = next(
+            (
+                current_index
+                for current_index, entry in enumerate(self._conversation)
+                if entry.control is control
+            ),
+            None,
+        )
+        if index is None:
+            return
+        entry = self._conversation[index]
+        if not entry.finalizing or entry.content != content:
+            return
+        self._conversation[index] = replace(entry, committed=True, finalizing=False)
+        entry.control.text = fragments
+        entry.control.reset()
+        self._publish_entry(index, fragments)
+        self._sync_conversation()
         self.application.invalidate()
 
     def set_entry_content(self, index: int, content: str) -> None:
@@ -657,14 +750,20 @@ class ChatScreen:
         summary, _, diff = content.partition("\n")
         return _render_tool_diff(summary, diff)
 
-    def _set_entry_content(self, index: int, content: str) -> None:
+    def _set_entry_content(
+        self,
+        index: int,
+        content: str,
+        *,
+        streaming: bool | None = None,
+    ) -> None:
         """更新已有条目的内容和控件，不重建整个对话布局。"""
 
         entry = self._conversation[index]
         entry.control.text = self._control_text(
             entry.role,
             content,
-            streaming=not entry.committed,
+            streaming=not entry.committed if streaming is None else streaming,
         )
         entry.control.reset()
         self._conversation[index] = replace(entry, content=content)
