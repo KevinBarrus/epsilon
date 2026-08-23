@@ -128,7 +128,12 @@ def _required_string(record: dict[str, object], key: str) -> str:
 def _evaluation_type(value: object) -> str:
     """读取兼容旧结果的评测类型。"""
 
-    if value not in {"core-regression", "real-task", "online-special"}:
+    if value not in {
+        "core-regression",
+        "real-task",
+        "online-special",
+        "code-correctness",
+    }:
         raise ValueError("评测结果字段无效：evaluation_type")
     return value
 

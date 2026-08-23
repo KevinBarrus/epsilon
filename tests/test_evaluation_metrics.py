@@ -103,6 +103,7 @@ def test_results_can_round_trip_through_jsonl(tmp_path: Path) -> None:
     expected = EvaluationResult(
         scenario=expected.scenario,
         duration_ms=expected.duration_ms,
+        evaluation_type="code-correctness",
         run_id="run-1",
         repetition=2,
         model_requests=expected.model_requests,
