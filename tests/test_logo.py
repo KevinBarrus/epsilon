@@ -14,6 +14,7 @@ def test_default_logo_renders_ascii_art() -> None:
 
     assert text.isascii()
     assert "EPSILON" in text
+    assert len(text.splitlines()) == 6
 
 
 def test_default_logo_uses_accent_style() -> None:

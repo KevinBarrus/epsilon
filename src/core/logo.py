@@ -30,4 +30,4 @@ class DefaultLogoProvider:
     def render(self) -> AnyFormattedText:
         """渲染 ASCII Logo，后续可替换为专属 Logo。"""
 
-        return [("class:logo-accent", line) for line in _LOGO_ART]
+        return [("class:logo-accent", "\n".join(_LOGO_ART))]

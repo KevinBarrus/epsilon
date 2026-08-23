@@ -7,6 +7,7 @@ from prompt_toolkit.formatted_text import AnyFormattedText, to_plain_text
 from prompt_toolkit.layout import Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
+from prompt_toolkit.layout.screen import Point
 from wcwidth import wcswidth
 
 # name 与 description 之间的最小间距（对齐 Pi PRIMARY_COLUMN_GAP）
@@ -30,7 +31,12 @@ class CommandPicker:
         self._on_apply = on_apply
         self._cursor = 0
         self.window = Window(
-            content=FormattedTextControl(self._render, focusable=True),
+            content=FormattedTextControl(
+                self._render,
+                focusable=True,
+                show_cursor=False,
+                get_cursor_position=self._cursor_position,
+            ),
             height=Dimension(min=1, preferred=self._VISIBLE_ROWS),
             dont_extend_height=True,
             wrap_lines=True,
@@ -43,6 +49,7 @@ class CommandPicker:
         if not self._completions:
             return
         self._cursor = max(0, min(len(self._completions) - 1, self._cursor + offset))
+        self.window.content.reset()
         self._follow_cursor()
 
     def update_completions(self, completions: list[Completion]) -> None:
@@ -62,6 +69,7 @@ class CommandPicker:
                 break
         else:
             self._cursor = min(self._cursor, len(completions) - 1)
+        self.window.content.reset()
         self._follow_cursor()
 
     @property
@@ -90,6 +98,14 @@ class CommandPicker:
             scroll = item_end - self._VISIBLE_ROWS
         self.window.vertical_scroll = max(0, min(max_scroll, scroll))
 
+    def _cursor_position(self) -> Point | None:
+        """返回选中项的实际渲染行，让 Window 保持该项可见。"""
+
+        ranges = self._line_ranges()
+        if not ranges:
+            return None
+        return Point(x=0, y=ranges[self._cursor][0])
+
     def _line_ranges(self) -> list[tuple[int, int]]:
         """返回每个候选项对应的实际渲染行范围。"""
 
@@ -106,6 +122,7 @@ class CommandPicker:
         """鼠标点击某行：选中该项并应用补全。"""
 
         self._cursor = index
+        self.window.content.reset()
         self._follow_cursor()
         if self._on_apply is not None and self._completions:
             self._on_apply(self._completions[index])

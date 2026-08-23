@@ -134,6 +134,32 @@ def test_command_picker_scroll_uses_rendered_lines() -> None:
     assert end <= scroll + CommandPicker._VISIBLE_ROWS
 
 
+def test_command_picker_keeps_scroll_after_window_render() -> None:
+    """测试实际写屏后选中项滚动位置不会被 Window 重置。"""
+
+    from prompt_toolkit.layout.mouse_handlers import MouseHandlers
+    from prompt_toolkit.layout.screen import Screen, WritePosition
+
+    picker = CommandPicker(
+        [Completion(f"cmd-{index}", display_meta="description") for index in range(20)]
+    )
+    picker.move(10)
+    picker.window.write_to_screen(
+        Screen(),
+        MouseHandlers(),
+        WritePosition(0, 0, 80, CommandPicker._VISIBLE_ROWS),
+        "",
+        False,
+        0,
+    )
+
+    start, end = picker._line_ranges()[10]
+    scroll = picker.window.vertical_scroll
+    assert start >= scroll
+    assert end <= scroll + CommandPicker._VISIBLE_ROWS
+    assert scroll > 0
+
+
 @pytest.mark.asyncio
 async def test_command_picker_click_applies_completion() -> None:
     """测试鼠标点击某行应用对应补全。"""
