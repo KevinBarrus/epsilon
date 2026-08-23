@@ -22,7 +22,7 @@ def _create_screen(tmp_path: Path) -> ChatScreen:
     """创建测试用的全屏界面。"""
 
     status = create_status_info("test-model", "暂不可查询", tmp_path)
-    return ChatScreen(status)
+    return ChatScreen(status, inline_mode=False)
 
 
 def _approval_definition() -> ToolDefinition:
@@ -135,6 +135,38 @@ def test_chat_screen_appends_conversation_entries(tmp_path: Path) -> None:
     index = screen.add_entry("assistant", "测试回复")
 
     assert screen._render_entry(index) == "测试回复"
+
+
+@pytest.mark.asyncio
+async def test_inline_screen_publishes_only_stable_entries(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """测试行内界面只把稳定条目输出到终端主屏幕。"""
+
+    class EmptyLogo:
+        """提供空 Logo，避免干扰历史输出断言。"""
+
+        def render(self) -> str:
+            """返回空 Logo。"""
+
+            return ""
+
+    screen = ChatScreen(
+        create_status_info("test-model", "n/a", tmp_path),
+        logo_provider=EmptyLogo(),
+    )
+    screen.add_entry("user", "稳定消息")
+    active_index = screen.add_active_entry("assistant", "活动回复")
+
+    assert [entry.role for entry in screen.active_entries()] == ["assistant"]
+    await screen.flush_history()
+    assert capsys.readouterr().out == "稳定消息\n"
+
+    screen.commit_entry(active_index)
+    await screen.flush_history()
+    assert capsys.readouterr().out == "活动回复\n"
+    assert len(screen._conversation_content.children) == 1
 
 
 def test_chat_screen_commits_active_entry_only_once(tmp_path: Path) -> None:

@@ -38,6 +38,7 @@ from prompt_toolkit.widgets import TextArea
 from wcwidth import wcswidth
 
 from .clipboard import Osc52Clipboard, copy_text_to_clipboard
+from .inline_history import InlineHistory
 from .logo import DefaultLogoProvider, LogoProvider
 from .markdown import render_markdown
 from .status import format_cwd_for_footer
@@ -486,6 +487,7 @@ class ConversationEntry:
     control: FormattedTextControl
     style: str = ""
     committed: bool = True
+    history_published: bool = False
 
 
 @dataclass(frozen=True)
@@ -515,6 +517,7 @@ class ChatScreen:
         copy_hint_provider: Callable[[], str] | None = None,
         on_copy: Callable[[str], None] | None = None,
         startup_info_provider: Callable[[], list[list[tuple[str, str]]]] | None = None,
+        inline_mode: bool = True,
     ) -> None:
         """创建对话区、输入区和两行式状态栏。"""
 
@@ -530,6 +533,9 @@ class ChatScreen:
         self._info_line_provider = info_line_provider
         self._copy_hint_provider = copy_hint_provider
         self._on_copy = on_copy
+        self._inline_mode = inline_mode
+        self._inline_history = InlineHistory()
+        self._history_flush_task: asyncio.Task | None = None
         self._request_active = False
         self._request_task: asyncio.Task[None] | None = None
         self._submitted_draft: DraftState | None = None
@@ -604,7 +610,7 @@ class ChatScreen:
             layout=self._layout,
             key_bindings=self._key_bindings,
             style=style or create_ui_style(),
-            full_screen=True,
+            full_screen=not inline_mode,
             mouse_support=True,
             cursor=CursorShape.BLINKING_BEAM,
             clipboard=Osc52Clipboard(),
@@ -619,6 +625,7 @@ class ChatScreen:
                     FormattedTextControl(self._render_logo, focusable=False),
                 )
             )
+            self._publish_entry(0)
         # 无论有无 Logo 都同步布局：输入区是对话内容的一部分
         self._sync_conversation_view()
         # 输入区在对话内容末尾，同步后焦点才可用
@@ -630,6 +637,7 @@ class ChatScreen:
         self._conversation.append(
             self._create_entry(role, content, style, committed=True)
         )
+        self._publish_entry(len(self._conversation) - 1)
         self._sync_conversation_view()
         if role == "user":
             self.conversation_view.scroll_to_bottom()
@@ -657,6 +665,9 @@ class ChatScreen:
         if entry.committed:
             return False
         self._conversation[index] = replace(entry, committed=True)
+        self._publish_entry(index)
+        self._sync_conversation_view()
+        self.application.invalidate()
         return True
 
     def committed_entries(self) -> list[ConversationEntry]:
@@ -681,9 +692,20 @@ class ChatScreen:
             self._create_entry(role, content, committed=True)
             for role, content in entries
         )
+        start = len(self._conversation) - len(entries)
+        self._inline_history.extend(self._history_text(index) for index in range(start, len(self._conversation)))
+        for index in range(start, len(self._conversation)):
+            self._conversation[index] = replace(
+                self._conversation[index], history_published=True
+            )
         self._sync_conversation_view()
         self.conversation_view.scroll_to_bottom()
         self.application.invalidate()
+
+    async def flush_history(self) -> None:
+        """输出启动阶段积累的稳定历史。"""
+
+        await self._inline_history.flush()
 
     def clear_conversation(self) -> None:
         """清空对话区展示内容（会话历史保留）。"""
@@ -709,6 +731,40 @@ class ChatScreen:
             style,
             committed,
         )
+
+    def _publish_entry(self, index: int) -> None:
+        """把稳定条目加入终端历史队列，并安排运行中的界面刷新。"""
+
+        if not self._inline_mode:
+            return
+        entry = self._conversation[index]
+        if not entry.committed or entry.history_published:
+            return
+        self._conversation[index] = replace(entry, history_published=True)
+        self._inline_history.add(self._history_text(index))
+        if getattr(self.application, "_is_running", False):
+            if self._history_flush_task is None or self._history_flush_task.done():
+                self._history_flush_task = asyncio.create_task(self._flush_history())
+
+    async def _flush_history(self) -> None:
+        """刷新稳定历史并清理刷新任务引用。"""
+
+        try:
+            await self._inline_history.flush()
+        finally:
+            self._history_flush_task = None
+
+    def _history_text(self, index: int) -> str:
+        """把稳定条目转换为终端回滚区使用的纯文本。"""
+
+        entry = self._conversation[index]
+        if entry.role == "logo":
+            return to_plain_text(self._render_logo())
+        if entry.role == "assistant":
+            return to_plain_text(_render_assistant_content(entry.content))
+        if entry.role == "tool":
+            return to_plain_text(self._tool_entry_fragments(entry.content, False))
+        return entry.content
 
     @staticmethod
     def _control_text(role: ConversationRole, content: str) -> object:
@@ -1457,7 +1513,12 @@ class ChatScreen:
         """将对话数据同步到带样式的可滚动视图。"""
 
         children: list[Container] = []
-        for index, entry in enumerate(self._conversation):
+        visible_entries = (
+            self._conversation
+            if not self._inline_mode
+            else [entry for entry in self._conversation if not entry.committed]
+        )
+        for index, entry in enumerate(visible_entries):
             if entry.role == "user":
                 # 用户消息文本自带上下留白行，单窗口整体灰色背景（n 行内容展示 n+2 行全灰）
                 children.append(

@@ -424,6 +424,9 @@ async def run_chat(
     screen.add_history_entries(
         [(message.role, message.content) for message in history]
     )
+    flush_history = getattr(screen, "flush_history", None)
+    if flush_history is not None:
+        await flush_history()
     try:
         await screen.application.run_async()
     finally:
