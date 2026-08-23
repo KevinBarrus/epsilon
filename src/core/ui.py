@@ -258,6 +258,14 @@ async def run_chat(
                 usage_totals.add(event, client_holder.settings.price)
                 screen.application.invalidate()
 
+        async def commit_response() -> None:
+            """提交回复并等待完整内容写入终端历史。"""
+
+            screen.commit_entry(response_index)
+            flush_history = getattr(screen, "flush_history", None)
+            if flush_history is not None:
+                await flush_history()
+
         try:
             # 由 Agent Loop 负责模型与工具循环，界面只消费文本事件
             result = await agent_loop.run(
@@ -288,7 +296,7 @@ async def run_chat(
                     )
                 )
             screen.append_to_entry(response_index, "(cancelled)")
-            screen.commit_entry(response_index)
+            await commit_response()
             raise
         except (AgentError, AgentLoopError) as exc:
             # 模型请求失败时保留部分回复和结构化错误状态
@@ -304,7 +312,7 @@ async def run_chat(
                 )
             )
             screen.append_to_entry(response_index, f"Error: {exc}")
-            screen.commit_entry(response_index)
+            await commit_response()
         else:
             # 流式响应完成后，按 AgentLoop 返回顺序保存本轮新增消息
             _persist_new_messages(session, result.new_messages)
@@ -317,7 +325,7 @@ async def run_chat(
                 )
             _update_persistence_status(screen, session)
             await refresh_balance()
-            screen.commit_entry(response_index)
+            await commit_response()
         finally:
             # 本轮请求结束（成功/失败/取消），清除 working 提示
             screen.set_working(None)

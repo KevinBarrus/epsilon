@@ -177,6 +177,7 @@ async def test_inline_screen_publishes_only_stable_entries(
         screen._input_tracker,
         screen._status_window,
     ]
+    assert screen._conversation_gap in screen.application.layout.container.children
 
 
 @pytest.mark.asyncio

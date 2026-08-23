@@ -420,6 +420,7 @@ class _ThinkingScreen:
         self.application = self
         self.entries: list[tuple[str, str]] = []
         self.working_messages: list[str | None] = []
+        self.events: list[str] = []
         _ThinkingScreen.instances.append(self)
 
     def add_entry(self, role: str, content: str, style: str = "") -> int:
@@ -430,7 +431,11 @@ class _ThinkingScreen:
         return self.add_entry(role, content, style)
 
     def commit_entry(self, index: int) -> bool:
+        self.events.append("commit")
         return True
+
+    async def flush_history(self) -> None:
+        self.events.append("flush")
 
     def add_history_entries(self, entries) -> None:
         self.entries.extend(entries)
@@ -483,6 +488,7 @@ async def test_reasoning_renders_as_thinking_entry(
 
     assert roles[0] == "user"
     assert roles.count("assistant") == 1
+    assert screen.events == ["flush", "commit", "flush", "flush"]
     assert "thinking" not in roles
     reply = next(
         content for role, content in screen.entries if role == "assistant"

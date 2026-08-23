@@ -804,12 +804,15 @@ class ChatScreen:
         # 行内模式把输入框固定在活动区底部，全屏兼容路径继续随对话滚动
         bottom_container = HSplit(self._default_bottom_children())
         self._bottom_container = bottom_container
+        # 行内模式在对话区与输入区之间保留一行呼吸空间
+        self._conversation_gap = Window(height=1)
+        children: list[Container] = [self._conversation_container]
+        if self._inline_mode:
+            children.append(self._conversation_gap)
+        children.append(bottom_container)
         # 输入区已作为对话内容末尾（_build_input_container），根布局只含对话与底部
         return HSplit(
-            [
-                self._conversation_container,
-                bottom_container,
-            ],
+            children,
             # 不使用 TOP，避免 prompt_toolkit 自动追加一个无样式的
             # 填充窗口；剩余空间应当只交给有消息时的对话视口。
             align=VerticalAlign.JUSTIFY,
