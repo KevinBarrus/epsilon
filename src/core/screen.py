@@ -236,12 +236,85 @@ class _StreamingAssistantEntry:
 
     source: str
     stable_end: int = 0
+    _scan_end: int = 0
+    _code_start: int | None = None
+    _table_start: int | None = None
+    _table_candidate_start: int | None = None
 
     def append(self, content: str) -> str:
-        """追加模型分片并返回完整原文。"""
+        """追加模型分片并返回本次新增的稳定原文。"""
 
         self.source += content
-        return self.source
+        body_start = self._body_start()
+        if body_start is None:
+            return ""
+        self._scan_end = max(self._scan_end, body_start)
+        emitted: list[str] = []
+        while True:
+            line_end = self.source.find("\n", self._scan_end)
+            if line_end < 0:
+                break
+            line_end += 1
+            self._consume_line(
+                self.source[self._scan_end : line_end],
+                self._scan_end,
+                line_end,
+                emitted,
+            )
+            self._scan_end = line_end
+        return "".join(emitted)
+
+    def _body_start(self) -> int | None:
+        """返回正文开始位置，未结束的思考块不提前写入历史。"""
+
+        first_marker = self.source.find("\x00")
+        if first_marker < 0:
+            return 0
+        second_marker = self.source.find("\x00", first_marker + 1)
+        return second_marker + 1 if second_marker >= 0 else None
+
+    def _consume_line(
+        self,
+        line: str,
+        start: int,
+        end: int,
+        emitted: list[str],
+    ) -> None:
+        """按 Markdown 结构决定完整行是否可移入稳定历史。"""
+
+        if self._code_start is not None:
+            if _is_code_fence(line):
+                self._emit_until(end, emitted)
+                self._code_start = None
+            return
+        if self._table_start is not None:
+            if _is_table_line(line):
+                return
+            self._emit_until(start, emitted)
+            self._table_start = None
+
+        if self._table_candidate_start is not None:
+            if _is_table_separator(line):
+                self._table_start = self._table_candidate_start
+                self._table_candidate_start = None
+                return
+            self._emit_until(start, emitted)
+            self._table_candidate_start = None
+
+        if _is_code_fence(line):
+            self._code_start = start
+        elif _is_table_line(line):
+            self._table_candidate_start = start
+        else:
+            self._emit_until(end, emitted)
+
+    def _emit_until(self, end: int, emitted: list[str]) -> None:
+        """移动稳定边界，并保存本次可写入历史的连续原文。"""
+
+        if end <= self.stable_end:
+            return
+        emitted.append(self.source[self.stable_end : end])
+        self.stable_end = end
 
     @property
     def stable_source(self) -> str:
@@ -254,6 +327,26 @@ class _StreamingAssistantEntry:
         """返回仍需在活动视图中展示的原文尾部。"""
 
         return self.source[self.stable_end :]
+
+
+def _is_code_fence(line: str) -> bool:
+    """判断一行是否为当前 Markdown 渲染器支持的代码围栏。"""
+
+    return line.strip().startswith("```")
+
+
+def _is_table_line(line: str) -> bool:
+    """判断一行是否可能是 Markdown 表格行。"""
+
+    stripped = line.strip()
+    return len(stripped) >= 3 and stripped[0] in "|│" and stripped[-1] in "|│"
+
+
+def _is_table_separator(line: str) -> bool:
+    """判断一行是否是 Markdown 表头后的分隔行。"""
+
+    stripped = line.strip().replace("|", "").replace("│", "")
+    return bool(stripped) and all(char in " -:" for char in stripped)
 
 
 @dataclass(frozen=True)
@@ -422,7 +515,12 @@ class ChatScreen:
         if entry.committed or entry.finalizing:
             return False
         if entry.role == "assistant" and getattr(self.application, "_is_running", False):
-            self._set_entry_content(index, entry.content, streaming=True)
+            stream = self._assistant_streams.get(entry.control)
+            self._set_entry_display(
+                index,
+                stream.tail_source if stream is not None else entry.content,
+                streaming=True,
+            )
             self._conversation[index] = replace(entry, finalizing=True)
             task = asyncio.create_task(
                 self._finalize_assistant_entry(entry.control, entry.content)
@@ -531,9 +629,14 @@ class ChatScreen:
         if not entry.committed or entry.history_published:
             return
         self._conversation[index] = replace(entry, history_published=True)
-        self._inline_history.add(
+        self._queue_history_fragments(
             fragments if fragments is not None else self._history_fragments(index)
         )
+
+    def _queue_history_fragments(self, fragments: StyleAndTextTuples) -> None:
+        """追加历史片段，并在运行中安排一次异步终端写入。"""
+
+        self._inline_history.add(fragments)
         if getattr(self.application, "_is_running", False):
             if self._history_flush_task is None or self._history_flush_task.done():
                 self._history_flush_task = asyncio.create_task(self._flush_history())
@@ -648,9 +751,26 @@ class ChatScreen:
 
         entry = self._conversation[index]
         stream = self._assistant_streams.get(entry.control)
-        source = stream.append(content) if stream is not None else entry.content + content
-        # 数据立即写入控件，Application 自身按 min_redraw_interval 合并重绘
-        self._set_entry_content(index, source)
+        if stream is None:
+            source = entry.content + content
+            self._set_entry_content(index, source)
+            self.application.invalidate()
+            return
+        stable_source = stream.append(content)
+        if not self._inline_mode:
+            self._set_entry_content(index, stream.source)
+            self.application.invalidate()
+            return
+        self._conversation[index] = replace(entry, content=stream.source)
+        if stable_source:
+            self._queue_history_fragments(
+                _render_assistant_content(stable_source, streaming=True)
+            )
+            self._conversation[index] = replace(
+                self._conversation[index], history_published=True
+            )
+        # 活动控件只保留未完成尾部，稳定内容已移入终端历史
+        self._set_entry_display(index, stream.tail_source, streaming=True)
         self.application.invalidate()
 
     async def _finalize_assistant_entry(
@@ -660,10 +780,20 @@ class ChatScreen:
     ) -> None:
         """在后台完成语法高亮，再提交已结束的助手回复。"""
 
+        stream = self._assistant_streams.get(control)
+        pending_source = stream.tail_source if stream is not None else content
         try:
             fragments = await asyncio.to_thread(_render_assistant_content, content)
+            pending_fragments = fragments
+            if stream is not None and stream.stable_end:
+                pending_fragments = await asyncio.to_thread(
+                    _render_assistant_content, pending_source
+                )
         except Exception:
             fragments = _render_assistant_content(content, streaming=True)
+            pending_fragments = _render_assistant_content(
+                pending_source, streaming=True
+            )
         index = next(
             (
                 current_index
@@ -677,11 +807,14 @@ class ChatScreen:
         entry = self._conversation[index]
         if not entry.finalizing or entry.content != content:
             return
-        self._assistant_streams.pop(control, None)
+        stream = self._assistant_streams.pop(control, None)
         self._conversation[index] = replace(entry, committed=True, finalizing=False)
         entry.control.text = fragments
         entry.control.reset()
-        self._publish_entry(index, fragments)
+        if stream is not None and stream.stable_end:
+            self._queue_history_fragments(pending_fragments)
+        else:
+            self._publish_entry(index, fragments)
         self._sync_conversation()
         self.application.invalidate()
 
@@ -769,6 +902,21 @@ class ChatScreen:
         )
         entry.control.reset()
         self._conversation[index] = replace(entry, content=content)
+
+    def _set_entry_display(
+        self,
+        index: int,
+        content: str,
+        *,
+        streaming: bool,
+    ) -> None:
+        """只更新活动控件，不改变条目保存的完整原文。"""
+
+        entry = self._conversation[index]
+        entry.control.text = self._control_text(
+            entry.role, content, streaming=streaming
+        )
+        entry.control.reset()
 
     def set_request_active(self, active: bool) -> None:
         """更新请求状态，避免模型响应期间重复提交。"""

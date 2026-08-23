@@ -16,6 +16,7 @@ from core.screen import (
     ChatScreen,
     DraftState,
     SlashCommandCompleter,
+    _StreamingAssistantEntry,
 )
 from core.status import create_status_info
 from core.model import ToolCall
@@ -206,8 +207,8 @@ def test_assistant_stream_keeps_full_source_and_stable_boundary(tmp_path: Path) 
     stream = screen._assistant_streams[control]
 
     assert stream.source == "第一行\n第二行"
-    assert stream.stable_source == ""
-    assert stream.tail_source == "第一行\n第二行"
+    assert stream.stable_source == "第一行\n"
+    assert stream.tail_source == "第二行"
     assert screen._render_entry(index) == "第一行\n第二行"
 
 
@@ -222,6 +223,40 @@ def test_sync_assistant_commit_clears_stream_state(tmp_path: Path) -> None:
     assert control not in screen._assistant_streams
 
 
+def test_streaming_entry_holds_code_and_table_until_complete() -> None:
+    """测试代码块与表格在结束前不会进入稳定前缀。"""
+
+    stream = _StreamingAssistantEntry("")
+
+    assert stream.append("正文\n```python\nprint(1)\n") == "正文\n"
+    assert stream.tail_source == "```python\nprint(1)\n"
+    assert stream.append("```\n") == "```python\nprint(1)\n```\n"
+    assert stream.append("| 名称 | 值 |\n| --- | --- |\n| A | 1 |\n") == ""
+    assert stream.append("表格结束\n") == "| 名称 | 值 |\n| --- | --- |\n| A | 1 |\n表格结束\n"
+
+
+def test_inline_stream_moves_complete_lines_out_of_active_control(tmp_path: Path) -> None:
+    """测试行内流式输出仅在活动控件保留未结束尾部。"""
+
+    class EmptyLogo:
+        """提供空 Logo。"""
+
+        def render(self) -> str:
+            """返回空文本。"""
+
+            return ""
+
+    screen = ChatScreen(
+        create_status_info("test-model", "n/a", tmp_path),
+        logo_provider=EmptyLogo(),
+    )
+    index = screen.add_active_entry("assistant", "")
+
+    screen.append_to_entry(index, "稳定行\n尾部")
+
+    assert screen._conversation[index].content == "稳定行\n尾部"
+    assert to_plain_text(screen._conversation[index].control.text) == "尾部"
+    assert to_plain_text(screen._inline_history._pending[0]) == "稳定行\n"
 @pytest.mark.asyncio
 async def test_running_screen_finalizes_assistant_highlight_in_background(
     tmp_path: Path,
