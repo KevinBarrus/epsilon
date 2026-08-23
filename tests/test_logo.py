@@ -5,21 +5,19 @@ from prompt_toolkit.formatted_text import to_plain_text
 from core.logo import DefaultLogoProvider
 
 
-def test_default_logo_renders_block_art() -> None:
-    """测试默认 Logo 渲染 ε - EPSILON 方块字。"""
+def test_default_logo_renders_ascii_art() -> None:
+    """测试默认 Logo 只使用稳定的 ASCII 字符。"""
 
     logo = DefaultLogoProvider().render()
 
     text = to_plain_text(logo)
 
-    assert "████" in text
-    # ε 块字（右开口弧线）与 EPSILON 首字母 E 可区分
-    assert "   █" in text
-    assert text.count("████") >= 2
+    assert text.isascii()
+    assert "EPSILON" in text
 
 
 def test_default_logo_uses_accent_style() -> None:
-    """测试方块字整体使用独立样式类。"""
+    """测试 ASCII Logo 整体使用独立样式类。"""
 
     logo = DefaultLogoProvider().render()
 
