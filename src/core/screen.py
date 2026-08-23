@@ -35,6 +35,7 @@ from wcwidth import wcswidth
 
 from .clipboard import Osc52Clipboard
 from .inline_history import InlineHistory
+from .scrollback_reflow import ScrollbackReflow
 from .logo import DefaultLogoProvider, LogoProvider
 from .markdown import render_markdown
 from .status import format_cwd_for_footer
@@ -339,6 +340,11 @@ class ChatScreen:
             style=self.application.style,
             output=self.application.output,
         )
+        self._scrollback_reflow = ScrollbackReflow(
+            self._terminal_size,
+            self._reflow_history,
+        )
+        self.application.before_render += self._observe_terminal_size
         # Logo 作为对话区第一条内容，随对话增长自然上移出屏幕
         if self._has_logo():
             self._conversation.append(
@@ -386,6 +392,7 @@ class ChatScreen:
         self._conversation[index] = replace(entry, committed=True)
         self._set_entry_content(index, entry.content)
         self._publish_entry(index)
+        self._scrollback_reflow.stream_finished()
         self._sync_conversation()
         self.application.invalidate()
         return True
@@ -481,6 +488,38 @@ class ChatScreen:
             await self._inline_history.flush()
         finally:
             self._history_flush_task = None
+
+    def _terminal_size(self) -> tuple[int, int] | None:
+        """读取终端当前列数和行数，读取失败时跳过本轮重排。"""
+
+        try:
+            size = self.application.output.get_size()
+        except Exception:
+            return None
+        return size.columns, size.rows
+
+    def _observe_terminal_size(self, _application: Application) -> None:
+        """在绘制前观察尺寸变化，不直接阻塞当前绘制。"""
+
+        if self._inline_mode:
+            self._scrollback_reflow.observe(bool(self.active_entries()))
+
+    async def _reflow_history(self) -> None:
+        """从已提交条目重建终端回滚区，活动界面由 prompt-toolkit 恢复。"""
+
+        if not self._inline_mode or not self.application._is_running:
+            return
+        try:
+            await self._inline_history.replay(
+                self._history_fragments(
+                    index,
+                    expanded=index in self._expanded_entries,
+                )
+                for index, entry in enumerate(self._conversation)
+                if entry.committed
+            )
+        except Exception:
+            self.set_status_message("Terminal reflow failed")
 
     def _history_fragments(
         self, index: int, expanded: bool = False
