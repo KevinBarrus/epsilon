@@ -1236,6 +1236,27 @@ def test_tool_result_expands_on_toggle(tmp_path: Path) -> None:
     assert "more lines" in text
 
 
+def test_tool_result_keeps_status_and_name_when_folded(tmp_path: Path) -> None:
+    """测试成功或失败结果折叠时仍保留状态和工具名称。"""
+
+    from prompt_toolkit.formatted_text import to_plain_text
+
+    screen = _create_screen(tmp_path)
+    long_output = "\n".join(f"line {i}" for i in range(20))
+    index = screen.add_entry("tool", "")
+
+    screen.set_tool_result(index, "✗ run_command\n" + long_output)
+
+    text = to_plain_text(screen._conversation[index].control.text)
+    assert "✗ run_command" in text
+    assert "line 19" not in text
+    assert "more lines" in text
+
+    screen.toggle_tool_expansion()
+    text = to_plain_text(screen._conversation[index].control.text)
+    assert "line 19" in text
+
+
 def test_tool_result_short_output_no_folding(tmp_path: Path) -> None:
     """测试短工具输出不折叠，diff 红绿仍生效。"""
 

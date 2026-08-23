@@ -244,8 +244,8 @@ async def run_chat(
                 index = tool_activity_indices.get(event.tool_call.call_id)
                 if index is not None:
                     if event.result.is_error:
-                        screen.set_entry_content(index, _tool_result_summary(event))
                         screen.set_entry_style(index, "class:tool-error")
+                        _update_tool_result(screen, index, event, success=False)
                     else:
                         screen.set_entry_style(index, "class:tool-success")
                         _update_tool_result(screen, index, event)
@@ -442,18 +442,17 @@ def _persist_compactions(session: Session, compactions) -> bool:
     return persisted
 
 
-def _tool_result_summary(event: ToolExecutionEvent) -> str:
-    """生成工具执行完成时的单行摘要。"""
+def _update_tool_result(
+    screen,
+    index: int,
+    event: ToolExecutionEvent,
+    success: bool = True,
+) -> None:
+    """展示工具结果：保留状态和名称，并由界面层统一折叠。"""
 
-    marker = "✗" if event.result.is_error else "✓"
-    content = _single_line(event.result.content, 60)
-    return f"{marker} {event.tool_call.name}  {content}"
-
-
-def _update_tool_result(screen, index: int, event: ToolExecutionEvent) -> None:
-    """展示工具成功结果：按内容折叠 + diff 红绿，超长输出省略提示。"""
-
-    screen.set_tool_result(index, event.result.content)
+    marker = "✓" if success else "✗"
+    display_content = f"{marker} {event.tool_call.name}\n{event.result.content}"
+    screen.set_tool_result(index, display_content)
 
 
 def _update_persistence_status(screen: ChatScreen, session: Session) -> None:
