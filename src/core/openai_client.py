@@ -158,11 +158,12 @@ def _apply_thinking_options(
     """按服务端协议写入推理开关与强度参数。"""
 
     if is_deepseek and thinking_level == "off":
-        request["thinking"] = {"type": "disabled"}
+        request["extra_body"] = {"thinking": {"type": "disabled"}}
         return
     if thinking_level and thinking_level != "off":
         if is_deepseek:
-            request["thinking"] = {"type": "enabled"}
+            # 非标准字段必须通过 SDK 的 extra_body 透传
+            request["extra_body"] = {"thinking": {"type": "enabled"}}
         request["reasoning_effort"] = thinking_level
 
 

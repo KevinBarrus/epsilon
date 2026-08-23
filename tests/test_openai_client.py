@@ -164,7 +164,9 @@ async def test_client_uses_deepseek_thinking_protocol() -> None:
 
     await _collect(client, thinking_level="high")
 
-    assert fake_sdk.completions.received["thinking"] == {"type": "enabled"}
+    assert fake_sdk.completions.received["extra_body"] == {
+        "thinking": {"type": "enabled"}
+    }
     assert fake_sdk.completions.received["reasoning_effort"] == "high"
 
 
@@ -179,7 +181,9 @@ async def test_client_disables_deepseek_thinking_for_off() -> None:
 
     await _collect(client, thinking_level="off")
 
-    assert fake_sdk.completions.received["thinking"] == {"type": "disabled"}
+    assert fake_sdk.completions.received["extra_body"] == {
+        "thinking": {"type": "disabled"}
+    }
     assert "reasoning_effort" not in fake_sdk.completions.received
 
 
