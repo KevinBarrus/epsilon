@@ -48,23 +48,6 @@ class InlineHistory:
                     output.write("\n")
                 output.flush()
 
-    async def replay(self, texts: Iterable[AnyFormattedText]) -> None:
-        """清空终端缓冲区后，按当前宽度重新写入全部稳定历史。"""
-
-        async with self._write_lock:
-            entries = [to_formatted_text(text) for text in texts]
-            self._pending = []
-            async with in_terminal():
-                output = self._output or get_app_session().output
-                # CSI 3J 清除回滚区，后续操作清除可见区并将光标移到左上角
-                output.write_raw("\x1b[3J")
-                output.erase_screen()
-                output.cursor_goto(0, 0)
-                for fragments in entries:
-                    print_formatted_text(output, fragments, self._style)
-                    output.write("\n")
-                output.flush()
-
     def extend(self, texts: Iterable[AnyFormattedText]) -> None:
         """按原顺序追加多条历史内容。"""
 
