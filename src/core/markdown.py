@@ -43,11 +43,17 @@ def render_markdown(text: str, *, streaming: bool = False) -> StyleAndTextTuples
                 code_lines = []
                 code_language = ""
                 in_code_block = False
+                # 结束围栏只负责把代码块与后续正文隔开
+                add_newline = not is_last
             else:
                 code_lines.append(line)
+                # 代码行由 _render_code_block 统一输出换行
+                add_newline = False
         elif line.strip().startswith(_CODE_BLOCK_DELIMITER):
             in_code_block = True
             code_language = line.strip()[len(_CODE_BLOCK_DELIMITER) :].strip()
+            # 开始围栏不产生可见内容或额外换行
+            add_newline = False
         elif _TABLE_CELL_RE.match(line):
             # 表格行由整表渲染统一换行，不在行内单独插入
             add_newline = False
@@ -140,6 +146,14 @@ def _render_code_block(
     for token_type, token_text in tokens:
         style_class = _token_style(token_type, language)
         fragments.append((style_class, token_text))
+    if (
+        fragments
+        and not code.endswith("\n")
+        and fragments[-1][1].endswith("\n")
+    ):
+        # 部分 Pygments lexer 会补一个源码中不存在的末尾换行
+        style, token_text = fragments[-1]
+        fragments[-1] = (style, token_text[:-1])
     return fragments
 
 

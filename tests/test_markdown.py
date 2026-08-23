@@ -66,6 +66,22 @@ def test_streaming_unclosed_code_block_skips_syntax_highlighting() -> None:
     assert ("class:md-tok-builtin", "print") not in fragments
 
 
+def test_code_block_does_not_duplicate_line_breaks() -> None:
+    """测试代码围栏内的换行只由代码块渲染器输出一次。"""
+
+    text = "说明\n```python\ndef hello():\n    return 1\n```\n结束"
+
+    assert _plain(text) == "说明\npython\ndef hello():\n    return 1\n结束"
+
+
+def test_streaming_unclosed_code_block_does_not_accumulate_blank_lines() -> None:
+    """测试未闭合代码围栏在流式过程中不制造额外空行。"""
+
+    text = "```python\ndef hello():\n    return 1"
+
+    assert _plain(text) == "python\ndef hello():\n    return 1"
+
+
 def test_code_block_highlights_javascript() -> None:
     """测试 JavaScript 代码块同样按 token 高亮。"""
 
