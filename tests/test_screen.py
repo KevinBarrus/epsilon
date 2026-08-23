@@ -302,7 +302,7 @@ def test_logo_merges_startup_info(tmp_path: Path) -> None:
         def render(self) -> str:
             """返回 Logo 文本。"""
 
-            return "logo-line"
+            return "logo"
 
     screen = ChatScreen(
         create_status_info("test-model", "n/a", tmp_path),
@@ -315,11 +315,20 @@ def test_logo_merges_startup_info(tmp_path: Path) -> None:
 
     rendered = to_plain_text(screen._render_logo())
 
-    # 居中后各行带相同缩进，行内容保持
-    assert rendered.split("\n")[0].lstrip() == "logo-line"
-    assert rendered.split("\n")[1].lstrip() == "hint-line"
-    assert rendered.split("\n")[2].lstrip() == "[Context]"
-    assert len(set(len(line) - len(line.lstrip()) for line in rendered.split("\n"))) == 1
+    lines = rendered.split("\n")
+    content_lines = [line for line in lines if line.strip()]
+
+    assert [line.strip() for line in content_lines] == [
+        "logo",
+        "hint-line",
+        "[Context]",
+    ]
+    assert any(not line.strip() for line in lines[1:-1])
+
+    # 每行按自身宽度居中，而不是使用最长行的统一缩进
+    assert len(content_lines[0]) - len(content_lines[0].lstrip()) > (
+        len(content_lines[1]) - len(content_lines[1].lstrip())
+    )
 
     # 未提供起始信息时只显示 Logo
     plain_screen = ChatScreen(
@@ -327,7 +336,7 @@ def test_logo_merges_startup_info(tmp_path: Path) -> None:
         logo_provider=TestLogo(),
     )
 
-    assert to_plain_text(plain_screen._render_logo()).lstrip() == "logo-line"
+    assert to_plain_text(plain_screen._render_logo()).lstrip() == "logo"
 
 
 def test_empty_custom_logo_takes_no_layout_space(tmp_path: Path) -> None:

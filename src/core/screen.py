@@ -1323,23 +1323,26 @@ class ChatScreen:
     def _render_logo(self) -> AnyFormattedText:
         """渲染 Logo 与新建会话时的起始信息，整体按终端宽度居中。"""
 
-        lines: list[list[tuple[str, str]]] = _fragments_to_lines(
+        logo_lines = _fragments_to_lines(
             to_formatted_text(self._logo_provider.render())
         )
+        lines = list(logo_lines)
         if self._startup_info_provider is not None:
-            for info_line in self._startup_info_provider():
-                lines.append(list(info_line))
+            startup_lines = [
+                list(info_line) for info_line in self._startup_info_provider()
+            ]
+            if startup_lines:
+                # Logo 与前置信息、前置信息各行之间留出空行，增强启动页层次
+                lines.append([])
+                for index, info_line in enumerate(startup_lines):
+                    if index:
+                        lines.append([])
+                    lines.append(info_line)
         width = self._terminal_width()
-        if width:
-            max_line_width = max(
-                (wcswidth("".join(text for _, text in line)) for line in lines),
-                default=0,
-            )
-            indent = max(0, (width - max_line_width) // 2)
-        else:
-            indent = 0
         fragments: list[tuple[str, str]] = []
         for line in lines:
+            line_width = wcswidth("".join(text for _, text in line))
+            indent = max(0, (width - line_width) // 2) if width else 0
             fragments.append(("", " " * indent))
             fragments.extend(line)
             fragments.append(("", "\n"))
