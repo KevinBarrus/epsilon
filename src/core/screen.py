@@ -908,8 +908,8 @@ class ChatScreen:
             height=2,
             style="class:status-bar",
         )
-        # 底部区域无背景，内容直接落在命令行窗口默认背景上（对齐 Pi）
-        bottom_container = HSplit([self._status_window])
+        # 行内模式把输入框固定在活动区底部，全屏兼容路径继续随对话滚动
+        bottom_container = HSplit(self._default_bottom_children())
         self._bottom_container = bottom_container
         # 输入区已作为对话内容末尾（_build_input_container），根布局只含对话与底部
         return HSplit(
@@ -921,6 +921,21 @@ class ChatScreen:
             # 填充窗口；剩余空间应当只交给有消息时的对话视口。
             align=VerticalAlign.JUSTIFY,
         )
+
+    def _default_bottom_children(self) -> list[Container]:
+        """返回没有审批或选择器时的底部活动组件。"""
+
+        if self._inline_mode:
+            return [self._input_tracker, self._status_window]
+        return [self._status_window]
+
+    def _set_bottom_prompt(self, prompt: Container) -> None:
+        """显示底部交互组件，并在行内模式保留状态栏。"""
+
+        children = [prompt]
+        if self._inline_mode:
+            children.append(self._status_window)
+        self._bottom_container.children = children
 
     def _build_input_container(self) -> None:
         """构建输入区（上下边框 + 输入框），作为对话区内容末尾。"""
@@ -968,13 +983,13 @@ class ChatScreen:
 
         prompt = ApprovalPrompt(definition, tool_call, allow_session)
         self._approval_prompt = prompt
-        self._bottom_container.children = [prompt.window]
+        self._set_bottom_prompt(prompt.window)
         self._layout.focus(prompt.window)
         self.application.invalidate()
         try:
             return await prompt.wait()
         finally:
-            self._bottom_container.children = [self._status_window]
+            self._bottom_container.children = self._default_bottom_children()
             self._approval_prompt = None
             self._layout.focus(self.input_area)
             self.application.invalidate()
@@ -988,13 +1003,13 @@ class ChatScreen:
 
         picker = SkillPicker(items, checked, on_interact=self.application.invalidate)
         self._skill_picker = picker
-        self._bottom_container.children = [picker.window]
+        self._set_bottom_prompt(picker.window)
         self._layout.focus(picker.window)
         self.application.invalidate()
         try:
             return await picker.wait()
         finally:
-            self._bottom_container.children = [self._status_window]
+            self._bottom_container.children = self._default_bottom_children()
             self._skill_picker = None
             self._layout.focus(self.input_area)
             self.application.invalidate()
@@ -1009,13 +1024,13 @@ class ChatScreen:
 
         picker = ChoicePicker(items, title, extra_options, on_interact=self.application.invalidate)
         self._choice_picker = picker
-        self._bottom_container.children = [picker.window]
+        self._set_bottom_prompt(picker.window)
         self._layout.focus(picker.window)
         self.application.invalidate()
         try:
             return await picker.wait()
         finally:
-            self._bottom_container.children = [self._status_window]
+            self._bottom_container.children = self._default_bottom_children()
             self._choice_picker = None
             self._layout.focus(self.input_area)
             self.application.invalidate()
@@ -1029,13 +1044,13 @@ class ChatScreen:
 
         prompt = InputPrompt(title, is_password)
         self._text_input = prompt
-        self._bottom_container.children = [prompt.window]
+        self._set_bottom_prompt(prompt.window)
         self._layout.focus(prompt.input_area)
         self.application.invalidate()
         try:
             return await prompt.wait()
         finally:
-            self._bottom_container.children = [self._status_window]
+            self._bottom_container.children = self._default_bottom_children()
             self._text_input = None
             self._layout.focus(self.input_area)
             self.application.invalidate()
@@ -1371,12 +1386,12 @@ class ChatScreen:
                 self._command_picker = CommandPicker(
                     completions, on_apply=self._apply_clicked_completion
                 )
-                self._bottom_container.children = [self._command_picker.window]
+                self._set_bottom_prompt(self._command_picker.window)
             else:
                 self._command_picker.update_completions(completions)
         else:
             self._command_picker = None
-            self._bottom_container.children = [self._status_window]
+            self._bottom_container.children = self._default_bottom_children()
         self.application.invalidate()
 
     def _apply_clicked_completion(self, completion: Completion) -> None:
@@ -1399,7 +1414,7 @@ class ChatScreen:
             # 命令补全不再适用：清除残留列表并恢复状态栏
             if self._command_picker is not None:
                 self._command_picker = None
-                self._bottom_container.children = [self._status_window]
+                self._bottom_container.children = self._default_bottom_children()
                 self.application.invalidate()
         elif len(text) < self._last_input_length and buffer.complete_state is None:
             buffer.start_completion()
@@ -1564,8 +1579,9 @@ class ChatScreen:
                         dont_extend_height=True,
                     )
                 )
-        # 输入区作为对话区内容末尾，随对话一起滚动（对齐 Pi）
-        children.append(self._input_tracker)
+        # 全屏兼容路径把输入区放入对话内容，行内模式由底部活动区承载
+        if not self._inline_mode:
+            children.append(self._input_tracker)
         self._conversation_content.children = children
 
         for child in children:

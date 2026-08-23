@@ -166,7 +166,11 @@ async def test_inline_screen_publishes_only_stable_entries(
     screen.commit_entry(active_index)
     await screen.flush_history()
     assert capsys.readouterr().out == "活动回复\n"
-    assert len(screen._conversation_content.children) == 1
+    assert len(screen._conversation_content.children) == 0
+    assert screen._bottom_container.children == [
+        screen._input_tracker,
+        screen._status_window,
+    ]
 
 
 def test_chat_screen_commits_active_entry_only_once(tmp_path: Path) -> None:
