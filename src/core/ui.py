@@ -168,7 +168,10 @@ async def run_chat(
         thinking_open = False
         tool_activity_indices: dict[str, int] = {}
         awaiting_response_after_tool = False
-        screen.set_working("thinking", show_elapsed=False)
+        screen.set_working(
+            "thinking",
+            show_elapsed=not agent_loop.show_thinking,
+        )
 
         # 用户消息必须先进入会话，模型才能在本轮请求中看到它
         session.add_user_message(prompt)
@@ -246,7 +249,10 @@ async def run_chat(
                     else:
                         screen.set_entry_style(index, "class:tool-success")
                         _update_tool_result(screen, index, event)
-                screen.set_working("thinking", show_elapsed=False)
+                screen.set_working(
+                    "thinking",
+                    show_elapsed=not agent_loop.show_thinking,
+                )
             elif isinstance(event, UsageEvent):
                 latest_usage = event
                 usage_totals.add(event, client_holder.settings.price)

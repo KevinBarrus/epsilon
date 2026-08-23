@@ -1177,7 +1177,7 @@ def test_completions_changed_does_not_rebuild_picker(tmp_path: Path) -> None:
 
 
 def test_working_indicator_renders_spinner_and_elapsed(tmp_path: Path) -> None:
-    """测试 working 提示显示 spinner、消息与耗时。"""
+    """测试 working 提示显示在对话区并包含 spinner 与耗时。"""
 
     screen = _create_screen(tmp_path)
     screen.set_working("thinking")
@@ -1188,10 +1188,13 @@ def test_working_indicator_renders_spinner_and_elapsed(tmp_path: Path) -> None:
     assert text[0] in _WORKING_FRAMES
     assert "thinking" in text
     assert "s" in text
+    assert any(entry.role == "working" for entry in screen._conversation)
+    assert "thinking" not in screen._status_rows()[1][0]
 
     screen.set_working(None)
 
     assert screen._working_text() == ""
+    assert not any(entry.role == "working" for entry in screen._conversation)
 
 
 def test_tool_result_folds_long_output(tmp_path: Path) -> None:

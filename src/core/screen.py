@@ -274,7 +274,7 @@ from .ui_config import InputLayoutConfig
 
 
 SubmitHandler = Callable[[str], Awaitable[None]]
-ConversationRole = Literal["user", "assistant", "tool", "logo", "thinking"]
+ConversationRole = Literal["user", "assistant", "tool", "logo", "thinking", "working"]
 
 # working 提示的转圈动画帧（对齐 Pi Loader）
 _WORKING_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
@@ -534,6 +534,7 @@ class ChatScreen:
         self._working_show_elapsed = True
         self._working_started = 0.0
         self._working_task: asyncio.Task | None = None
+        self._working_entry_index: int | None = None
         self._expanded_entries: set[int] = set()
         self._last_tool_index: int | None = None
         self._auto_copy = True
@@ -1436,6 +1437,15 @@ class ChatScreen:
                         dont_extend_height=True,
                     )
                 )
+            elif entry.role == "working":
+                children.append(
+                    Window(
+                        content=entry.control,
+                        style="class:tool-activity",
+                        wrap_lines=True,
+                        dont_extend_height=True,
+                    )
+                )
             else:
                 children.append(
                     Window(
@@ -1478,9 +1488,6 @@ class ChatScreen:
                 else self._status.balance
             )
             info = f"Balance: {balance}"
-        working = self._working_text()
-        if working:
-            info = f"{working}   {info}"
         model_name = (
             self._model_name_provider()
             if self._model_name_provider is not None
@@ -1511,11 +1518,16 @@ class ChatScreen:
         self.application.invalidate()
 
     def set_working(self, message: str | None, show_elapsed: bool = True) -> None:
-        """设置状态栏信息行的 working 提示（spinner + 消息，可选耗时）。"""
+        """设置对话区临时 working 条目（spinner + 消息，可选耗时）。"""
 
+        self._remove_working_entry()
         self._working_message = message
         self._working_show_elapsed = show_elapsed
         self._working_started = time.monotonic() if message else 0.0
+        if message:
+            self._working_entry_index = self.add_entry(
+                "working", self._working_text()
+            )
         if message and self._working_task is None:
             try:
                 loop = asyncio.get_running_loop()
@@ -1526,6 +1538,16 @@ class ChatScreen:
         elif message is None:
             self._working_task = None
         self.application.invalidate()
+
+    def _remove_working_entry(self) -> None:
+        """移除对话区中的临时 working 条目。"""
+
+        if self._working_entry_index is None:
+            return
+        if self._working_entry_index < len(self._conversation):
+            self._conversation.pop(self._working_entry_index)
+            self._sync_conversation_view()
+        self._working_entry_index = None
 
     def _working_text(self) -> str:
         """生成当前 working 提示文本，spinner 帧按时间轮转。"""
@@ -1545,5 +1567,10 @@ class ChatScreen:
         """working 提示存在期间持续刷新界面（spinner 动画与秒数）。"""
 
         while self._working_message:
+            if self._working_entry_index is not None:
+                self._set_entry_content(
+                    self._working_entry_index,
+                    self._working_text(),
+                )
             self.application.invalidate()
             await asyncio.sleep(0.08)
