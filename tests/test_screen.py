@@ -195,6 +195,33 @@ async def test_running_screen_updates_assistant_stream_immediately(
     assert ("class:md-code-block", "print(1)") in screen._conversation[index].control.text
 
 
+def test_assistant_stream_keeps_full_source_and_stable_boundary(tmp_path: Path) -> None:
+    """测试流式助手条目独立保存完整原文与稳定前缀边界。"""
+
+    screen = _create_screen(tmp_path)
+    index = screen.add_active_entry("assistant", "第一行\n")
+    control = screen._conversation[index].control
+
+    screen.append_to_entry(index, "第二行")
+    stream = screen._assistant_streams[control]
+
+    assert stream.source == "第一行\n第二行"
+    assert stream.stable_source == ""
+    assert stream.tail_source == "第一行\n第二行"
+    assert screen._render_entry(index) == "第一行\n第二行"
+
+
+def test_sync_assistant_commit_clears_stream_state(tmp_path: Path) -> None:
+    """测试同步提交后不保留已结束的流式状态。"""
+
+    screen = _create_screen(tmp_path)
+    index = screen.add_active_entry("assistant", "回复")
+    control = screen._conversation[index].control
+
+    assert screen.commit_entry(index) is True
+    assert control not in screen._assistant_streams
+
+
 @pytest.mark.asyncio
 async def test_running_screen_finalizes_assistant_highlight_in_background(
     tmp_path: Path,

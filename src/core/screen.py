@@ -230,6 +230,32 @@ class ConversationEntry:
     finalizing: bool = False
 
 
+@dataclass
+class _StreamingAssistantEntry:
+    """保存流式助手消息的原文与后续可提交边界。"""
+
+    source: str
+    stable_end: int = 0
+
+    def append(self, content: str) -> str:
+        """追加模型分片并返回完整原文。"""
+
+        self.source += content
+        return self.source
+
+    @property
+    def stable_source(self) -> str:
+        """返回已标记为稳定的原文前缀。"""
+
+        return self.source[: self.stable_end]
+
+    @property
+    def tail_source(self) -> str:
+        """返回仍需在活动视图中展示的原文尾部。"""
+
+        return self.source[self.stable_end :]
+
+
 @dataclass(frozen=True)
 class DraftState:
     """发送前输入框中的文字和光标位置。"""
@@ -292,6 +318,9 @@ class ChatScreen:
         self._expanded_entries: set[int] = set()
         self._last_tool_index: int | None = None
         self._conversation: list[ConversationEntry] = []
+        self._assistant_streams: dict[
+            FormattedTextControl, _StreamingAssistantEntry
+        ] = {}
         self._input_history = InMemoryHistory()
         self._input_history_cursor: int | None = None
         self._restoring_input_history = False
@@ -379,6 +408,9 @@ class ChatScreen:
         self._conversation.append(
             self._create_entry(role, content, style, committed=False)
         )
+        entry = self._conversation[-1]
+        if role == "assistant":
+            self._assistant_streams[entry.control] = _StreamingAssistantEntry(content)
         self._sync_conversation()
         self.application.invalidate()
         return len(self._conversation) - 1
@@ -406,6 +438,7 @@ class ChatScreen:
         entry = self._conversation[index]
         if entry.committed:
             return False
+        self._assistant_streams.pop(entry.control, None)
         self._conversation[index] = replace(entry, committed=True)
         self._set_entry_content(index, entry.content)
         self._publish_entry(index)
@@ -614,8 +647,10 @@ class ChatScreen:
         """向指定的对话条目追加流式文本。"""
 
         entry = self._conversation[index]
+        stream = self._assistant_streams.get(entry.control)
+        source = stream.append(content) if stream is not None else entry.content + content
         # 数据立即写入控件，Application 自身按 min_redraw_interval 合并重绘
-        self._set_entry_content(index, entry.content + content)
+        self._set_entry_content(index, source)
         self.application.invalidate()
 
     async def _finalize_assistant_entry(
@@ -642,6 +677,7 @@ class ChatScreen:
         entry = self._conversation[index]
         if not entry.finalizing or entry.content != content:
             return
+        self._assistant_streams.pop(control, None)
         self._conversation[index] = replace(entry, committed=True, finalizing=False)
         entry.control.text = fragments
         entry.control.reset()
