@@ -57,6 +57,15 @@ def test_unclosed_code_block_stays_in_code_style() -> None:
     assert ("class:md-tok-builtin", "print") in fragments
 
 
+def test_streaming_unclosed_code_block_skips_syntax_highlighting() -> None:
+    """测试流式未闭合代码块只使用基础样式，提交后再高亮。"""
+
+    fragments = render_markdown("```python\nprint(1)", streaming=True)
+
+    assert ("class:md-code-block", "print(1)") in fragments
+    assert ("class:md-tok-builtin", "print") not in fragments
+
+
 def test_code_block_highlights_javascript() -> None:
     """测试 JavaScript 代码块同样按 token 高亮。"""
 

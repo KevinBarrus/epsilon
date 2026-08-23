@@ -146,17 +146,21 @@ class SlashCommandCompleter(Completer):
         yield from prefix_matches
 
 
-def _render_assistant_content(content: str) -> StyleAndTextTuples:
+def _render_assistant_content(
+    content: str,
+    *,
+    streaming: bool = False,
+) -> StyleAndTextTuples:
     """渲染助手回复：\x00 包裹的思考块用斜体灰，正文渲染 Markdown。"""
 
     if "\x00" not in content:
-        return render_markdown(content)
+        return render_markdown(content, streaming=streaming)
     parts = content.split("\x00")
     fragments: StyleAndTextTuples = []
     if len(parts) > 1 and parts[1].strip():
         fragments.append(("class:md-thinking", parts[1] + "\n"))
     body = parts[2] if len(parts) > 2 else ""
-    fragments.extend(render_markdown(body))
+    fragments.extend(render_markdown(body, streaming=streaming))
     return fragments
 
 
@@ -329,6 +333,7 @@ class ChatScreen:
             cursor=CursorShape.BLINKING_BEAM,
             clipboard=Osc52Clipboard(),
             output=create_output(),
+            min_redraw_interval=1 / 60,
         )
         self._inline_history = InlineHistory(
             style=self.application.style,
@@ -379,6 +384,7 @@ class ChatScreen:
         if entry.committed:
             return False
         self._conversation[index] = replace(entry, committed=True)
+        self._set_entry_content(index, entry.content)
         self._publish_entry(index)
         self._sync_conversation()
         self.application.invalidate()
@@ -436,8 +442,8 @@ class ChatScreen:
         self._sync_conversation()
         self.application.invalidate()
 
-    @staticmethod
     def _create_entry(
+        self,
         role: ConversationRole,
         content: str,
         style: str = "",
@@ -445,7 +451,7 @@ class ChatScreen:
     ) -> ConversationEntry:
         """创建保存独立文本控件的对话条目，助手消息渲染 Markdown。"""
 
-        control_text = ChatScreen._control_text(role, content)
+        control_text = self._control_text(role, content, streaming=not committed)
         return ConversationEntry(
             role,
             content,
@@ -535,11 +541,16 @@ class ChatScreen:
         return fragments
 
     @staticmethod
-    def _control_text(role: ConversationRole, content: str) -> object:
+    def _control_text(
+        role: ConversationRole,
+        content: str,
+        *,
+        streaming: bool = False,
+    ) -> object:
         """按角色生成控件文本：用户消息渲染 Markdown 并留白，助手消息渲染思考块 + Markdown。"""
 
         if role == "assistant":
-            return _render_assistant_content(content)
+            return _render_assistant_content(content, streaming=streaming)
         if role == "user":
             fragments = render_markdown(content)
             return [("", "\n"), *_indent_markdown(fragments, " "), ("", "\n")]
@@ -623,7 +634,11 @@ class ChatScreen:
         """更新已有条目的内容和控件，不重建整个对话布局。"""
 
         entry = self._conversation[index]
-        entry.control.text = self._control_text(entry.role, content)
+        entry.control.text = self._control_text(
+            entry.role,
+            content,
+            streaming=not entry.committed,
+        )
         entry.control.reset()
         self._conversation[index] = replace(entry, content=content)
 

@@ -22,10 +22,10 @@ _TABLE_CELL_RE = re.compile(r"^\s*\|.*\|\s*$")
 _TABLE_SEPARATOR_RE = re.compile(r"^[\s:|-]+$")
 
 
-def render_markdown(text: str) -> StyleAndTextTuples:
+def render_markdown(text: str, *, streaming: bool = False) -> StyleAndTextTuples:
     """把 Markdown 文本转换为带样式的片段列表，行与行之间插入换行。
 
-    流式输出时文本可能不完整，解析器对未闭合的代码块/标记保持容错。
+    流式输出时文本可能不完整，未闭合代码块使用基础样式，避免反复进行全量语法高亮。
     """
 
     fragments: StyleAndTextTuples = []
@@ -90,7 +90,13 @@ def render_markdown(text: str) -> StyleAndTextTuples:
         fragments.extend(_render_table(table_rows))
     if in_code_block:
         # 流式输出中途：未闭合代码块按已收集的行渲染
-        fragments.extend(_render_code_block(code_language, code_lines))
+        fragments.extend(
+            _render_code_block(
+                code_language,
+                code_lines,
+                highlight=not streaming,
+            )
+        )
     return fragments
 
 
@@ -112,14 +118,19 @@ _TOKEN_STYLE_CLASSES = [
 _LANGUAGE_TOKEN_OVERRIDES: dict[str, list[tuple[str, type]]] = {}
 
 
-def _render_code_block(language: str, lines: list[str]) -> StyleAndTextTuples:
+def _render_code_block(
+    language: str,
+    lines: list[str],
+    *,
+    highlight: bool = True,
+) -> StyleAndTextTuples:
     """渲染代码块：首行语言名 + Pygments token 高亮，语言不支持时整块基础样式。"""
 
     fragments: StyleAndTextTuples = []
     if language:
         fragments.append(("class:md-code-lang", f"{language}\n"))
     code = "\n".join(lines)
-    tokens = _highlight_tokens(code, language)
+    tokens = _highlight_tokens(code, language) if highlight else None
     if tokens is None:
         for line_index, line in enumerate(lines):
             fragments.append(("class:md-code-block", line))

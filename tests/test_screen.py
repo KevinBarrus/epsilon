@@ -223,6 +223,30 @@ def test_inline_history_user_message_keeps_gray_background(tmp_path: Path) -> No
     assert "第二行" in to_plain_text(fragments)
 
 
+def test_active_code_block_highlights_after_commit(tmp_path: Path) -> None:
+    """测试活动代码块跳过高亮，提交后渲染为最终高亮结果。"""
+
+    screen = _create_screen(tmp_path)
+    index = screen.add_active_entry("assistant", "```python\nprint(1)")
+
+    active_fragments = screen._conversation[index].control.text
+    assert ("class:md-code-block", "print(1)") in active_fragments
+    assert ("class:md-tok-builtin", "print") not in active_fragments
+
+    screen.commit_entry(index)
+
+    committed_fragments = screen._conversation[index].control.text
+    assert ("class:md-tok-builtin", "print") in committed_fragments
+
+
+def test_application_limits_stream_redraw_frequency(tmp_path: Path) -> None:
+    """测试流式分片不会无限制触发终端重绘。"""
+
+    screen = _create_screen(tmp_path)
+
+    assert screen.application.min_redraw_interval == pytest.approx(1 / 60)
+
+
 @pytest.mark.asyncio
 async def test_inline_tool_expansion_appends_full_result(
     tmp_path: Path,
