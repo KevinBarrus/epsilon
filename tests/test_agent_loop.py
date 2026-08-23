@@ -79,6 +79,36 @@ async def test_agent_loop_executes_tool_and_continues_model_request(
 
 
 @pytest.mark.asyncio
+async def test_agent_loop_yields_after_text_delta_for_ui_refresh() -> None:
+    """测试连续文本分片之间会让出事件循环给界面刷新任务。"""
+
+    refresh_ran = False
+
+    class BufferedClient:
+        async def stream_response(self, messages, tools=(), thinking_level=None):
+            yield TextDelta("第一段")
+            assert refresh_ran is True
+            yield TextDelta("第二段")
+
+    async def handle_event(event: ModelEvent) -> None:
+        nonlocal refresh_ran
+        if isinstance(event, TextDelta) and not refresh_ran:
+
+            async def mark_refreshed() -> None:
+                nonlocal refresh_ran
+                refresh_ran = True
+
+            asyncio.create_task(mark_refreshed())
+
+    result = await AgentLoop(BufferedClient(), ToolManager()).run(
+        [Message(role="user", content="继续")],
+        on_event=handle_event,
+    )
+
+    assert result.final_content == "第一段第二段"
+
+
+@pytest.mark.asyncio
 async def test_agent_loop_rebuilds_context_after_tool_result(tmp_path) -> None:
     """测试每轮工具结果都会在下一次模型请求前重建上下文。"""
 

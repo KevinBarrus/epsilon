@@ -419,6 +419,7 @@ class _ThinkingScreen:
         self._on_submit = on_submit
         self.application = self
         self.entries: list[tuple[str, str]] = []
+        self.working_messages: list[str | None] = []
         _ThinkingScreen.instances.append(self)
 
     def add_entry(self, role: str, content: str, style: str = "") -> int:
@@ -448,7 +449,7 @@ class _ThinkingScreen:
         return None
 
     def set_working(self, message: str | None, show_elapsed: bool = True) -> None:
-        return None
+        self.working_messages.append(message)
 
     async def request_approval(self, definition, tool_call, allow_session=True):
         return None
@@ -487,6 +488,7 @@ async def test_reasoning_renders_as_thinking_entry(
         content for role, content in screen.entries if role == "assistant"
     )
     assert reply == "\x00推理中\x00结论文本"
+    assert screen.working_messages[:2] == ["thinking", None]
 
 
 @pytest.mark.asyncio

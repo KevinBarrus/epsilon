@@ -211,6 +211,9 @@ async def run_chat(
                     elif agent_loop.show_thinking:
                         screen.append_to_entry(response_index, event.reasoning)
                 else:
+                    if event.content:
+                        # 正文已到达，先移除 Thinking，避免遮挡工具后的新回复
+                        screen.set_working(None)
                     if awaiting_response_after_tool:
                         response_index = screen.add_active_entry("assistant", "")
                         awaiting_response_after_tool = False

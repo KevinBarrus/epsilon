@@ -2,6 +2,7 @@
 
 import asyncio
 import random
+from asyncio import sleep as yield_to_event_loop
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
 
@@ -148,6 +149,9 @@ class AgentLoop:
                                 tool_calls.append(event.tool_call)
                             if on_event is not None:
                                 await on_event(event)
+                            if isinstance(event, TextDelta):
+                                # 连续缓冲分片也要让出事件循环，避免界面刷新被饿死
+                                await yield_to_event_loop(0)
                         break
                     except AgentError as exc:
                         if exc.category != "context_overflow" or force_compaction:
