@@ -1,5 +1,6 @@
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from prompt_toolkit.application import create_app_session
@@ -598,8 +599,6 @@ def test_input_top_border_plain_without_overflow(tmp_path: Path) -> None:
 def test_input_top_border_shows_more_hint(tmp_path: Path, monkeypatch) -> None:
     """测试输入超行时上边界左侧显示 ↑ n more 提示。"""
 
-    from types import SimpleNamespace
-
     screen = ChatScreen(
         create_status_info("test-model", "暂不可查询", tmp_path),
     )
@@ -653,6 +652,48 @@ def test_chat_screen_restores_terminal_cursor_blink_after_render(
     screen._enable_cursor_blink(screen.application)
 
     assert writes == ["\x1b[?12h"]
+
+
+def test_inline_screen_clears_stale_border_once_after_resize(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """测试尺寸变化时只清理活动区上方遗留的一行边框。"""
+
+    screen = ChatScreen(create_status_info("test-model", "n/a", tmp_path))
+    size = [80, 24]
+    calls: list[object] = []
+    monkeypatch.setattr(
+        screen.application.output,
+        "get_size",
+        lambda: SimpleNamespace(columns=size[0], rows=size[1]),
+    )
+    monkeypatch.setattr(
+        screen.application.output,
+        "cursor_up",
+        lambda amount: calls.append(("up", amount)),
+    )
+    monkeypatch.setattr(
+        screen.application.output,
+        "erase_down",
+        lambda: calls.append("erase"),
+    )
+    monkeypatch.setattr(
+        screen.application.output,
+        "flush",
+        lambda: calls.append("flush"),
+    )
+    monkeypatch.setattr(
+        screen.application.renderer,
+        "reset",
+        lambda: calls.append("reset"),
+    )
+
+    screen._clear_stale_viewport_on_resize(screen.application)
+    size[0] = 100
+    screen._clear_stale_viewport_on_resize(screen.application)
+
+    assert calls == [("up", 1), "erase", "flush", "reset"]
 
 
 def test_user_entry_uses_full_width_gray_style_without_prefix(

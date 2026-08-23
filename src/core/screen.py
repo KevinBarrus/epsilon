@@ -271,6 +271,7 @@ class ChatScreen:
         self._info_line_provider = info_line_provider
         self._copy_hint_provider = copy_hint_provider
         self._inline_mode = inline_mode
+        self._last_viewport_size: tuple[int, int] | None = None
         self._history_flush_task: asyncio.Task | None = None
         self._request_active = False
         self._request_task: asyncio.Task[None] | None = None
@@ -337,6 +338,7 @@ class ChatScreen:
         )
         # prompt-toolkit 显示光标时会关闭终端闪烁，渲染完成后恢复该模式
         self.application.after_render += self._enable_cursor_blink
+        self.application.before_render += self._clear_stale_viewport_on_resize
         self._inline_history = InlineHistory(
             style=self.application.style,
             output=self.application.output,
@@ -489,6 +491,23 @@ class ChatScreen:
 
         self.application.output.write_raw("\x1b[?12h")
         self.application.output.flush()
+
+    def _clear_stale_viewport_on_resize(self, _application: Application) -> None:
+        """尺寸变化时清除活动区遗留的一行旧输入边框。"""
+
+        if not self._inline_mode:
+            return
+        size = self.application.output.get_size()
+        viewport_size = (size.columns, size.rows)
+        previous_size = self._last_viewport_size
+        self._last_viewport_size = viewport_size
+        if previous_size is None or previous_size == viewport_size:
+            return
+        # 框架已回到旧活动区顶部，额外向上一行覆盖遗留的上边框
+        self.application.output.cursor_up(1)
+        self.application.output.erase_down()
+        self.application.output.flush()
+        self.application.renderer.reset()
 
     def _history_fragments(
         self, index: int, expanded: bool = False
