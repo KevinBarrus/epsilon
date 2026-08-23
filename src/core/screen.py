@@ -485,6 +485,7 @@ class ConversationEntry:
     content: str
     control: FormattedTextControl
     style: str = ""
+    committed: bool = True
 
 
 @dataclass(frozen=True)
@@ -626,12 +627,47 @@ class ChatScreen:
     def add_entry(self, role: ConversationRole, content: str, style: str = "") -> int:
         """向对话区追加一条展示内容，并返回它的索引。"""
 
-        self._conversation.append(self._create_entry(role, content, style))
+        self._conversation.append(
+            self._create_entry(role, content, style, committed=True)
+        )
         self._sync_conversation_view()
         if role == "user":
             self.conversation_view.scroll_to_bottom()
         self.application.invalidate()
         return len(self._conversation) - 1
+
+    def add_active_entry(
+        self, role: ConversationRole, content: str, style: str = ""
+    ) -> int:
+        """追加一条仅在当前交互期间重绘的活动内容。"""
+
+        self._conversation.append(
+            self._create_entry(role, content, style, committed=False)
+        )
+        self._sync_conversation_view()
+        if role == "user":
+            self.conversation_view.scroll_to_bottom()
+        self.application.invalidate()
+        return len(self._conversation) - 1
+
+    def commit_entry(self, index: int) -> bool:
+        """提交活动条目，重复提交不产生新的历史输出。"""
+
+        entry = self._conversation[index]
+        if entry.committed:
+            return False
+        self._conversation[index] = replace(entry, committed=True)
+        return True
+
+    def committed_entries(self) -> list[ConversationEntry]:
+        """返回已完成且可写入终端历史的条目。"""
+
+        return [entry for entry in self._conversation if entry.committed]
+
+    def active_entries(self) -> list[ConversationEntry]:
+        """返回仅供底部视口重绘的活动条目。"""
+
+        return [entry for entry in self._conversation if not entry.committed]
 
     def add_history_entries(
         self,
@@ -642,7 +678,8 @@ class ChatScreen:
         if not entries:
             return
         self._conversation.extend(
-            self._create_entry(role, content) for role, content in entries
+            self._create_entry(role, content, committed=True)
+            for role, content in entries
         )
         self._sync_conversation_view()
         self.conversation_view.scroll_to_bottom()
@@ -657,7 +694,10 @@ class ChatScreen:
 
     @staticmethod
     def _create_entry(
-        role: ConversationRole, content: str, style: str = ""
+        role: ConversationRole,
+        content: str,
+        style: str = "",
+        committed: bool = True,
     ) -> ConversationEntry:
         """创建保存独立文本控件的对话条目，助手消息渲染 Markdown。"""
 
@@ -667,6 +707,7 @@ class ChatScreen:
             content,
             FormattedTextControl(control_text, focusable=False),
             style,
+            committed,
         )
 
     @staticmethod
@@ -1533,7 +1574,7 @@ class ChatScreen:
         self._working_show_elapsed = show_elapsed
         self._working_started = time.monotonic() if message else 0.0
         if message:
-            self._working_entry_index = self.add_entry(
+            self._working_entry_index = self.add_active_entry(
                 "working", self._working_text()
             )
         if message and self._working_task is None:

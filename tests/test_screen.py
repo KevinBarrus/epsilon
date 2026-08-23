@@ -137,6 +137,38 @@ def test_chat_screen_appends_conversation_entries(tmp_path: Path) -> None:
     assert screen._render_entry(index) == "测试回复"
 
 
+def test_chat_screen_commits_active_entry_only_once(tmp_path: Path) -> None:
+    """测试活动条目提交后进入稳定历史，重复提交不会重复生效。"""
+
+    screen = _create_screen(tmp_path)
+    stable_index = screen.add_entry("user", "稳定消息")
+    active_index = screen.add_active_entry("assistant", "流式回复")
+
+    assert [entry.content for entry in screen.committed_entries()] == [
+        "",
+        "稳定消息",
+    ]
+    assert [entry.content for entry in screen.active_entries()] == ["流式回复"]
+    assert screen.commit_entry(active_index) is True
+    assert screen.commit_entry(active_index) is False
+    assert [entry.content for entry in screen.committed_entries()] == [
+        "",
+        "稳定消息",
+        "流式回复",
+    ]
+    assert screen._conversation[stable_index].committed is True
+
+
+def test_working_entry_stays_active(tmp_path: Path) -> None:
+    """测试临时 working 状态不会进入稳定历史。"""
+
+    screen = _create_screen(tmp_path)
+    screen.set_working("thinking")
+
+    assert screen.active_entries()[-1].role == "working"
+    assert all(entry.role != "working" for entry in screen.committed_entries())
+
+
 def test_chat_screen_supports_tool_activity_style(tmp_path: Path) -> None:
     """测试工具活动条目使用独立样式。"""
 
