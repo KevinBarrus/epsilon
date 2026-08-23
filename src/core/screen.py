@@ -19,7 +19,6 @@ from prompt_toolkit.formatted_text import (
 )
 from prompt_toolkit.filters import has_focus
 from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.key_binding.bindings.mouse import typical_mouse_events
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.layout import HSplit, Layout, VSplit, Window
 from prompt_toolkit.layout.controls import FormattedTextControl, UIContent, UIControl
@@ -31,7 +30,7 @@ from prompt_toolkit.layout.containers import (
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.layout.screen import Char, Screen, WritePosition
-from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType, MouseModifier
+from prompt_toolkit.mouse_events import MouseEvent
 from prompt_toolkit.output import Output, create_output
 from prompt_toolkit.output.vt100 import Vt100_Output
 from prompt_toolkit.styles import Style
@@ -286,36 +285,30 @@ _MAX_TOOL_LINES = 8
 def _create_ui_output() -> Output:
     """创建终端输出：定制鼠标模式序列。
 
-    使用基础鼠标模式和拖选模式，避免拦截终端的 Ctrl+滚轮缩放。
+    启用完整鼠标协议，让终端将滚轮和触摸板事件交给界面解析。
     """
 
-    _register_legacy_ctrl_wheel_events()
     output = create_output()
     if isinstance(output, Vt100_Output):
         output.enable_mouse_support = _enable_mouse_support.__get__(  # type: ignore[method-assign]
             output
         )
+        output.disable_mouse_support = _disable_mouse_support.__get__(  # type: ignore[method-assign]
+            output
+        )
     return output
 
 
-def _register_legacy_ctrl_wheel_events() -> None:
-    """补齐旧鼠标协议中 Ctrl 加滚轮的事件码。"""
-
-    typical_mouse_events.setdefault(
-        112,
-        (MouseButton.NONE, MouseEventType.SCROLL_UP, frozenset({MouseModifier.CONTROL})),
-    )
-    typical_mouse_events.setdefault(
-        113,
-        (MouseButton.NONE, MouseEventType.SCROLL_DOWN, frozenset({MouseModifier.CONTROL})),
-    )
-
-
 def _enable_mouse_support(self) -> None:
-    """启用基础和拖选鼠标模式，不启用 SGR 1006 与任意移动模式 1003。"""
+    """启用完整鼠标协议。"""
 
-    self.write_raw("\x1b[?1000h")
-    self.write_raw("\x1b[?1002h")
+    self.write_raw("\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1004h\x1b[?1006h")
+
+
+def _disable_mouse_support(self) -> None:
+    """关闭完整鼠标协议，恢复外层终端行为。"""
+
+    self.write_raw("\x1b[?1006l\x1b[?1004l\x1b[?1003l\x1b[?1002l\x1b[?1000l")
 
 
 class _TrackedContainer(Container):

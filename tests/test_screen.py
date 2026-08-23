@@ -1372,8 +1372,8 @@ def test_auto_copy_can_be_disabled(tmp_path: Path) -> None:
     assert copied == []
 
 
-def test_mouse_support_enables_basic_and_drag_modes() -> None:
-    """测试自定义输出启用基础与拖选模式，不拦截终端缩放。"""
+def test_mouse_support_enables_complete_protocol() -> None:
+    """测试自定义输出启用完整鼠标协议。"""
 
     from core.screen import _enable_mouse_support
 
@@ -1385,29 +1385,20 @@ def test_mouse_support_enables_basic_and_drag_modes() -> None:
 
     _enable_mouse_support(_Output())
 
-    assert "\x1b[?1000h" in written
-    assert "\x1b[?1002h" in written
-    assert "\x1b[?1006h" not in written
-    assert not any("1003" in item for item in written)
+    assert written == ["\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1004h\x1b[?1006h"]
 
 
-def test_legacy_ctrl_wheel_events_are_registered() -> None:
-    """测试旧鼠标协议的 Ctrl 加滚轮不会触发解析异常。"""
+def test_mouse_support_disables_complete_protocol() -> None:
+    """测试退出时关闭完整鼠标协议。"""
 
-    from prompt_toolkit.key_binding.bindings.mouse import typical_mouse_events
-    from prompt_toolkit.mouse_events import MouseButton, MouseEventType, MouseModifier
+    from core.screen import _disable_mouse_support
 
-    from core.screen import _register_legacy_ctrl_wheel_events
+    written: list[str] = []
 
-    _register_legacy_ctrl_wheel_events()
+    class _Output:
+        def write_raw(self, text: str) -> None:
+            written.append(text)
 
-    assert typical_mouse_events[112] == (
-        MouseButton.NONE,
-        MouseEventType.SCROLL_UP,
-        frozenset({MouseModifier.CONTROL}),
-    )
-    assert typical_mouse_events[113] == (
-        MouseButton.NONE,
-        MouseEventType.SCROLL_DOWN,
-        frozenset({MouseModifier.CONTROL}),
-    )
+    _disable_mouse_support(_Output())
+
+    assert written == ["\x1b[?1006l\x1b[?1004l\x1b[?1003l\x1b[?1002l\x1b[?1000l"]
