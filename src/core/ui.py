@@ -172,7 +172,7 @@ async def run_chat(
 
         # 先更新界面，让用户立即看到本轮输入和待生成的回复区域
         screen.add_entry("user", prompt)
-        response_index = screen.add_entry("assistant", "")
+        response_index = screen.add_active_entry("assistant", "")
         response_parts: list[str] = []
         thinking_open = False
         tool_activity_indices: dict[str, int] = {}
@@ -211,7 +211,7 @@ async def run_chat(
                 if event.reasoning:
                     # 思考过程合并进回复条目（\x00 标记包裹，渲染时斜体灰）
                     if awaiting_response_after_tool:
-                        response_index = screen.add_entry("assistant", "")
+                        response_index = screen.add_active_entry("assistant", "")
                         awaiting_response_after_tool = False
                         response_parts.clear()
                         thinking_open = False
@@ -226,7 +226,7 @@ async def run_chat(
                         screen.append_to_entry(response_index, event.reasoning)
                 else:
                     if awaiting_response_after_tool:
-                        response_index = screen.add_entry("assistant", "")
+                        response_index = screen.add_active_entry("assistant", "")
                         awaiting_response_after_tool = False
                         response_parts.clear()
                     if thinking_open:
@@ -236,8 +236,9 @@ async def run_chat(
                     response_parts.append(event.content)
                     screen.append_to_entry(response_index, event.content)
             elif isinstance(event, ToolCallEvent):
+                screen.commit_entry(response_index)
                 summary = _tool_call_summary(event.tool_call)
-                tool_activity_indices[event.tool_call.call_id] = screen.add_entry(
+                tool_activity_indices[event.tool_call.call_id] = screen.add_active_entry(
                     "tool",
                     summary,
                     style="class:tool-pending",
@@ -258,6 +259,7 @@ async def run_chat(
                     else:
                         screen.set_entry_style(index, "class:tool-success")
                         _update_tool_result(screen, index, event)
+                    screen.commit_entry(index)
                 screen.set_working(
                     "thinking",
                     show_elapsed=not agent_loop.show_thinking,
@@ -297,6 +299,7 @@ async def run_chat(
                     )
                 )
             screen.append_to_entry(response_index, "(cancelled)")
+            screen.commit_entry(response_index)
             raise
         except (AgentError, AgentLoopError) as exc:
             # 模型请求失败时保留部分回复和结构化错误状态
@@ -312,6 +315,7 @@ async def run_chat(
                 )
             )
             screen.append_to_entry(response_index, f"Error: {exc}")
+            screen.commit_entry(response_index)
         else:
             # 流式响应完成后，按 AgentLoop 返回顺序保存本轮新增消息
             _persist_new_messages(session, result.new_messages)
@@ -324,6 +328,7 @@ async def run_chat(
                 )
             _update_persistence_status(screen, session)
             await refresh_balance()
+            screen.commit_entry(response_index)
         finally:
             # 本轮请求结束（成功/失败/取消），清除 working 提示
             screen.set_working(None)

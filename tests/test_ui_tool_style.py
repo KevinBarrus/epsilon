@@ -54,6 +54,7 @@ class FakeScreen:
         self.styles: list[str] = []
         self.initial_styles: list[str] = []
         self.style_updates: list[tuple[int, str]] = []
+        self.committed_indices: list[int] = []
         FakeScreen.instances.append(self)
 
     def add_entry(self, role: str, content: str, style: str = "") -> int:
@@ -61,6 +62,15 @@ class FakeScreen:
         self.styles.append(style)
         self.initial_styles.append(style)
         return len(self.entries) - 1
+
+    def add_active_entry(self, role: str, content: str, style: str = "") -> int:
+        return self.add_entry(role, content, style)
+
+    def commit_entry(self, index: int) -> bool:
+        if index in self.committed_indices:
+            return False
+        self.committed_indices.append(index)
+        return True
 
     def set_entry_style(self, index: int, style: str) -> None:
         self.styles[index] = style
@@ -124,6 +134,7 @@ async def test_tool_entry_flows_pending_to_success(
     # 初始为待执行样式，执行后同一条目流转为成功
     assert "class:tool-pending" in screen.initial_styles
     assert screen.style_updates[-1][1] == "class:tool-success"
+    assert screen.committed_indices == [1, 2, 3]
 
 
 @pytest.mark.asyncio
@@ -145,3 +156,4 @@ async def test_tool_entry_flows_pending_to_error(tmp_path, monkeypatch) -> None:
 
     assert "class:tool-pending" in screen.initial_styles
     assert screen.style_updates[-1][1] == "class:tool-error"
+    assert screen.committed_indices == [1, 2, 3]

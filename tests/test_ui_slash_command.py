@@ -47,6 +47,12 @@ async def test_run_chat_start_skill_injects_active_skill(
             self.entries.append((role, content))
             return len(self.entries) - 1
 
+        def add_active_entry(self, role: str, content: str, style: str = "") -> int:
+            return self.add_entry(role, content, style)
+
+        def commit_entry(self, index: int) -> bool:
+            return True
+
         def add_history_entries(self, entries) -> None:
             pass
 
@@ -117,6 +123,12 @@ async def test_run_chat_unknown_command_does_not_call_model(
         def add_entry(self, role: str, content: str, style: str = "") -> int:
             self.entries.append((role, content))
             return len(self.entries) - 1
+
+        def add_active_entry(self, role: str, content: str, style: str = "") -> int:
+            return self.add_entry(role, content, style)
+
+        def commit_entry(self, index: int) -> bool:
+            return True
 
         def add_history_entries(self, entries) -> None:
             pass

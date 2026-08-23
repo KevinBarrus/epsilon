@@ -48,6 +48,12 @@ class FakeScreen:
     def add_entry(self, role: str, content: str, style: str = "") -> int:
         return 0
 
+    def add_active_entry(self, role: str, content: str, style: str = "") -> int:
+        return self.add_entry(role, content, style)
+
+    def commit_entry(self, index: int) -> bool:
+        return True
+
     def add_history_entries(self, entries) -> None:
         pass
 

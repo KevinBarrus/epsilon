@@ -123,6 +123,12 @@ async def test_run_chat_retries_once_with_forced_context_compaction(
             self.entries.append((role, content))
             return len(self.entries) - 1
 
+        def add_active_entry(self, role: str, content: str, style: str = "") -> int:
+            return self.add_entry(role, content, style)
+
+        def commit_entry(self, index: int) -> bool:
+            return True
+
         def add_history_entries(self, entries) -> None:
             self.entries.extend(entries)
 
@@ -328,6 +334,12 @@ async def test_run_chat_refreshes_balance_after_turn(
             self.entries.append((role, content))
             return len(self.entries) - 1
 
+        def add_active_entry(self, role: str, content: str, style: str = "") -> int:
+            return self.add_entry(role, content, style)
+
+        def commit_entry(self, index: int) -> bool:
+            return True
+
         def add_history_entries(self, entries) -> None:
             pass
 
@@ -412,6 +424,12 @@ class _ThinkingScreen:
     def add_entry(self, role: str, content: str, style: str = "") -> int:
         self.entries.append((role, content))
         return len(self.entries) - 1
+
+    def add_active_entry(self, role: str, content: str, style: str = "") -> int:
+        return self.add_entry(role, content, style)
+
+    def commit_entry(self, index: int) -> bool:
+        return True
 
     def add_history_entries(self, entries) -> None:
         self.entries.extend(entries)
