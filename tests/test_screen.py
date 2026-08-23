@@ -584,6 +584,84 @@ def test_submitted_input_is_saved_to_in_memory_history(tmp_path: Path) -> None:
     ]
 
 
+def test_input_arrows_restore_history_and_move_multiline_cursor(tmp_path: Path) -> None:
+    """测试空输入恢复历史，有内容时上下键只移动多行光标。"""
+
+    screen = ChatScreen(
+        create_status_info("test-model", "暂不可查询", tmp_path),
+        on_submit=lambda prompt: None,
+    )
+
+    class FakeApplication:
+        """避免测试启动真实后台任务。"""
+
+        def create_background_task(self, coroutine):
+            coroutine.close()
+            return None
+
+    class SubmitEvent:
+        """提供提交按键处理器所需的最小应用对象。"""
+
+        app = FakeApplication()
+
+    submit_binding = next(
+        binding
+        for binding in screen._key_bindings.bindings
+        if _binding_key(binding) == "c-m" and binding.filter()
+    )
+    screen.input_area.text = "上一条输入"
+    submit_binding.handler(SubmitEvent())
+    screen.input_area.text = "最新输入"
+    submit_binding.handler(SubmitEvent())
+
+    class FakeEvent:
+        """提供输入方向键处理器所需的最小事件对象。"""
+
+        current_buffer = screen.input_area.buffer
+
+    def invoke(key: str) -> None:
+        binding = next(
+            binding
+            for binding in screen._key_bindings.bindings
+            if _binding_key(binding) == key
+            and binding.handler.__name__ == f"move_input_{'up' if key == 'up' else 'down'}"
+        )
+        binding.handler(FakeEvent())
+
+    invoke("up")
+    assert screen.input_area.text == "最新输入"
+
+    screen.input_area.text = "第一行\n第二行"
+    screen.input_area.buffer.cursor_position = len(screen.input_area.text)
+    invoke("up")
+    assert screen.input_area.buffer.document.cursor_position_row == 0
+    invoke("down")
+    assert screen.input_area.buffer.document.cursor_position_row == 1
+
+
+def test_input_arrows_restore_conversation_bottom(tmp_path: Path) -> None:
+    """测试输入方向键会让滚动中的对话区恢复到底部。"""
+
+    screen = _create_screen(tmp_path)
+    screen.input_area.text = "输入内容"
+    screen.conversation_view.scroll_by(1)
+
+    class FakeEvent:
+        """提供输入方向键处理器所需的最小事件对象。"""
+
+        current_buffer = screen.input_area.buffer
+
+    binding = next(
+        binding
+        for binding in screen._key_bindings.bindings
+        if _binding_key(binding) == "up"
+        and binding.handler.__name__ == "move_input_up"
+    )
+    binding.handler(FakeEvent())
+
+    assert screen.conversation_view.follow_output is True
+
+
 def test_chat_screen_accepts_logo_provider(tmp_path: Path) -> None:
     """测试 Logo 接口可以向会话顶部提供内容。"""
 

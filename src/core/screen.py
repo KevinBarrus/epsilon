@@ -540,6 +540,8 @@ class ChatScreen:
         self._last_input_copy = ""
         self._conversation: list[ConversationEntry] = []
         self._input_history = InMemoryHistory()
+        self._input_history_cursor: int | None = None
+        self._restoring_input_history = False
         self._last_input_length = 0
         self.input_area = TextArea(
             prompt="",
@@ -1111,6 +1113,7 @@ class ChatScreen:
                 cursor_position=buffer.cursor_position,
             )
             self._input_history.append_string(self.input_area.text)
+            self._input_history_cursor = None
             self.input_area.text = ""
             self._request_task = event.app.create_background_task(
                 self._submit(prompt)
@@ -1131,6 +1134,38 @@ class ChatScreen:
             if self._command_picker is not None:
                 self._command_picker.move(1)
                 self.application.invalidate()
+
+        @key_bindings.add(
+            "up",
+            filter=input_focused & ~embedded_active & ~command_picker_active,
+            eager=True,
+        )
+        def move_input_up(event) -> None:
+            """按 Codex 规则处理输入框上移与历史恢复。"""
+
+            buffer = event.current_buffer
+            self.conversation_view.scroll_to_bottom()
+            if self._input_history_cursor is not None or not buffer.text:
+                self._navigate_input_history(-1)
+            else:
+                buffer.cursor_up()
+            self.application.invalidate()
+
+        @key_bindings.add(
+            "down",
+            filter=input_focused & ~embedded_active & ~command_picker_active,
+            eager=True,
+        )
+        def move_input_down(event) -> None:
+            """按 Codex 规则处理输入框下移与历史恢复。"""
+
+            buffer = event.current_buffer
+            self.conversation_view.scroll_to_bottom()
+            if self._input_history_cursor is not None:
+                self._navigate_input_history(1)
+            else:
+                buffer.cursor_down()
+            self.application.invalidate()
 
         @key_bindings.add(
             "tab",
@@ -1252,6 +1287,8 @@ class ChatScreen:
         """
 
         text = buffer.text
+        if text and not self._restoring_input_history:
+            self._input_history_cursor = None
         if not text.startswith("/"):
             # 命令补全不再适用：清除残留列表并恢复状态栏
             if self._command_picker is not None:
@@ -1290,6 +1327,38 @@ class ChatScreen:
             len(draft.text),
         )
         self.application.invalidate()
+
+    def _navigate_input_history(self, direction: int) -> None:
+        """在当前会话历史中移动，并把光标放到恢复文本末尾。"""
+
+        history = self._input_history.get_strings()
+        if not history:
+            return
+        if direction < 0:
+            if self._input_history_cursor is None:
+                self._input_history_cursor = len(history) - 1
+            else:
+                self._input_history_cursor = max(0, self._input_history_cursor - 1)
+        elif self._input_history_cursor is not None:
+            if self._input_history_cursor >= len(history) - 1:
+                self._input_history_cursor = None
+                self._restoring_input_history = True
+                try:
+                    self.input_area.buffer.text = ""
+                finally:
+                    self._restoring_input_history = False
+                return
+            self._input_history_cursor += 1
+        else:
+            return
+
+        text = history[self._input_history_cursor]
+        self._restoring_input_history = True
+        try:
+            self.input_area.buffer.text = text
+            self.input_area.buffer.cursor_position = len(text)
+        finally:
+            self._restoring_input_history = False
 
     def _render_entry(self, index: int) -> str:
         """返回对话条目的纯文本，不添加角色前缀。"""
