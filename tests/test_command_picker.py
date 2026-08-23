@@ -24,16 +24,16 @@ def test_command_picker_defaults_to_first_item() -> None:
     assert picker.selected.text == "model"
 
 
-def test_command_picker_move_wraps_around() -> None:
-    """测试光标越界时循环。"""
+def test_command_picker_move_stays_at_boundaries() -> None:
+    """测试光标到达首尾后保持边界。"""
 
     picker = CommandPicker(_completions(["model", "start-skill", "stop-skill"]))
 
-    picker.move(-1)   # 顶部向上 → 底部
-    assert picker.selected.text == "stop-skill"
+    picker.move(-1)
+    assert picker.selected.text == "model"
 
-    picker.move(2)    # 底部向下 → 第二项
-    assert picker.selected.text == "start-skill"
+    picker.move(10)
+    assert picker.selected.text == "stop-skill"
 
 
 def test_command_picker_renders_name_and_meta() -> None:
@@ -111,10 +111,27 @@ def test_command_picker_scrolls_to_keep_selection_visible() -> None:
     assert picker.window.vertical_scroll > 0
 
     picker = CommandPicker(_completions([f"cmd-{index}" for index in range(20)]))
-    picker.move(19)   # 移到最后一个选项
-    max_scroll = max(0, 20 - CommandPicker._VISIBLE_ROWS)
+    picker.move(19)
+    start, end = picker._line_ranges()[19]
+    scroll = picker.window.vertical_scroll
 
-    assert picker.window.vertical_scroll == max_scroll
+    assert start >= scroll
+    assert end <= scroll + CommandPicker._VISIBLE_ROWS
+
+
+def test_command_picker_scroll_uses_rendered_lines() -> None:
+    """测试带描述的候选项按实际终端行数滚动。"""
+
+    picker = CommandPicker(
+        [Completion(f"cmd-{index}", display_meta="description") for index in range(10)]
+    )
+
+    picker.move(5)
+
+    start, end = picker._line_ranges()[5]
+    scroll = picker.window.vertical_scroll
+    assert start >= scroll
+    assert end <= scroll + CommandPicker._VISIBLE_ROWS
 
 
 @pytest.mark.asyncio

@@ -38,11 +38,11 @@ class CommandPicker:
         self.window.vertical_scroll = 0
 
     def move(self, offset: int) -> None:
-        """移动光标，越界时循环到另一端并保持选中项可见。"""
+        """移动光标，到达首尾后停留并保持选中项可见。"""
 
         if not self._completions:
             return
-        self._cursor = (self._cursor + offset) % len(self._completions)
+        self._cursor = max(0, min(len(self._completions) - 1, self._cursor + offset))
         self._follow_cursor()
 
     def update_completions(self, completions: list[Completion]) -> None:
@@ -52,13 +52,12 @@ class CommandPicker:
         old_texts = [completion.text for completion in self._completions]
         if new_texts == old_texts:
             return
-        if self._completions:
-            current = self._completions[self._cursor].text
+        current = self.selected.text if self.selected is not None else None
         self._completions = list(completions)
         if not new_texts:
             return
         for index, completion in enumerate(completions):
-            if completion.text == current:
+            if current is not None and completion.text == current:
                 self._cursor = index
                 break
         else:
@@ -76,9 +75,32 @@ class CommandPicker:
     def _follow_cursor(self) -> None:
         """滚动窗口让当前光标项始终可见。"""
 
-        max_scroll = max(0, len(self._completions) - self._VISIBLE_ROWS)
-        desired_scroll = max(0, self._cursor - (self._VISIBLE_ROWS - 1))
-        self.window.vertical_scroll = min(max_scroll, desired_scroll)
+        ranges = self._line_ranges()
+        if not ranges:
+            self.window.vertical_scroll = 0
+            return
+
+        item_start, item_end = ranges[self._cursor]
+        total_lines = ranges[-1][1]
+        max_scroll = max(0, total_lines - self._VISIBLE_ROWS)
+        scroll = self.window.vertical_scroll
+        if item_start < scroll:
+            scroll = item_start
+        elif item_end > scroll + self._VISIBLE_ROWS:
+            scroll = item_end - self._VISIBLE_ROWS
+        self.window.vertical_scroll = max(0, min(max_scroll, scroll))
+
+    def _line_ranges(self) -> list[tuple[int, int]]:
+        """返回每个候选项对应的实际渲染行范围。"""
+
+        ranges: list[tuple[int, int]] = []
+        line = 0
+        for index, completion in enumerate(self._completions):
+            ranges.append((line, line + 1))
+            line += 1
+            if index != self._cursor and completion.display_meta:
+                line += 1
+        return ranges
 
     def _click(self, index: int) -> None:
         """鼠标点击某行：选中该项并应用补全。"""
