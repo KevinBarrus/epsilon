@@ -106,8 +106,6 @@ ConversationRole = Literal["user", "assistant", "tool", "logo", "thinking", "wor
 _WORKING_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 # 工具输出折叠阈值（超过时显示省略提示，对齐 Pi）
 _MAX_TOOL_LINES = 8
-# 模型高频返回增量时，界面最多每秒重建 30 次 Markdown
-_STREAM_RENDER_INTERVAL_SECONDS = 1 / 30
 
 
 class SlashCommandCompleter(Completer):
@@ -276,8 +274,6 @@ class ChatScreen:
         self._inline_mode = inline_mode
         self._last_viewport_size: tuple[int, int] | None = None
         self._history_flush_task: asyncio.Task | None = None
-        self._pending_stream_entries: set[int] = set()
-        self._stream_render_task: asyncio.Task[None] | None = None
         self._finalize_tasks: set[asyncio.Task[None]] = set()
         self._request_active = False
         self._request_task: asyncio.Task[None] | None = None
@@ -394,7 +390,6 @@ class ChatScreen:
         if entry.committed or entry.finalizing:
             return False
         if entry.role == "assistant" and getattr(self.application, "_is_running", False):
-            self._pending_stream_entries.discard(index)
             self._set_entry_content(index, entry.content, streaming=True)
             self._conversation[index] = replace(entry, finalizing=True)
             task = asyncio.create_task(
@@ -619,38 +614,9 @@ class ChatScreen:
         """向指定的对话条目追加流式文本。"""
 
         entry = self._conversation[index]
-        self._conversation[index] = replace(entry, content=entry.content + content)
-        if (
-            entry.role == "assistant"
-            and not entry.committed
-            and not entry.finalizing
-            and getattr(self.application, "_is_running", False)
-        ):
-            self._pending_stream_entries.add(index)
-            if self._stream_render_task is None or self._stream_render_task.done():
-                self._stream_render_task = asyncio.create_task(
-                    self._render_stream_entries()
-                )
-        else:
-            self._set_entry_content(index, self._conversation[index].content)
+        # 数据立即写入控件，Application 自身按 min_redraw_interval 合并重绘
+        self._set_entry_content(index, entry.content + content)
         self.application.invalidate()
-
-    async def _render_stream_entries(self) -> None:
-        """合并短时间内的模型增量，只重建一次活动回复。"""
-
-        try:
-            await asyncio.sleep(_STREAM_RENDER_INTERVAL_SECONDS)
-            pending = self._pending_stream_entries
-            self._pending_stream_entries = set()
-            for index in pending:
-                if index >= len(self._conversation):
-                    continue
-                entry = self._conversation[index]
-                if entry.role == "assistant" and not entry.committed and not entry.finalizing:
-                    self._set_entry_content(index, entry.content, streaming=True)
-            self.application.invalidate()
-        finally:
-            self._stream_render_task = None
 
     async def _finalize_assistant_entry(
         self,

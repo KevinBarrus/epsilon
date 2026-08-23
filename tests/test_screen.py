@@ -16,7 +16,6 @@ from core.screen import (
     ChatScreen,
     DraftState,
     SlashCommandCompleter,
-    _STREAM_RENDER_INTERVAL_SECONDS,
 )
 from core.status import create_status_info
 from core.model import ToolCall
@@ -181,10 +180,10 @@ async def test_inline_screen_publishes_only_stable_entries(
 
 
 @pytest.mark.asyncio
-async def test_running_screen_batches_assistant_stream_updates(
+async def test_running_screen_updates_assistant_stream_immediately(
     tmp_path: Path,
 ) -> None:
-    """测试高频助手增量合并后再刷新 Markdown。"""
+    """测试流式分片立即写入助手控件。"""
 
     screen = _create_screen(tmp_path)
     screen.application._is_running = True
@@ -192,9 +191,6 @@ async def test_running_screen_batches_assistant_stream_updates(
 
     screen.append_to_entry(index, "```python\nprint")
     screen.append_to_entry(index, "(1)")
-
-    assert screen._conversation[index].control.text == []
-    await asyncio.sleep(_STREAM_RENDER_INTERVAL_SECONDS * 2)
 
     assert ("class:md-code-block", "print(1)") in screen._conversation[index].control.text
 
