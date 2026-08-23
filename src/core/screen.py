@@ -267,7 +267,6 @@ class ChatScreen:
         self._info_line_provider = info_line_provider
         self._copy_hint_provider = copy_hint_provider
         self._inline_mode = inline_mode
-        self._inline_history = InlineHistory()
         self._history_flush_task: asyncio.Task | None = None
         self._request_active = False
         self._request_task: asyncio.Task[None] | None = None
@@ -330,6 +329,10 @@ class ChatScreen:
             cursor=CursorShape.BLINKING_BEAM,
             clipboard=Osc52Clipboard(),
             output=create_output(),
+        )
+        self._inline_history = InlineHistory(
+            style=self.application.style,
+            output=self.application.output,
         )
         # Logo 作为对话区第一条内容，随对话增长自然上移出屏幕
         if self._has_logo():
@@ -404,7 +407,10 @@ class ChatScreen:
             for role, content in entries
         )
         start = len(self._conversation) - len(entries)
-        self._inline_history.extend(self._history_text(index) for index in range(start, len(self._conversation)))
+        self._inline_history.extend(
+            self._history_fragments(index)
+            for index in range(start, len(self._conversation))
+        )
         for index in range(start, len(self._conversation)):
             self._conversation[index] = replace(
                 self._conversation[index], history_published=True
@@ -457,7 +463,7 @@ class ChatScreen:
         if not entry.committed or entry.history_published:
             return
         self._conversation[index] = replace(entry, history_published=True)
-        self._inline_history.add(self._history_text(index))
+        self._inline_history.add(self._history_fragments(index))
         if getattr(self.application, "_is_running", False):
             if self._history_flush_task is None or self._history_flush_task.done():
                 self._history_flush_task = asyncio.create_task(self._flush_history())
@@ -470,17 +476,63 @@ class ChatScreen:
         finally:
             self._history_flush_task = None
 
-    def _history_text(self, index: int, expanded: bool = False) -> str:
-        """把稳定条目转换为终端回滚区使用的纯文本。"""
+    def _history_fragments(
+        self, index: int, expanded: bool = False
+    ) -> StyleAndTextTuples:
+        """把稳定条目转换为保留主题样式的终端历史片段。"""
 
         entry = self._conversation[index]
         if entry.role == "logo":
-            return to_plain_text(self._render_logo())
+            return to_formatted_text(self._render_logo())
         if entry.role == "assistant":
-            return to_plain_text(_render_assistant_content(entry.content))
+            return _render_assistant_content(entry.content)
         if entry.role == "tool":
-            return to_plain_text(self._tool_entry_fragments(entry.content, expanded))
-        return entry.content
+            return self._tool_entry_fragments(entry.content, expanded)
+        if entry.role == "user":
+            return self._user_history_fragments(entry.content)
+        return [(entry.style, entry.content)]
+
+    def _user_history_fragments(self, content: str) -> StyleAndTextTuples:
+        """按终端当前宽度渲染用户消息，确保每个可见行都有灰色背景。"""
+
+        # 最后一列不写满，避免终端自动换行把边框变成额外空白行
+        columns = self.application.output.get_size().columns
+        line_width = max(3, columns - 1)
+        content_width = line_width - 2
+        background = "class:conversation-user"
+        lines: list[StyleAndTextTuples] = [[(background, " " * line_width)]]
+        line: StyleAndTextTuples = [(background, " ")]
+        used_width = 1
+
+        def append_line() -> None:
+            """补齐右侧留白并保存当前用户消息行。"""
+
+            nonlocal line, used_width
+            line.append((background, " " * (line_width - used_width)))
+            lines.append(line)
+            line = [(background, " ")]
+            used_width = 1
+
+        for style, text in render_markdown(content):
+            styled = f"{background} {style}".strip()
+            for character in text:
+                if character == "\n":
+                    append_line()
+                    continue
+                character_width = max(1, wcswidth(character))
+                if used_width > 1 and used_width - 1 + character_width > content_width:
+                    append_line()
+                line.append((styled, character))
+                used_width += character_width
+        append_line()
+        lines.append([(background, " " * line_width)])
+
+        fragments: StyleAndTextTuples = []
+        for line_index, row in enumerate(lines):
+            if line_index:
+                fragments.append(("", "\n"))
+            fragments.extend(row)
+        return fragments
 
     @staticmethod
     def _control_text(role: ConversationRole, content: str) -> object:
@@ -543,7 +595,7 @@ class ChatScreen:
         )
         entry.control.reset()
         if self._inline_mode and index in self._expanded_entries:
-            self._inline_history.add(self._history_text(index, expanded=True))
+            self._inline_history.add(self._history_fragments(index, expanded=True))
             if getattr(self.application, "_is_running", False):
                 if self._history_flush_task is None or self._history_flush_task.done():
                     self._history_flush_task = asyncio.create_task(self._flush_history())

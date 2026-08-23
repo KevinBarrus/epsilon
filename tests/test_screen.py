@@ -161,11 +161,11 @@ async def test_inline_screen_publishes_only_stable_entries(
 
     assert [entry.role for entry in screen.active_entries()] == ["assistant"]
     await screen.flush_history()
-    assert capsys.readouterr().out == "稳定消息\n"
+    assert "稳定消息" in capsys.readouterr().out
 
     screen.commit_entry(active_index)
     await screen.flush_history()
-    assert capsys.readouterr().out == "活动回复\n"
+    assert "活动回复" in capsys.readouterr().out
     assert len(screen._conversation_content.children) == 0
     assert screen._bottom_container.children == [
         screen._input_tracker,
@@ -195,6 +195,32 @@ def test_inline_clear_keeps_stable_entries_out_of_active_view(tmp_path: Path) ->
 
     assert [entry.content for entry in screen.committed_entries()] == ["已提交"]
     assert screen.active_entries() == []
+
+
+def test_inline_history_user_message_keeps_gray_background(tmp_path: Path) -> None:
+    """测试写入终端历史的用户消息仍保留整行灰色背景。"""
+
+    class EmptyLogo:
+        """提供空 Logo，避免干扰历史条目。"""
+
+        def render(self) -> str:
+            """返回空文本。"""
+
+            return ""
+
+    screen = ChatScreen(
+        create_status_info("test-model", "n/a", tmp_path),
+        logo_provider=EmptyLogo(),
+    )
+    index = screen.add_entry("user", "第一行\n第二行")
+
+    fragments = screen._history_fragments(index)
+    visible = [(style, text) for style, text in fragments if text != "\n"]
+
+    assert visible
+    assert all("class:conversation-user" in style for style, _ in visible)
+    assert "第一行" in to_plain_text(fragments)
+    assert "第二行" in to_plain_text(fragments)
 
 
 @pytest.mark.asyncio
