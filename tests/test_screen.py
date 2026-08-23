@@ -197,6 +197,36 @@ def test_inline_clear_keeps_stable_entries_out_of_active_view(tmp_path: Path) ->
     assert screen.active_entries() == []
 
 
+@pytest.mark.asyncio
+async def test_inline_tool_expansion_appends_full_result(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """测试行内工具结果展开时追加完整内容而不是重写旧输出。"""
+
+    class EmptyLogo:
+        """提供空 Logo。"""
+
+        def render(self) -> str:
+            """返回空文本。"""
+
+            return ""
+
+    screen = ChatScreen(
+        create_status_info("test-model", "n/a", tmp_path),
+        logo_provider=EmptyLogo(),
+    )
+    index = screen.add_entry("tool", "摘要\n第一行\n第二行\n第三行")
+    screen.set_tool_result(index, "摘要\n第一行\n第二行\n第三行")
+    await screen.flush_history()
+    capsys.readouterr()
+
+    screen.toggle_tool_expansion()
+    await screen.flush_history()
+
+    assert "第三行" in capsys.readouterr().out
+
+
 def test_chat_screen_commits_active_entry_only_once(tmp_path: Path) -> None:
     """测试活动条目提交后进入稳定历史，重复提交不会重复生效。"""
 

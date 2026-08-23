@@ -470,7 +470,7 @@ class ChatScreen:
         finally:
             self._history_flush_task = None
 
-    def _history_text(self, index: int) -> str:
+    def _history_text(self, index: int, expanded: bool = False) -> str:
         """把稳定条目转换为终端回滚区使用的纯文本。"""
 
         entry = self._conversation[index]
@@ -479,7 +479,7 @@ class ChatScreen:
         if entry.role == "assistant":
             return to_plain_text(_render_assistant_content(entry.content))
         if entry.role == "tool":
-            return to_plain_text(self._tool_entry_fragments(entry.content, False))
+            return to_plain_text(self._tool_entry_fragments(entry.content, expanded))
         return entry.content
 
     @staticmethod
@@ -542,6 +542,11 @@ class ChatScreen:
             entry.content, index in self._expanded_entries
         )
         entry.control.reset()
+        if self._inline_mode and index in self._expanded_entries:
+            self._inline_history.add(self._history_text(index, expanded=True))
+            if getattr(self.application, "_is_running", False):
+                if self._history_flush_task is None or self._history_flush_task.done():
+                    self._history_flush_task = asyncio.create_task(self._flush_history())
         self.application.invalidate()
 
     def _tool_entry_fragments(self, content: str, expanded: bool):
