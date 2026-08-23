@@ -19,6 +19,7 @@ from prompt_toolkit.formatted_text import (
 )
 from prompt_toolkit.filters import has_focus
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.key_binding.bindings.mouse import typical_mouse_events
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.layout import HSplit, Layout, VSplit, Window
 from prompt_toolkit.layout.controls import FormattedTextControl, UIContent, UIControl
@@ -30,7 +31,7 @@ from prompt_toolkit.layout.containers import (
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.layout.screen import Char, Screen, WritePosition
-from prompt_toolkit.mouse_events import MouseEvent
+from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType, MouseModifier
 from prompt_toolkit.output import Output, create_output
 from prompt_toolkit.output.vt100 import Vt100_Output
 from prompt_toolkit.styles import Style
@@ -288,12 +289,26 @@ def _create_ui_output() -> Output:
     使用基础鼠标模式和拖选模式，避免拦截终端的 Ctrl+滚轮缩放。
     """
 
+    _register_legacy_ctrl_wheel_events()
     output = create_output()
     if isinstance(output, Vt100_Output):
         output.enable_mouse_support = _enable_mouse_support.__get__(  # type: ignore[method-assign]
             output
         )
     return output
+
+
+def _register_legacy_ctrl_wheel_events() -> None:
+    """补齐旧鼠标协议中 Ctrl 加滚轮的事件码。"""
+
+    typical_mouse_events.setdefault(
+        112,
+        (MouseButton.NONE, MouseEventType.SCROLL_UP, frozenset({MouseModifier.CONTROL})),
+    )
+    typical_mouse_events.setdefault(
+        113,
+        (MouseButton.NONE, MouseEventType.SCROLL_DOWN, frozenset({MouseModifier.CONTROL})),
+    )
 
 
 def _enable_mouse_support(self) -> None:

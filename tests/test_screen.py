@@ -1389,3 +1389,25 @@ def test_mouse_support_enables_basic_and_drag_modes() -> None:
     assert "\x1b[?1002h" in written
     assert "\x1b[?1006h" not in written
     assert not any("1003" in item for item in written)
+
+
+def test_legacy_ctrl_wheel_events_are_registered() -> None:
+    """测试旧鼠标协议的 Ctrl 加滚轮不会触发解析异常。"""
+
+    from prompt_toolkit.key_binding.bindings.mouse import typical_mouse_events
+    from prompt_toolkit.mouse_events import MouseButton, MouseEventType, MouseModifier
+
+    from core.screen import _register_legacy_ctrl_wheel_events
+
+    _register_legacy_ctrl_wheel_events()
+
+    assert typical_mouse_events[112] == (
+        MouseButton.NONE,
+        MouseEventType.SCROLL_UP,
+        frozenset({MouseModifier.CONTROL}),
+    )
+    assert typical_mouse_events[113] == (
+        MouseButton.NONE,
+        MouseEventType.SCROLL_DOWN,
+        frozenset({MouseModifier.CONTROL}),
+    )
