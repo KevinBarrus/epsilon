@@ -7,7 +7,6 @@ from pathlib import Path
 from .agent_loop import (
     AgentLoop,
     AgentLoopCancelled,
-    AgentLoopError,
     RetryEvent,
     ToolExecutionEvent,
 )
@@ -59,6 +58,9 @@ from .tools import (
 
 
 AGENT_SYSTEM_PROMPT = load_prompt("agent")
+TOOL_LIMIT_NOTICE = (
+    "Stopped after reaching the tool call round limit. Send a new message to continue."
+)
 
 
 @dataclass(frozen=True)
@@ -298,7 +300,7 @@ async def run_chat(
             screen.append_to_entry(response_index, "(cancelled)")
             await commit_response()
             raise
-        except (AgentError, AgentLoopError) as exc:
+        except AgentError as exc:
             # 模型请求失败时保留部分回复和结构化错误状态
             response = "".join(response_parts)
             session.add_message(
@@ -306,9 +308,7 @@ async def run_chat(
                     role="assistant",
                     content=response,
                     status="error",
-                    error_category=(
-                        exc.category if isinstance(exc, AgentError) else "internal"
-                    ),
+                    error_category=exc.category,
                 )
             )
             screen.append_to_entry(response_index, f"Error: {exc}")
@@ -316,6 +316,9 @@ async def run_chat(
         else:
             # 流式响应完成后，按 AgentLoop 返回顺序保存本轮新增消息
             _persist_new_messages(session, result.new_messages)
+            if result.stop_reason == "tool_limit":
+                session.add_assistant_message(TOOL_LIMIT_NOTICE)
+                screen.add_entry("assistant", TOOL_LIMIT_NOTICE)
             if not _persist_compactions(session, new_compactions):
                 screen.set_status_message("Session persistence degraded")
             if fallback_used:

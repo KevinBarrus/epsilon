@@ -79,6 +79,45 @@ async def test_agent_loop_executes_tool_and_continues_model_request(
 
 
 @pytest.mark.asyncio
+async def test_agent_loop_returns_completed_tool_chain_at_round_limit(tmp_path) -> None:
+    """测试工具轮次耗尽时保留已完成工具链，不再发起下一次请求"""
+
+    class ToolOnlyClient:
+        def __init__(self) -> None:
+            self.requests = 0
+
+        async def stream_response(self, messages, tools=(), thinking_level=None):
+            self.requests += 1
+            yield ToolCallEvent(
+                ToolCall("call-1", "read_file", {"path": "README.md"})
+            )
+
+    (tmp_path / "README.md").write_text("项目说明", encoding="utf-8")
+    manager = ToolManager()
+    manager.register_local(*create_read_file_tool(tmp_path))
+    client = ToolOnlyClient()
+
+    result = await AgentLoop(client, manager, max_tool_rounds=1).run(
+        [Message(role="user", content="读取说明")]
+    )
+
+    assert result.stop_reason == "tool_limit"
+    assert result.new_messages == (
+        Message(
+            role="assistant",
+            content="",
+            tool_calls=(ToolCall("call-1", "read_file", {"path": "README.md"}),),
+        ),
+        Message(role="tool", content="项目说明", tool_call_id="call-1"),
+    )
+    assert result.messages == (
+        Message(role="user", content="读取说明"),
+        *result.new_messages,
+    )
+    assert client.requests == 1
+
+
+@pytest.mark.asyncio
 async def test_agent_loop_yields_after_text_delta_for_ui_refresh() -> None:
     """测试连续文本分片之间会让出事件循环给界面刷新任务。"""
 

@@ -5,6 +5,7 @@ import random
 from asyncio import sleep as yield_to_event_loop
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
+from typing import Literal
 
 from .context import ContextBuildResult
 from .error_policy import AgentErrorPolicy
@@ -52,10 +53,7 @@ class AgentRunResult:
     messages: tuple[Message, ...]
     final_content: str
     new_messages: tuple[Message, ...] = ()
-
-
-class AgentLoopError(RuntimeError):
-    """Agent Loop 无法继续执行时抛出的异常。"""
+    stop_reason: Literal["completed", "tool_limit"] = "completed"
 
 
 class AgentLoopCancelled(asyncio.CancelledError):
@@ -125,7 +123,7 @@ class AgentLoop:
         text_parts: list[str] = []
         tool_calls: list[ToolCall] = []
         try:
-            for _ in range(self._max_tool_rounds + 1):
+            for _ in range(self._max_tool_rounds):
                 text_parts = []
                 tool_calls = []
                 request_messages = context
@@ -187,7 +185,12 @@ class AgentLoop:
                     if on_event is not None:
                         await on_event(ToolExecutionEvent(tool_call, result))
 
-            raise AgentLoopError("tool call limit exceeded")
+            return AgentRunResult(
+                tuple(context),
+                assistant_content,
+                tuple(new_messages),
+                stop_reason="tool_limit",
+            )
         except asyncio.CancelledError as exc:
             if text_parts or tool_calls:
                 new_messages.append(
