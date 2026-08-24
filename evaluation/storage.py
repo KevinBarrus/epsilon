@@ -36,6 +36,11 @@ def _result_to_record(result: EvaluationResult) -> dict[str, object]:
         "scenario": result.scenario,
         "evaluation_type": result.evaluation_type,
         "repetition": result.repetition,
+        "task_id": result.task_id,
+        "source": result.source,
+        "evaluation_group": result.evaluation_group,
+        "base_commit": result.base_commit,
+        "changed_files": list(result.changed_files),
         "passed": result.passed,
         "duration_ms": result.duration_ms,
         "model_requests": result.model_requests,
@@ -76,6 +81,11 @@ def _result_from_record(record: object) -> EvaluationResult:
         evaluation_type=_evaluation_type(record.get("evaluation_type", "core-regression")),
         run_id=str(record.get("run_id", "legacy")),
         repetition=_required_int_or_default(record, "repetition", 1),
+        task_id=_optional_string(record.get("task_id")),
+        source=_optional_string(record.get("source")),
+        evaluation_group=_optional_string(record.get("evaluation_group")),
+        base_commit=_optional_string(record.get("base_commit")),
+        changed_files=_string_tuple(record.get("changed_files", [])),
         model_requests=_required_int(record, "model_requests"),
         tool_calls=_required_int(record, "tool_calls"),
         tool_failures=_required_int(record, "tool_failures"),
@@ -144,6 +154,14 @@ def _optional_string(value: object) -> str | None:
     if value is None or isinstance(value, str):
         return value
     raise ValueError("评测结果可选字符串字段无效")
+
+
+def _string_tuple(value: object) -> tuple[str, ...]:
+    """读取字符串数组字段。"""
+
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError("评测结果字符串数组字段无效")
+    return tuple(value)
 
 
 def _required_int(record: dict[str, object], key: str) -> int:

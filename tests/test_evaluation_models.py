@@ -50,3 +50,21 @@ def test_evaluation_models_keep_scenario_and_actual_token_metadata() -> None:
     assert result.actual_tokens == 80
     assert result.evaluation_type == "core-regression"
     assert result.error_stage is None
+
+
+def test_evaluation_models_keep_real_task_identity() -> None:
+    """测试真实任务结果保留来源、基线和变更文件。"""
+
+    result = EvaluationResult(
+        scenario="django__django-10914",
+        duration_ms=20,
+        task_id="django__django-10914",
+        source="swebench-lite",
+        evaluation_group="normal",
+        base_commit="base",
+        changed_files=("django/conf/global_settings.py",),
+    )
+
+    assert result.task_id == "django__django-10914"
+    assert result.source == "swebench-lite"
+    assert result.changed_files == ("django/conf/global_settings.py",)

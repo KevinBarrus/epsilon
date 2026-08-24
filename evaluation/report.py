@@ -56,9 +56,14 @@ def render_report(
   {_evaluation_section(
       "真实任务评测",
       "使用真实模型任务衡量 Agent 的任务完成能力",
-      _results_of_type(results, "real-task"),
+      [
+          result
+          for result in _results_of_type(results, "real-task")
+          if result.source is None
+      ],
       "任务完成率",
   )}
+  {_swebench_sections(results)}
   {_evaluation_section(
       "代码正确性任务",
       "使用独立 pytest 结果验证模型修改的代码，不依赖回复关键词",
@@ -86,6 +91,26 @@ def _results_of_type(
     return [result for result in results if result.evaluation_type == evaluation_type]
 
 
+def _swebench_sections(results: list[EvaluationResult]) -> str:
+    """按来源和运行分组分别汇总真实 SWE-bench 结果。"""
+
+    groups: dict[tuple[str, str], list[EvaluationResult]] = {}
+    for result in results:
+        if result.source is None:
+            continue
+        key = (result.source, result.evaluation_group or "normal")
+        groups.setdefault(key, []).append(result)
+    return "".join(
+        _evaluation_section(
+            f"SWE-bench：{source} · {group}",
+            "独立工作区中的真实仓库修复，使用官方 Harness 验证补丁",
+            group_results,
+            "任务完成率",
+        )
+        for (source, group), group_results in sorted(groups.items())
+    )
+
+
 def _evaluation_section(
     title: str,
     description: str,
@@ -96,7 +121,7 @@ def _evaluation_section(
 
     metrics = calculate_metrics(results)
     rows = "\n".join(_result_row(result) for result in results)
-    rows = rows or "<tr><td colspan=13>暂无结果</td></tr>"
+    rows = rows or "<tr><td colspan=18>暂无结果</td></tr>"
     failures = "\n".join(
         _failure_row(result, assertion)
         for result in results
@@ -127,7 +152,7 @@ def _evaluation_section(
   </section>
   <h3>场景结果</h3>
   <table>
-    <thead><tr><th>场景</th><th>类型</th><th>状态</th><th>错误类别</th><th>失败阶段</th><th>错误详情</th><th>耗时</th><th>模型请求</th><th>工具调用</th><th>重试</th><th>压缩</th><th>估算上下文 Token</th><th>服务端实际 Token</th></tr></thead>
+    <thead><tr><th>场景</th><th>任务 ID</th><th>来源</th><th>分组</th><th>基线提交</th><th>变更文件</th><th>类型</th><th>状态</th><th>错误类别</th><th>失败阶段</th><th>错误详情</th><th>耗时</th><th>模型请求</th><th>工具调用</th><th>重试</th><th>压缩</th><th>估算上下文 Token</th><th>服务端实际 Token</th></tr></thead>
     <tbody>{rows}</tbody>
   </table>
   <h3>失败断言</h3>
@@ -145,6 +170,11 @@ def _result_row(result: EvaluationResult) -> str:
     status_class = "pass" if result.passed else "fail"
     return (
         f"<tr><td>{escape(result.scenario)}</td>"
+        f"<td>{escape(result.task_id or '-')}</td>"
+        f"<td>{escape(result.source or '-')}</td>"
+        f"<td>{escape(result.evaluation_group or '-')}</td>"
+        f"<td>{escape(result.base_commit or '-')}</td>"
+        f"<td>{escape(', '.join(result.changed_files) or '-')}</td>"
         f"<td>{_evaluation_type_label(result.evaluation_type)}</td>"
         f"<td class=\"{status_class}\">{status}</td>"
         f"<td>{escape(result.error_category or '-')}</td>"

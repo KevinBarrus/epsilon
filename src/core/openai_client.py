@@ -184,6 +184,7 @@ def _to_model_error(error: BaseException) -> ModelClientError:
     if isinstance(error, (ConnectionError, TimeoutError, asyncio.TimeoutError)) or error_name in {
         "APIConnectionError",
         "APITimeoutError",
+        "RemoteProtocolError",
     }:
         is_timeout = isinstance(error, (TimeoutError, asyncio.TimeoutError)) or error_name == "APITimeoutError"
         category: ErrorCategory = "timeout" if is_timeout else "network"

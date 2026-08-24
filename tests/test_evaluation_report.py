@@ -63,6 +63,32 @@ def test_render_report_separates_regression_and_real_task_metrics() -> None:
     assert "offline-script" not in real_task_section
 
 
+def test_render_report_separates_swebench_sources_and_groups() -> None:
+    """测试 Lite、完整集和压缩专项不会共享同一个指标分母。"""
+
+    html = render_report(
+        [
+            EvaluationResult(
+                scenario="lite",
+                task_id="lite",
+                source="swebench-lite",
+                evaluation_group="normal",
+                duration_ms=1,
+            ),
+            EvaluationResult(
+                scenario="full",
+                task_id="full",
+                source="swebench-full",
+                evaluation_group="compaction",
+                duration_ms=1,
+            ),
+        ]
+    )
+
+    assert "SWE-bench：swebench-lite · normal" in html
+    assert "SWE-bench：swebench-full · compaction" in html
+
+
 def test_render_report_marks_small_sample_percentiles_as_observations() -> None:
     """测试小样本报告不会把百分位数表达为稳定性能结论。"""
 

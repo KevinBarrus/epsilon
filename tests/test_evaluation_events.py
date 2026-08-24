@@ -1,6 +1,6 @@
 import pytest
 
-from core.agent_loop import ToolExecutionEvent
+from core.agent_loop import RetryEvent, ToolExecutionEvent
 from core.model import TextDelta, ToolCall, ToolCallEvent, ToolResult, UsageEvent
 from evaluation.events import event_to_record, message_to_record
 
@@ -28,6 +28,17 @@ def test_event_to_record_normalizes_usage_event() -> None:
         "prompt_tokens": 12,
         "completion_tokens": 3,
         "total_tokens": 15,
+    }
+
+
+def test_event_to_record_normalizes_model_retry() -> None:
+    """测试模型重试事件可保存到评测轨迹。"""
+
+    assert event_to_record(RetryEvent(1, 2, 0.5)) == {
+        "type": "model_retry",
+        "attempt": 1,
+        "max_attempts": 2,
+        "delay_seconds": 0.5,
     }
 
 

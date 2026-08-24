@@ -232,6 +232,29 @@ async def test_client_wraps_request_error() -> None:
 
 
 @pytest.mark.asyncio
+async def test_client_retries_remote_protocol_error() -> None:
+    """测试服务端提前断开流时按可重试网络错误处理。"""
+
+    class RemoteProtocolError(Exception):
+        """模拟 httpx 的协议中断异常。"""
+
+    class FailingCompletions:
+        async def create(self, **kwargs: object) -> AsyncIterator[object]:
+            raise RemoteProtocolError("stream closed")
+
+    failing_sdk = SimpleNamespace(
+        chat=SimpleNamespace(completions=FailingCompletions())
+    )
+    client = OpenAICompatibleClient(_settings(), failing_sdk)  # type: ignore[arg-type]
+
+    with pytest.raises(ModelClientError) as error_info:
+        await _collect(client)
+
+    assert error_info.value.category == "network"
+    assert error_info.value.retryable
+
+
+@pytest.mark.asyncio
 async def test_client_classifies_timeout_error() -> None:
     """测试超时异常会被转换为可重试的统一错误。"""
 

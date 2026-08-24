@@ -38,6 +38,11 @@ class EvaluationResult:
     evaluation_type: EvaluationType = "core-regression"
     run_id: str = field(default_factory=lambda: str(uuid4()))
     repetition: int = 1
+    task_id: str | None = None
+    source: str | None = None
+    evaluation_group: str | None = None
+    base_commit: str | None = None
+    changed_files: tuple[str, ...] = ()
     model_requests: int = 0
     tool_calls: int = 0
     tool_failures: int = 0
