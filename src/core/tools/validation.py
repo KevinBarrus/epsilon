@@ -34,15 +34,18 @@ def validate_tool_arguments(
     for name, value in arguments.items():
         property_schema = properties.get(name)
         if property_schema is None:
+            if definition.source == "local":
+                raise ToolArgumentError(f"unknown tool argument: {name}")
             continue
         if not isinstance(property_schema, Mapping):
             raise ToolArgumentError(f"invalid argument definition: {name}")
-        _validate_value(name, value, property_schema.get("type"))
+        _validate_value(name, value, property_schema)
 
 
-def _validate_value(name: str, value: object, value_type: object) -> None:
+def _validate_value(name: str, value: object, schema: Mapping[object, object]) -> None:
     """校验单个参数的基础 JSON 类型。"""
 
+    value_type = schema.get("type")
     if value_type == "string" and not isinstance(value, str):
         raise ToolArgumentError(f"argument {name} must be a string")
     if value_type == "object" and not isinstance(value, dict):
@@ -59,3 +62,7 @@ def _validate_value(name: str, value: object, value_type: object) -> None:
         not isinstance(value, int | float) or isinstance(value, bool)
     ):
         raise ToolArgumentError(f"argument {name} must be a number")
+    minimum = schema.get("minimum")
+    if isinstance(minimum, int | float) and isinstance(value, int | float) and not isinstance(value, bool):
+        if value < minimum:
+            raise ToolArgumentError(f"argument {name} must be >= {minimum}")

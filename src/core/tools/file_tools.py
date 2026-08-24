@@ -4,13 +4,14 @@ import os
 from pathlib import Path
 
 from ..model import ToolCall, ToolResult
-from .args import optional_path, string_argument
+from .args import optional_path, optional_positive_integer, string_argument
 from .output_limits import limit_tool_output
 from .path_utils import resolve_workspace_path
 from .types import ToolDefinition, ToolHandler
 
 
 MAX_FILE_READ_BYTES = 1_000_000
+DEFAULT_FILE_READ_LINES = 400
 IGNORED_SEARCH_DIRECTORIES = {".git", ".epsilon", ".venv", "node_modules"}
 
 
@@ -19,22 +20,47 @@ def create_read_file_tool(workspace: Path) -> tuple[ToolDefinition, ToolHandler]
 
     async def read_file(tool_call: ToolCall) -> ToolResult:
         path = resolve_workspace_path(workspace, string_argument(tool_call, "path"))
+        offset = optional_positive_integer(tool_call, "offset", 1)
+        limit = optional_positive_integer(tool_call, "limit", DEFAULT_FILE_READ_LINES)
         if not path.is_file():
             raise ValueError("target is not a file")
         if path.stat().st_size > MAX_FILE_READ_BYTES:
             raise ValueError("file exceeds the 1 MB read limit")
+        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+        if lines and offset > len(lines):
+            raise ValueError(f"offset {offset} exceeds file line count {len(lines)}")
+        selected = lines[offset - 1 : offset - 1 + limit]
+        content = "".join(selected)
+        last_line = offset + len(selected) - 1
+        if last_line < len(lines):
+            content = (
+                f"{content.rstrip()}\n\n"
+                f"[Showing lines {offset}-{last_line} of {len(lines)}. "
+                f"Use offset={last_line + 1} to continue.]"
+            )
         return ToolResult(
             call_id=tool_call.call_id,
-            content=limit_tool_output(path.read_text(encoding="utf-8")),
+            content=limit_tool_output(content),
         )
 
     return (
         ToolDefinition(
             name="read_file",
-            description="Read the full text content of a file in the workspace",
+            description=(
+                "Read text lines from a file in the workspace. Use offset and limit "
+                "to read large files in parts."
+            ),
             parameters={
                 "type": "object",
-                "properties": {"path": {"type": "string"}},
+                "properties": {
+                    "path": {"type": "string"},
+                    "offset": {"type": "integer", "minimum": 1, "default": 1},
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "default": DEFAULT_FILE_READ_LINES,
+                    },
+                },
                 "required": ["path"],
             },
             source="local",

@@ -48,6 +48,46 @@ async def test_read_file_returns_complete_text(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_read_file_returns_requested_line_range_and_continuation(tmp_path: Path) -> None:
+    """测试读取工具按行返回范围，并提示下一次读取位置"""
+
+    (tmp_path / "README.md").write_text("one\ntwo\nthree\nfour\n", encoding="utf-8")
+    manager = _manager(tmp_path, create_read_file_tool(tmp_path))
+
+    result = await manager.execute(
+        _call("read_file", {"path": "README.md", "offset": 2, "limit": 2})
+    )
+
+    assert result.content == (
+        "two\nthree\n\n"
+        "[Showing lines 2-3 of 4. Use offset=4 to continue.]"
+    )
+    assert result.is_error is False
+
+
+@pytest.mark.asyncio
+async def test_read_file_rejects_unknown_or_invalid_range_arguments(tmp_path: Path) -> None:
+    """测试本地工具不会静默忽略未知参数和非法分页参数"""
+
+    (tmp_path / "README.md").write_text("one\n", encoding="utf-8")
+    manager = _manager(tmp_path, create_read_file_tool(tmp_path))
+
+    unknown = await manager.execute(
+        _call("read_file", {"path": "README.md", "unused": True})
+    )
+    invalid = await manager.execute(
+        _call("read_file", {"path": "README.md", "offset": 0})
+    )
+
+    assert unknown.is_error is True
+    assert unknown.error_category == "invalid_request"
+    assert "unknown tool argument: unused" in unknown.content
+    assert invalid.is_error is True
+    assert invalid.error_category == "invalid_request"
+    assert "argument offset must be >= 1" in invalid.content
+
+
+@pytest.mark.asyncio
 async def test_read_file_truncates_large_output(tmp_path: Path) -> None:
     """测试读取工具会限制返回给模型的文本大小。"""
 
