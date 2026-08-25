@@ -13,7 +13,9 @@ from evaluation.swebench import (
     DEFAULT_SWEBENCH_MAX_TOOL_ROUNDS,
     EVALUATION_COMMAND_TIMEOUT_SECONDS,
     HarnessResult,
+    SWEBENCH_ENVIRONMENT_CONTRACT_VERSION,
     SwebenchTask,
+    _configuration_record,
     _model_error_record,
     _result,
     _tool_manager,
@@ -51,6 +53,16 @@ def test_agent_prompt_states_evaluation_workspace_contract(tmp_path: Path) -> No
     assert "search_files.path must be an existing directory" in prompt
     assert "source snapshot without Git history" in prompt
     assert "diagnose the test entry point" in prompt
+
+
+def test_configuration_record_keeps_environment_contract_version() -> None:
+    """测试评测轨迹记录环境引导版本，便于复跑归因。"""
+
+    assert _configuration_record(40) == {
+        "type": "configuration",
+        "max_tool_rounds": 40,
+        "swebench_environment_contract": SWEBENCH_ENVIRONMENT_CONTRACT_VERSION,
+    }
 
 
 def test_create_patch_ignores_python_runtime_cache(tmp_path: Path) -> None:

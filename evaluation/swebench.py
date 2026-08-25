@@ -44,6 +44,7 @@ DATASETS = {
 }
 EVALUATION_COMMAND_TIMEOUT_SECONDS = 300.0
 DEFAULT_SWEBENCH_MAX_TOOL_ROUNDS = 40
+SWEBENCH_ENVIRONMENT_CONTRACT_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -147,7 +148,7 @@ async def run_task(
         prompt = _agent_prompt(task, prepared.workspace)
         session.add_user_message(prompt)
         events.append(message_to_record(Message(role="user", content=prompt)))
-        events.append({"type": "configuration", "max_tool_rounds": effective_tool_rounds})
+        events.append(_configuration_record(effective_tool_rounds))
 
         async def collect_event(event: object) -> None:
             """保存完整模型和工具轨迹，供结果报告复核。"""
@@ -449,6 +450,16 @@ def _agent_prompt(task: SwebenchTask, workspace: Path) -> str:
         "production code.\n\n"
         f"Issue:\n{task.issue}"
     )
+
+
+def _configuration_record(max_tool_rounds: int) -> dict[str, object]:
+    """生成可用于复现实验条件的评测配置记录。"""
+
+    return {
+        "type": "configuration",
+        "max_tool_rounds": max_tool_rounds,
+        "swebench_environment_contract": SWEBENCH_ENVIRONMENT_CONTRACT_VERSION,
+    }
 
 
 def _result(
