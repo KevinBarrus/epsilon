@@ -44,6 +44,7 @@ class EvaluationResult:
     base_commit: str | None = None
     changed_files: tuple[str, ...] = ()
     model_requests: int = 0
+    tool_rounds: int = 0
     tool_calls: int = 0
     tool_failures: int = 0
     retries: int = 0
@@ -54,6 +55,7 @@ class EvaluationResult:
     error_category: str | None = None
     error_stage: str | None = None
     error_message: str | None = None
+    stop_reason: str | None = None
     model_request_durations_ms: tuple[float, ...] = ()
     events: tuple[dict[str, object], ...] = ()
     assertions: tuple[EvaluationAssertion, ...] = ()

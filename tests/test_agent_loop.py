@@ -102,6 +102,7 @@ async def test_agent_loop_returns_completed_tool_chain_at_round_limit(tmp_path) 
     )
 
     assert result.stop_reason == "tool_limit"
+    assert result.tool_rounds == 1
     assert result.new_messages == (
         Message(
             role="assistant",

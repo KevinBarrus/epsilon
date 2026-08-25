@@ -44,6 +44,7 @@ def _result_to_record(result: EvaluationResult) -> dict[str, object]:
         "passed": result.passed,
         "duration_ms": result.duration_ms,
         "model_requests": result.model_requests,
+        "tool_rounds": result.tool_rounds,
         "tool_calls": result.tool_calls,
         "tool_failures": result.tool_failures,
         "retries": result.retries,
@@ -54,6 +55,7 @@ def _result_to_record(result: EvaluationResult) -> dict[str, object]:
         "error_category": result.error_category,
         "error_stage": result.error_stage,
         "error_message": result.error_message,
+        "stop_reason": result.stop_reason,
         "model_request_durations_ms": list(result.model_request_durations_ms),
         "events": list(result.events),
         "assertions": [
@@ -87,6 +89,7 @@ def _result_from_record(record: object) -> EvaluationResult:
         base_commit=_optional_string(record.get("base_commit")),
         changed_files=_string_tuple(record.get("changed_files", [])),
         model_requests=_required_int(record, "model_requests"),
+        tool_rounds=_required_int_or_default(record, "tool_rounds", 0),
         tool_calls=_required_int(record, "tool_calls"),
         tool_failures=_required_int(record, "tool_failures"),
         retries=_required_int(record, "retries"),
@@ -97,6 +100,7 @@ def _result_from_record(record: object) -> EvaluationResult:
         error_category=_optional_string(record.get("error_category")),
         error_stage=_optional_string(record.get("error_stage")),
         error_message=_optional_string(record.get("error_message")),
+        stop_reason=_optional_string(record.get("stop_reason")),
         model_request_durations_ms=tuple(
             float(value)
             for value in record.get("model_request_durations_ms", [])

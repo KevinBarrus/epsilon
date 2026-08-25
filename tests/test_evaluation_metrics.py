@@ -107,11 +107,13 @@ def test_results_can_round_trip_through_jsonl(tmp_path: Path) -> None:
         run_id="run-1",
         repetition=2,
         model_requests=expected.model_requests,
+        tool_rounds=3,
         tool_calls=expected.tool_calls,
         tool_failures=expected.tool_failures,
         retries=expected.retries,
         compactions=expected.compactions,
         persistence_degraded=expected.persistence_degraded,
+        stop_reason="tool_limit",
         events=({"type": "tool_call", "name": "read_file"},),
         assertions=expected.assertions,
     )

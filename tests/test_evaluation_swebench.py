@@ -113,6 +113,29 @@ def test_model_request_error_keeps_model_failure_category() -> None:
     assert result.error_category == "model"
 
 
+def test_swebench_result_keeps_agent_stop_trace() -> None:
+    """测试真实任务结果保留 Agent 的回合数和停止原因。"""
+
+    task = SwebenchTask("example__1", "example/repo", "base", "issue", "swebench-lite")
+
+    result = _result(
+        task,
+        0.0,
+        None,
+        [],
+        (),
+        (),
+        False,
+        False,
+        None,
+        tool_rounds=4,
+        stop_reason="tool_limit",
+    )
+
+    assert result.tool_rounds == 4
+    assert result.stop_reason == "tool_limit"
+
+
 def test_model_error_record_omits_request_content() -> None:
     """测试模型失败轨迹只保留类别和异常类型。"""
 

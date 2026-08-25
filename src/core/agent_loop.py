@@ -54,6 +54,7 @@ class AgentRunResult:
     final_content: str
     new_messages: tuple[Message, ...] = ()
     stop_reason: Literal["completed", "tool_limit"] = "completed"
+    tool_rounds: int = 0
 
 
 class AgentLoopCancelled(asyncio.CancelledError):
@@ -122,6 +123,7 @@ class AgentLoop:
         new_messages: list[Message] = []
         text_parts: list[str] = []
         tool_calls: list[ToolCall] = []
+        tool_rounds = 0
         try:
             for _ in range(self._max_tool_rounds):
                 text_parts = []
@@ -171,8 +173,10 @@ class AgentLoop:
                         tuple(context),
                         assistant_content,
                         tuple(new_messages),
+                        tool_rounds=tool_rounds,
                     )
 
+                tool_rounds += 1
                 for tool_call in completed_tool_calls:
                     result = await self._tool_manager.execute(tool_call)
                     tool_message = Message(
@@ -190,6 +194,7 @@ class AgentLoop:
                 assistant_content,
                 tuple(new_messages),
                 stop_reason="tool_limit",
+                tool_rounds=tool_rounds,
             )
         except asyncio.CancelledError as exc:
             if text_parts or tool_calls:

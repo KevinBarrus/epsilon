@@ -121,7 +121,7 @@ def _evaluation_section(
 
     metrics = calculate_metrics(results)
     rows = "\n".join(_result_row(result) for result in results)
-    rows = rows or "<tr><td colspan=18>暂无结果</td></tr>"
+    rows = rows or "<tr><td colspan=20>暂无结果</td></tr>"
     failures = "\n".join(
         _failure_row(result, assertion)
         for result in results
@@ -152,7 +152,7 @@ def _evaluation_section(
   </section>
   <h3>场景结果</h3>
   <table>
-    <thead><tr><th>场景</th><th>任务 ID</th><th>来源</th><th>分组</th><th>基线提交</th><th>变更文件</th><th>类型</th><th>状态</th><th>错误类别</th><th>失败阶段</th><th>错误详情</th><th>耗时</th><th>模型请求</th><th>工具调用</th><th>重试</th><th>压缩</th><th>估算上下文 Token</th><th>服务端实际 Token</th></tr></thead>
+    <thead><tr><th>场景</th><th>任务 ID</th><th>来源</th><th>分组</th><th>基线提交</th><th>变更文件</th><th>类型</th><th>状态</th><th>错误类别</th><th>失败阶段</th><th>错误详情</th><th>停止原因</th><th>耗时</th><th>模型请求</th><th>工具回合</th><th>工具调用</th><th>重试</th><th>压缩</th><th>估算上下文 Token</th><th>服务端实际 Token</th></tr></thead>
     <tbody>{rows}</tbody>
   </table>
   <h3>失败断言</h3>
@@ -180,8 +180,10 @@ def _result_row(result: EvaluationResult) -> str:
         f"<td>{escape(result.error_category or '-')}</td>"
         f"<td>{escape(result.error_stage or '-')}</td>"
         f"<td>{escape(result.error_message or '-')}</td>"
+        f"<td>{escape(result.stop_reason or '-')}</td>"
         f"<td>{result.duration_ms:.2f} ms</td>"
-        f"<td>{result.model_requests}</td><td>{result.tool_calls}</td>"
+        f"<td>{result.model_requests}</td><td>{result.tool_rounds}</td>"
+        f"<td>{result.tool_calls}</td>"
         f"<td>{result.retries}</td><td>{result.compactions}</td>"
         f"<td>{result.estimated_tokens}</td>"
         f"<td>{'' if result.actual_tokens is None else result.actual_tokens}</td></tr>"

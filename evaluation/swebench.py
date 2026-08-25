@@ -167,6 +167,13 @@ async def run_task(
             on_event=collect_event,
             build_context=context_builder,
         )
+        events.append(
+            {
+                "type": "agent_end",
+                "stop_reason": result.stop_reason,
+                "tool_rounds": result.tool_rounds,
+            }
+        )
         for message in result.new_messages:
             session.add_message(message)
         events.append(message_to_record(Message(role="assistant", content=result.final_content)))
@@ -193,7 +200,19 @@ async def run_task(
                 "压缩专项没有实际触发上下文压缩",
             ),
         )
-        return _result(task, started_at, client, events, assertions, changed_files, compact, not persistence_ok, verification.environment_error)
+        return _result(
+            task,
+            started_at,
+            client,
+            events,
+            assertions,
+            changed_files,
+            compact,
+            not persistence_ok,
+            verification.environment_error,
+            tool_rounds=result.tool_rounds,
+            stop_reason=result.stop_reason,
+        )
     except Exception as exc:
         if isinstance(exc, ModelClientError):
             events.append(_model_error_record(exc))
@@ -427,6 +446,8 @@ def _result(
     persistence_degraded,
     error_message,
     error_category: str | None = None,
+    tool_rounds: int = 0,
+    stop_reason: str | None = None,
 ):
     """将运行统计汇总成统一评测结果。"""
 
@@ -441,6 +462,7 @@ def _result(
         duration_ms=(perf_counter() - started_at) * 1000,
         evaluation_type="real-task",
         model_requests=len(client.requests) if client else 0,
+        tool_rounds=tool_rounds,
         tool_calls=len(tool_events),
         tool_failures=sum(bool(event.get("is_error")) for event in tool_events),
         compactions=sum(event.get("type") == "compaction" for event in events),
@@ -459,6 +481,7 @@ def _result(
             error_message
             or next((assertion.message for assertion in assertions if not assertion.passed), None)
         ),
+        stop_reason=stop_reason,
         model_request_durations_ms=tuple(client.durations_ms) if client else (),
         events=tuple(events),
         assertions=assertions,
