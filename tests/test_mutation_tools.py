@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from core.tools import command_tool
+from core.tools import command_executor
 from core.model import ToolCall
 from core.tools import (
     ApprovalDecision,
@@ -14,6 +14,7 @@ from core.tools import (
     PermissionManager,
     TRUNCATION_NOTICE,
     ToolManager,
+    CommandExecution,
     create_edit_file_tool,
     create_run_command_tool,
     create_write_file_tool,
@@ -200,6 +201,34 @@ async def test_run_command_returns_timeout_error(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_command_uses_injected_executor(tmp_path: Path) -> None:
+    """测试命令工具将执行参数交给注入的后端。"""
+
+    class FakeExecutor:
+        def __init__(self) -> None:
+            self.arguments: tuple[str, Path, float] | None = None
+
+        async def execute(
+            self,
+            command: str,
+            cwd: Path,
+            timeout_seconds: float,
+        ) -> CommandExecution:
+            self.arguments = (command, cwd, timeout_seconds)
+            return CommandExecution(b"from fake", b"", 0)
+
+    executor = FakeExecutor()
+    manager = _manager(
+        create_run_command_tool(tmp_path, timeout_seconds=12, executor=executor)
+    )
+
+    result = await manager.execute(_call("run_command", {"command": "check"}))
+
+    assert result.content == "from fake"
+    assert executor.arguments == ("check", tmp_path, 12)
+
+
+@pytest.mark.asyncio
 async def test_run_command_cancellation_stops_process_group(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -234,9 +263,9 @@ async def test_run_command_cancellation_stops_process_group(
         kwargs.update(received_kwargs)
         return process
 
-    monkeypatch.setattr(command_tool.asyncio, "create_subprocess_shell", create_process)
+    monkeypatch.setattr(command_executor.asyncio, "create_subprocess_shell", create_process)
     monkeypatch.setattr(
-        command_tool.os,
+        command_executor.os,
         "killpg",
         lambda process_id, value: signals.append(value),
     )
@@ -249,5 +278,5 @@ async def test_run_command_cancellation_stops_process_group(
         await task
 
     assert kwargs["start_new_session"] is True
-    assert signals == [command_tool.signal.SIGTERM]
+    assert signals == [command_executor.signal.SIGTERM]
     assert process.communicate_calls == 2

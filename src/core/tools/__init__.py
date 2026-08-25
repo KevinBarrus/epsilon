@@ -6,6 +6,7 @@ from .file_tools import (
     create_search_files_tool,
 )
 from .command_tool import COMMAND_TIMEOUT_SECONDS, create_run_command_tool
+from .command_executor import CommandExecution, CommandExecutor, HostCommandExecutor
 from .manager import PreparedToolCall, ToolManager
 from .mcp import (
     McpToolProvider,
@@ -41,6 +42,9 @@ __all__ = [
     "ApprovalHandler",
     "ApprovalResult",
     "COMMAND_TIMEOUT_SECONDS",
+    "CommandExecution",
+    "CommandExecutor",
+    "HostCommandExecutor",
     "PermissionDenied",
     "PermissionManager",
     "ToolDefinition",
