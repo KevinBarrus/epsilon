@@ -9,7 +9,7 @@ from core.agent_loop import AgentRunResult
 from core.model import ToolResult
 from core.session import Session
 from core.tools import ToolManager
-from evaluation.swebench import _agent_prompt, _changed_files, _normalise_patch_paths, create_patch
+from evaluation.swebench import _agent_prompt, _changed_files, _normalise_patch_paths, _project_guide_paths, create_patch
 from evaluation.swebench import _context_builder
 from evaluation.swebench import (
     DEFAULT_SWEBENCH_MAX_TOOL_ROUNDS,
@@ -56,6 +56,33 @@ def test_agent_prompt_states_evaluation_workspace_contract(tmp_path: Path) -> No
     assert "search_files.path must be an existing directory" in prompt
     assert "source snapshot without Git history" in prompt
     assert "diagnose the test entry point" in prompt
+
+
+def test_agent_prompt_lists_existing_repository_guides_without_reading_content(
+    tmp_path: Path,
+) -> None:
+    """测试评测提示词只列出固定候选资料的相对路径。"""
+
+    (tmp_path / "README.md").write_text("do not preload this", encoding="utf-8")
+    (tmp_path / "CONTRIBUTING.rst").write_text("contributing", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text("project", encoding="utf-8")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "README.txt").write_text("tests", encoding="utf-8")
+    (tmp_path / "notes.md").write_text("ignore", encoding="utf-8")
+    task = SwebenchTask("example__1", "example/repo", "base", "issue", "swebench-lite")
+
+    prompt = _agent_prompt(task, tmp_path)
+
+    assert _project_guide_paths(tmp_path) == (
+        "README.md",
+        "CONTRIBUTING.rst",
+        "pyproject.toml",
+        "tests/README.txt",
+    )
+    assert "- README.md" in prompt
+    assert "- tests/README.txt" in prompt
+    assert "notes.md" not in prompt
+    assert "do not preload this" not in prompt
 
 
 def test_configuration_record_keeps_environment_contract_version() -> None:

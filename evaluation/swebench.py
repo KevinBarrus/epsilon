@@ -45,7 +45,15 @@ DATASETS = {
 }
 EVALUATION_COMMAND_TIMEOUT_SECONDS = 300.0
 DEFAULT_SWEBENCH_MAX_TOOL_ROUNDS = 40
-SWEBENCH_ENVIRONMENT_CONTRACT_VERSION = 1
+SWEBENCH_ENVIRONMENT_CONTRACT_VERSION = 2
+PROJECT_GUIDE_PATTERNS = (
+    "README*",
+    "CONTRIBUTING*",
+    "pyproject.toml",
+    "setup.cfg",
+    "tox.ini",
+    "tests/README*",
+)
 
 
 @dataclass(frozen=True)
@@ -429,6 +437,8 @@ def _context_builder(
 def _agent_prompt(task: SwebenchTask, workspace: Path) -> str:
     """组合真实 Issue 与本次评测工作区的运行约束。"""
 
+    guide_paths = _project_guide_paths(workspace)
+    guide_section = "\n".join(f"- {path}" for path in guide_paths) or "- None found"
     return (
         "Resolve the following repository issue. Inspect the source, make the smallest correct "
         "code change, and run relevant tests when possible. Do not modify tests merely to make "
@@ -443,9 +453,24 @@ def _agent_prompt(task: SwebenchTask, workspace: Path) -> str:
         "for investigation.\n"
         "- Before running tests, inspect the repository's existing test configuration and nearby "
         "tests. If configuration or imports fail, diagnose the test entry point before changing "
-        "production code.\n\n"
+        "production code.\n"
+        "- Read relevant repository guidance files below before choosing test commands. Their "
+        "contents are not preloaded.\n"
+        f"Repository guidance files:\n{guide_section}\n\n"
         f"Issue:\n{task.issue}"
     )
+
+
+def _project_guide_paths(workspace: Path) -> tuple[str, ...]:
+    """返回固定候选集合中真实存在的仓库资料相对路径。"""
+
+    root = workspace.resolve()
+    paths: list[str] = []
+    for pattern in PROJECT_GUIDE_PATTERNS:
+        for path in sorted(root.glob(pattern)):
+            if path.is_file():
+                paths.append(path.relative_to(root).as_posix())
+    return tuple(paths)
 
 
 def _configuration_record(max_tool_rounds: int) -> dict[str, object]:
