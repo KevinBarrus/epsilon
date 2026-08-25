@@ -156,6 +156,42 @@ def test_create_patch_ignores_python_runtime_cache(tmp_path: Path) -> None:
     assert patch == ""
 
 
+def test_create_patch_removes_only_new_runtime_artifacts(tmp_path: Path) -> None:
+    """测试补丁清理不会误删基线已有路径，并覆盖常见新增运行产物。"""
+
+    baseline = tmp_path / "baseline"
+    workspace = tmp_path / "workspace"
+    for root in (baseline, workspace):
+        (root / "module.py").parent.mkdir(parents=True, exist_ok=True)
+        (root / "module.py").write_text("value = 1\n", encoding="utf-8")
+        (root / "tracked.egg-info").mkdir()
+        (root / "tracked.egg-info" / "PKG-INFO").write_text("base\n", encoding="utf-8")
+
+    (workspace / "module.py").write_text("value = 2\n", encoding="utf-8")
+    (workspace / "tracked.egg-info" / "PKG-INFO").write_text("changed\n", encoding="utf-8")
+    for relative_path in (
+        "__pycache__/module.pyc",
+        ".pytest_cache/state",
+        "new.egg-info/PKG-INFO",
+        "build/output.txt",
+        "dist/package.whl",
+        "htmlcov/index.html",
+        ".coverage",
+        "extension.so",
+    ):
+        path = workspace / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"runtime")
+
+    changed_files, patch = create_patch(baseline, workspace)
+
+    assert changed_files == ("module.py", "tracked.egg-info/PKG-INFO")
+    assert "extension.so" not in patch
+    assert not (workspace / "new.egg-info").exists()
+    assert not (workspace / "build").exists()
+    assert (workspace / "tracked.egg-info" / "PKG-INFO").exists()
+
+
 def test_normalise_patch_paths_preserves_standard_headers(tmp_path: Path) -> None:
     """测试路径归一化不破坏标准补丁头部。"""
 

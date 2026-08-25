@@ -60,6 +60,17 @@ PROJECT_GUIDE_PATTERNS = (
     "tox.ini",
     "tests/README*",
 )
+RUNTIME_ARTIFACT_DIRECTORY_NAMES = frozenset(
+    {
+        "__pycache__",
+        ".pytest_cache",
+        "build",
+        "dist",
+        "htmlcov",
+    }
+)
+RUNTIME_ARTIFACT_FILE_NAMES = frozenset({".coverage"})
+RUNTIME_ARTIFACT_FILE_SUFFIXES = (".pyc", ".pyo", ".so")
 
 
 @dataclass(frozen=True)
@@ -366,7 +377,7 @@ def create_patch(baseline: Path, workspace: Path) -> tuple[tuple[str, ...], str]
 
     baseline = baseline.resolve()
     workspace = workspace.resolve()
-    _remove_runtime_artifacts(workspace)
+    _remove_runtime_artifacts(baseline, workspace)
     result = subprocess.run(
         ["git", "diff", "--no-index", "--src-prefix=a/", "--dst-prefix=b/", str(baseline), str(workspace)],
         stdout=subprocess.PIPE,
@@ -379,12 +390,34 @@ def create_patch(baseline: Path, workspace: Path) -> tuple[tuple[str, ...], str]
     return _changed_files(patch), patch
 
 
-def _remove_runtime_artifacts(workspace: Path) -> None:
-    """移除 Python 执行产生的缓存，避免它们被误判为 Agent 补丁。"""
+def _remove_runtime_artifacts(baseline: Path, workspace: Path) -> None:
+    """移除基线不存在的运行产物，避免将测试生成文件写入补丁。"""
 
-    for path in workspace.rglob("__pycache__"):
+    baseline_paths = {path.relative_to(baseline) for path in baseline.rglob("*")}
+    artifacts = [
+        path
+        for path in workspace.rglob("*")
+        if path.relative_to(workspace) not in baseline_paths
+        and _is_runtime_artifact(path)
+    ]
+    for path in sorted(artifacts, key=lambda item: len(item.parts)):
+        if not path.exists():
+            continue
         if path.is_dir():
             shutil.rmtree(path)
+        else:
+            path.unlink()
+
+
+def _is_runtime_artifact(path: Path) -> bool:
+    """判断路径是否为评测执行常见的临时构建产物。"""
+
+    return (
+        path.name in RUNTIME_ARTIFACT_DIRECTORY_NAMES
+        or path.name.endswith(".egg-info")
+        or path.name in RUNTIME_ARTIFACT_FILE_NAMES
+        or path.name.endswith(RUNTIME_ARTIFACT_FILE_SUFFIXES)
+    )
 
 
 def verify_patch(
