@@ -485,6 +485,7 @@ class ChatScreen:
     def add_entry(self, role: ConversationRole, content: str, style: str = "") -> int:
         """向对话区追加一条展示内容，并返回它的索引。"""
 
+        self._stop_working_before_entry(role)
         self._conversation.append(
             self._create_entry(role, content, style, committed=True)
         )
@@ -498,6 +499,7 @@ class ChatScreen:
     ) -> int:
         """追加一条仅在当前交互期间重绘的活动内容。"""
 
+        self._stop_working_before_entry(role)
         self._conversation.append(
             self._create_entry(role, content, style, committed=False)
         )
@@ -1685,12 +1687,40 @@ class ChatScreen:
     def _remove_working_entry(self) -> None:
         """移除对话区中的临时 working 条目。"""
 
-        if self._working_entry_index is None:
-            return
-        if self._working_entry_index < len(self._conversation):
-            self._conversation.pop(self._working_entry_index)
+        index = self._find_working_entry_index()
+        if index is not None:
+            self._conversation.pop(index)
             self._sync_conversation()
         self._working_entry_index = None
+
+    def _stop_working_before_entry(self, role: ConversationRole) -> None:
+        """新增普通条目前移除末尾 working，保持既有条目下标稳定。"""
+
+        if role != "working" and (
+            self._working_message is not None
+            or self._find_working_entry_index() is not None
+        ):
+            self.set_working(None)
+
+    def _find_working_entry_index(self) -> int | None:
+        """返回 working 条目下标，优先走末尾正常路径。"""
+
+        if self._conversation and self._conversation[-1].role == "working":
+            return len(self._conversation) - 1
+        if (
+            self._working_entry_index is not None
+            and self._working_entry_index < len(self._conversation)
+            and self._conversation[self._working_entry_index].role == "working"
+        ):
+            return self._working_entry_index
+        return next(
+            (
+                index
+                for index in range(len(self._conversation) - 1, -1, -1)
+                if self._conversation[index].role == "working"
+            ),
+            None,
+        )
 
     def _working_text(self) -> str:
         """生成当前 working 提示文本，spinner 帧按时间轮转。"""
@@ -1710,9 +1740,11 @@ class ChatScreen:
         """working 提示存在期间持续刷新界面（spinner 动画与秒数）。"""
 
         while self._working_message:
-            if self._working_entry_index is not None:
+            index = self._find_working_entry_index()
+            if index is not None:
+                self._working_entry_index = index
                 self._set_entry_content(
-                    self._working_entry_index,
+                    index,
                     self._working_text(),
                 )
             self.application.invalidate()

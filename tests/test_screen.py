@@ -437,6 +437,27 @@ def test_working_entry_stays_active(tmp_path: Path) -> None:
     assert all(entry.role != "working" for entry in screen.committed_entries())
 
 
+def test_working_entry_does_not_shift_tool_or_response_indices(tmp_path: Path) -> None:
+    """测试多轮工具调用中移除 working 不会让条目下标失效。"""
+
+    screen = _create_screen(tmp_path)
+    response_index = screen.add_active_entry("assistant", "")
+    screen.set_working("thinking")
+    tool_index = screen.add_active_entry("tool", "▸ read_file")
+    screen.set_working("running read_file")
+    next_response_index = screen.add_active_entry("assistant", "")
+
+    # 工具后先展示推理，再收到正文；旧实现在这里删除中间 working，
+    # 会使 next_response_index 指向列表末尾之外
+    screen.set_working(None)
+    screen.set_tool_result(tool_index, "✓ read_file\ncontent")
+    screen.append_to_entry(next_response_index, "继续回复")
+
+    assert screen._conversation[response_index].role == "assistant"
+    assert screen._conversation[tool_index].role == "tool"
+    assert screen._conversation[next_response_index].content == "继续回复"
+
+
 def test_chat_screen_supports_tool_activity_style(tmp_path: Path) -> None:
     """测试工具活动条目使用独立样式。"""
 
