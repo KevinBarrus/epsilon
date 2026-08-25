@@ -4,7 +4,11 @@ from collections.abc import AsyncIterator, Sequence
 import pytest
 
 from core.agent_loop import AgentLoop, AgentLoopCancelled, ToolBatchEvent, ToolExecutionEvent
-from core.end_policy import VERIFICATION_REMINDER, WriteVerificationPolicy
+from core.end_policy import (
+    FAILED_VERIFICATION_REMINDER,
+    VERIFICATION_REMINDER,
+    WriteVerificationPolicy,
+)
 from types import SimpleNamespace
 import core.agent_loop as agent_loop
 from core.context import ContextBuildResult
@@ -154,8 +158,8 @@ async def test_write_verification_policy_reminds_once_after_unverified_write() -
 
 
 @pytest.mark.asyncio
-async def test_write_verification_policy_accepts_failed_command_attempt() -> None:
-    """测试写入后的失败命令也属于可追溯验证尝试，不重复提醒。"""
+async def test_write_verification_policy_reminds_once_after_failed_command() -> None:
+    """测试写后命令失败时追加一次受限的收尾提醒。"""
 
     class WriteThenCommandClient:
         def __init__(self) -> None:
@@ -167,8 +171,11 @@ async def test_write_verification_policy_accepts_failed_command_attempt() -> Non
                 yield ToolCallEvent(ToolCall("write-1", "write_file", {}))
             elif self.requests == 2:
                 yield ToolCallEvent(ToolCall("check-1", "run_command", {}))
-            else:
+            elif self.requests == 3:
                 yield TextDelta("验证失败，已说明原因")
+            else:
+                assert messages[-1] == Message("system", FAILED_VERIFICATION_REMINDER)
+                yield TextDelta("无法修复验证环境")
 
     manager = ToolManager()
     manager.register_local(
@@ -186,12 +193,61 @@ async def test_write_verification_policy_accepts_failed_command_attempt() -> Non
         end_policy=WriteVerificationPolicy(),
     ).run([Message("user", "修改并验证")])
 
-    assert result.verification_reminder_injected is False
+    assert result.verification_reminder_injected is True
     assert result.write_count == 1
     assert result.post_write_command_results == (
         ToolResult("check-1", "failed", is_error=True),
     )
-    assert client.requests == 3
+    assert client.requests == 4
+
+
+@pytest.mark.asyncio
+async def test_write_verification_policy_accepts_success_after_failed_command() -> None:
+    """测试模型自行重跑成功后不会再注入收尾提醒。"""
+
+    class RetryCommandClient:
+        def __init__(self) -> None:
+            self.requests = 0
+
+        async def stream_response(self, messages, tools=(), thinking_level=None):
+            self.requests += 1
+            if self.requests == 1:
+                yield ToolCallEvent(ToolCall("write-1", "write_file", {}))
+            elif self.requests in {2, 3}:
+                yield ToolCallEvent(ToolCall(f"check-{self.requests}", "run_command", {}))
+            else:
+                yield TextDelta("验证成功")
+
+    attempts = 0
+
+    async def command_result(call: ToolCall) -> ToolResult:
+        nonlocal attempts
+        attempts += 1
+        return await _tool_result(
+            call,
+            "failed" if attempts == 1 else "passed",
+            attempts == 1,
+        )
+
+    manager = ToolManager()
+    manager.register_local(
+        ToolDefinition("write_file", "write", {"type": "object"}, "local", "read", False),
+        lambda call: _tool_result(call, "written"),
+    )
+    manager.register_local(
+        ToolDefinition("run_command", "check", {"type": "object"}, "local", "read", False),
+        command_result,
+    )
+
+    result = await AgentLoop(
+        RetryCommandClient(),
+        manager,
+        end_policy=WriteVerificationPolicy(),
+    ).run([Message("user", "修改并验证")])
+
+    assert result.final_content == "验证成功"
+    assert result.verification_reminder_injected is False
+    assert len(result.post_write_command_results) == 2
 
 
 @pytest.mark.asyncio

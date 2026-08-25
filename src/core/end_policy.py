@@ -11,6 +11,10 @@ VERIFICATION_REMINDER = (
     "You modified files but have not run a verification command afterwards. "
     "Run the most relevant check now, or clearly explain why verification cannot run."
 )
+FAILED_VERIFICATION_REMINDER = (
+    "Your verification command failed after modifying files. Read its output, fix the issue "
+    "and rerun the relevant check, or clearly explain the blocker."
+)
 
 
 @dataclass(frozen=True)
@@ -48,6 +52,7 @@ class WriteVerificationPolicy:
 
         self._write_count = 0
         self._needs_verification = False
+        self._last_verification_failed = False
         self._reminder_injected = False
         self._post_write_command_results: list[ToolResult] = []
 
@@ -62,17 +67,24 @@ class WriteVerificationPolicy:
             if tool_call.name in {"write_file", "edit_file"} and not result.is_error:
                 self._write_count += 1
                 self._needs_verification = True
+                self._last_verification_failed = False
             elif tool_call.name == "run_command" and self._needs_verification:
                 self._post_write_command_results.append(result)
-                self._needs_verification = False
+                self._needs_verification = result.is_error
+                self._last_verification_failed = result.is_error
 
     def follow_up_message(self) -> Message | None:
-        """仅在未验证的成功写入后追加一次固定提醒。"""
+        """在缺少或失败的写后验证时最多追加一次固定提醒。"""
 
         if not self._needs_verification or self._reminder_injected:
             return None
         self._reminder_injected = True
-        return Message(role="system", content=VERIFICATION_REMINDER)
+        reminder = (
+            FAILED_VERIFICATION_REMINDER
+            if self._last_verification_failed
+            else VERIFICATION_REMINDER
+        )
+        return Message(role="system", content=reminder)
 
     @property
     def summary(self) -> EndPolicySummary:
