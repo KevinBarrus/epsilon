@@ -14,8 +14,16 @@ from core.model import (
     TextDelta,
     ToolCall,
     ToolCallEvent,
+    ToolResult,
 )
-from core.tools import ToolManager, create_read_file_tool
+from core.tools import (
+    ApprovalDecision,
+    ApprovalResult,
+    PermissionManager,
+    ToolDefinition,
+    ToolManager,
+    create_read_file_tool,
+)
 
 
 class FakeModelClient:
@@ -76,10 +84,176 @@ async def test_agent_loop_executes_tool_and_continues_model_request(
     assert any(isinstance(event, ToolExecutionEvent) for event in events)
     batches = [event for event in events if isinstance(event, ToolBatchEvent)]
     assert len(batches) == 1
-    assert batches[0].execution_mode == "sequential"
+    assert batches[0].execution_mode == "parallel"
     assert batches[0].duration_ms >= 0
     assert len(client.requests) == 2
     assert client.tools[0][0]["function"]["name"] == "read_file"  # type: ignore[index]
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_runs_parallel_tools_concurrently_and_keeps_message_order() -> None:
+    """测试同批只读工具并行运行，结果消息仍按模型调用顺序保存。"""
+
+    class BatchClient:
+        def __init__(self) -> None:
+            self.requests = 0
+
+        async def stream_response(self, messages, tools=(), thinking_level=None):
+            self.requests += 1
+            if self.requests == 1:
+                yield ToolCallEvent(ToolCall("call-1", "first", {}))
+                yield ToolCallEvent(ToolCall("call-2", "second", {}))
+                return
+            yield TextDelta("完成")
+
+    running = 0
+    peak_running = 0
+
+    async def handler(tool_call: ToolCall) -> ToolResult:
+        nonlocal running, peak_running
+        running += 1
+        peak_running = max(peak_running, running)
+        await asyncio.sleep(0.02 if tool_call.name == "first" else 0)
+        running -= 1
+        return ToolResult(tool_call.call_id, tool_call.name)
+
+    manager = ToolManager()
+    for name in ("first", "second"):
+        manager.register_local(
+            ToolDefinition(
+                name=name,
+                description=name,
+                parameters={"type": "object"},
+                source="local",
+                permission="read",
+                idempotent=True,
+                execution_mode="parallel",
+            ),
+            handler,
+        )
+    events: list[object] = []
+
+    async def collect(event: object) -> None:
+        events.append(event)
+
+    result = await AgentLoop(BatchClient(), manager).run(
+        [Message("user", "读取")],
+        on_event=collect,
+    )
+
+    assert peak_running == 2
+    assert [message.content for message in result.new_messages if message.role == "tool"] == [
+        "first",
+        "second",
+    ]
+    assert [
+        event.tool_call.name
+        for event in events
+        if isinstance(event, ToolExecutionEvent)
+    ] == ["second", "first"]
+    assert next(event for event in events if isinstance(event, ToolBatchEvent)).execution_mode == "parallel"
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_serializes_batch_with_a_sequential_tool() -> None:
+    """测试同批出现写工具时，所有工具保持串行。"""
+
+    class BatchClient:
+        def __init__(self) -> None:
+            self.requests = 0
+
+        async def stream_response(self, messages, tools=(), thinking_level=None):
+            self.requests += 1
+            if self.requests == 1:
+                yield ToolCallEvent(ToolCall("call-1", "read", {}))
+                yield ToolCallEvent(ToolCall("call-2", "write", {}))
+                return
+            yield TextDelta("完成")
+
+    running = 0
+    peak_running = 0
+
+    async def handler(tool_call: ToolCall) -> ToolResult:
+        nonlocal running, peak_running
+        running += 1
+        peak_running = max(peak_running, running)
+        await asyncio.sleep(0)
+        running -= 1
+        return ToolResult(tool_call.call_id, tool_call.name)
+
+    async def approve(definition, tool_call, allow_session):
+        return ApprovalResult(ApprovalDecision.ALLOW_ONCE)
+
+    manager = ToolManager(permission_manager=PermissionManager(approve))
+    manager.register_local(
+        ToolDefinition(
+            "read", "read", {"type": "object"}, "local", "read", True, "parallel"
+        ),
+        handler,
+    )
+    manager.register_local(
+        ToolDefinition("write", "write", {"type": "object"}, "local", "write", True),
+        handler,
+    )
+    events: list[object] = []
+
+    async def collect(event: object) -> None:
+        events.append(event)
+
+    await AgentLoop(BatchClient(), manager).run([Message("user", "修改")], on_event=collect)
+
+    assert peak_running == 1
+    assert next(event for event in events if isinstance(event, ToolBatchEvent)).execution_mode == "sequential"
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_cancels_parallel_tool_tasks() -> None:
+    """测试取消 Agent 时会停止同批仍在运行的工具。"""
+
+    class BatchClient:
+        async def stream_response(self, messages, tools=(), thinking_level=None):
+            yield ToolCallEvent(ToolCall("call-1", "first", {}))
+            yield ToolCallEvent(ToolCall("call-2", "second", {}))
+
+    started = 0
+    both_started = asyncio.Event()
+    cancelled = 0
+
+    async def handler(tool_call: ToolCall) -> ToolResult:
+        nonlocal started, cancelled
+        started += 1
+        if started == 2:
+            both_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled += 1
+            raise
+
+    manager = ToolManager()
+    for name in ("first", "second"):
+        manager.register_local(
+            ToolDefinition(
+                name,
+                name,
+                {"type": "object"},
+                "local",
+                "read",
+                True,
+                "parallel",
+            ),
+            handler,
+        )
+    task = asyncio.create_task(
+        AgentLoop(BatchClient(), manager).run([Message("user", "读取")])
+    )
+    await asyncio.wait_for(both_started.wait(), timeout=1)
+
+    task.cancel()
+
+    with pytest.raises(AgentLoopCancelled):
+        await task
+    assert cancelled == 2
 
 
 @pytest.mark.asyncio
