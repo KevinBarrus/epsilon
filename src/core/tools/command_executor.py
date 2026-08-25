@@ -53,15 +53,15 @@ class HostCommandExecutor:
                 timeout=timeout_seconds,
             )
         except TimeoutError:
-            await _stop_process_group(process)
+            await terminate_process_group(process)
             raise
         except asyncio.CancelledError:
-            await _stop_process_group(process)
+            await terminate_process_group(process)
             raise
         return CommandExecution(stdout, stderr, process.returncode)
 
 
-async def _stop_process_group(process: asyncio.subprocess.Process) -> None:
+async def terminate_process_group(process: asyncio.subprocess.Process) -> None:
     """终止命令进程组并回收标准输出与错误管道。"""
 
     if process.returncode is None:

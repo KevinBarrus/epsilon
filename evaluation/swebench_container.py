@@ -6,6 +6,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator
 
+from core.tools.command_executor import CommandExecution, terminate_process_group
+
 
 CONTAINER_WORKDIR = "/testbed"
 
@@ -31,6 +33,12 @@ class SwebenchTaskContainer:
         """返回已启动容器的标识。"""
 
         return self._container_id
+
+    @property
+    def workspace(self) -> Path:
+        """返回与容器共享的评测工作区。"""
+
+        return self._workspace
 
     async def start(self) -> str:
         """启动挂载评测工作区的常驻任务容器。"""
@@ -85,6 +93,51 @@ class SwebenchTaskContainer:
             yield container_id
         finally:
             await self.close()
+
+
+class SwebenchContainerExecutor:
+    """在已启动的 SWE-bench 任务容器中执行 Agent 命令。"""
+
+    def __init__(self, container: SwebenchTaskContainer) -> None:
+        """绑定单个评测任务容器。"""
+
+        self._container = container
+
+    async def execute(
+        self,
+        command: str,
+        cwd: Path,
+        timeout_seconds: float,
+    ) -> CommandExecution:
+        """在容器工作区运行命令，超时或取消时销毁容器。"""
+
+        container_id = self._container.container_id
+        if container_id is None:
+            raise SwebenchContainerError("评测容器尚未启动")
+        if cwd.resolve() != self._container.workspace:
+            raise SwebenchContainerError("容器命令只能在评测工作区根目录执行")
+        process = await asyncio.create_subprocess_exec(
+            "docker",
+            "exec",
+            "--workdir",
+            CONTAINER_WORKDIR,
+            container_id,
+            "sh",
+            "-lc",
+            command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(), timeout=timeout_seconds
+            )
+        except (TimeoutError, asyncio.CancelledError):
+            await terminate_process_group(process)
+            await self._container.close()
+            raise
+        return CommandExecution(stdout, stderr, process.returncode)
 
 
 async def _run_docker(arguments: list[str]) -> subprocess.CompletedProcess[str]:
