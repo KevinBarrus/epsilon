@@ -216,6 +216,12 @@ async def run_task(
             f"{stage}: {type(exc).__name__}: {exc}",
             error_category,
         )
+    finally:
+        # 显式关闭 HTTP 客户端，避免事件循环关闭后 httpx 后台任务报错
+        if client is not None:
+            close = getattr(client, "close", None)
+            if close is not None:
+                await close()
 
 
 async def precheck_task(
