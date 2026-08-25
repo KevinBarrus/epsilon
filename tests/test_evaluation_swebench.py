@@ -7,7 +7,7 @@ import pytest
 from core.model import ModelClientError
 from core.session import Session
 from core.tools import ToolManager
-from evaluation.swebench import _changed_files, _normalise_patch_paths, create_patch
+from evaluation.swebench import _agent_prompt, _changed_files, _normalise_patch_paths, create_patch
 from evaluation.swebench import _context_builder
 from evaluation.swebench import (
     DEFAULT_SWEBENCH_MAX_TOOL_ROUNDS,
@@ -37,6 +37,20 @@ def test_create_patch_uses_repository_relative_paths(tmp_path: Path) -> None:
     assert "a/module.py" in patch
     assert "b/module.py" in patch
     assert changed_files == ("module.py",)
+
+
+def test_agent_prompt_states_evaluation_workspace_contract(tmp_path: Path) -> None:
+    """测试评测任务提示词提供可执行的环境事实。"""
+
+    task = SwebenchTask("example__1", "example/repo", "base", "issue", "swebench-lite")
+
+    prompt = _agent_prompt(task, tmp_path)
+
+    assert str(tmp_path.resolve()) in prompt
+    assert "run_command already runs from the repository workspace root" in prompt
+    assert "search_files.path must be an existing directory" in prompt
+    assert "source snapshot without Git history" in prompt
+    assert "diagnose the test entry point" in prompt
 
 
 def test_create_patch_ignores_python_runtime_cache(tmp_path: Path) -> None:

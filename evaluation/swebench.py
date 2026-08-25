@@ -144,7 +144,7 @@ async def run_task(
             if max_tool_rounds is not None
             else DEFAULT_SWEBENCH_MAX_TOOL_ROUNDS
         )
-        prompt = _agent_prompt(task)
+        prompt = _agent_prompt(task, prepared.workspace)
         session.add_user_message(prompt)
         events.append(message_to_record(Message(role="user", content=prompt)))
         events.append({"type": "configuration", "max_tool_rounds": effective_tool_rounds})
@@ -429,13 +429,24 @@ def _context_builder(
     return build_context
 
 
-def _agent_prompt(task: SwebenchTask) -> str:
-    """组合真实 Issue 与最小工作约束。"""
+def _agent_prompt(task: SwebenchTask, workspace: Path) -> str:
+    """组合真实 Issue 与本次评测工作区的运行约束。"""
 
     return (
         "Resolve the following repository issue. Inspect the source, make the smallest correct "
         "code change, and run relevant tests when possible. Do not modify tests merely to make "
         "them pass.\n\n"
+        "Execution environment:\n"
+        f"- Repository workspace: {workspace.resolve()}\n"
+        "- run_command already runs from the repository workspace root. Do not cd to assumed "
+        "paths such as /workspace.\n"
+        "- File tool paths are relative to the workspace. search_files.path must be an existing "
+        "directory; use '.' for the repository root.\n"
+        "- This workspace is a source snapshot without Git history. Do not rely on Git commands "
+        "for investigation.\n"
+        "- Before running tests, inspect the repository's existing test configuration and nearby "
+        "tests. If configuration or imports fail, diagnose the test entry point before changing "
+        "production code.\n\n"
         f"Issue:\n{task.issue}"
     )
 
