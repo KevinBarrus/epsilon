@@ -117,7 +117,9 @@ def create_search_files_tool(workspace: Path) -> tuple[ToolDefinition, ToolHandl
         pattern = string_argument(tool_call, "pattern")
         root = resolve_workspace_path(workspace, optional_path(tool_call))
         if not root.is_dir():
-            raise ValueError("search scope is not a directory")
+            raise ValueError(
+                "search path must be an existing directory; use '.' for the workspace root"
+            )
 
         matches: list[str] = []
         for directory, directories, filenames in os.walk(root):

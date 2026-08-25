@@ -158,6 +158,22 @@ async def test_search_files_returns_matching_lines(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_search_files_explains_invalid_search_path(tmp_path: Path) -> None:
+    """测试搜索范围错误会给出可执行的修正提示。"""
+
+    (tmp_path / "main.py").write_text("needle\n", encoding="utf-8")
+    manager = _manager(tmp_path, create_search_files_tool(tmp_path))
+
+    result = await manager.execute(
+        _call("search_files", {"pattern": "needle", "path": "main.py"})
+    )
+
+    assert result.is_error is True
+    assert "must be an existing directory" in result.content
+    assert "use '.' for the workspace root" in result.content
+
+
+@pytest.mark.asyncio
 async def test_search_files_truncates_excessive_matches(tmp_path: Path) -> None:
     """测试搜索工具会限制过多匹配结果。"""
 
