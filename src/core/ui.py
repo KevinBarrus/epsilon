@@ -41,6 +41,7 @@ from .cost import UsageTotals, cache_hit_rate, format_tokens
 from .setup import infer_provider
 from .context import ContextBudget, ContextManager, DEFAULT_CONTEXT_BUDGET
 from .prompts import load_prompt
+from .project_instructions import load_project_instructions
 from .session import Session
 from .skills import SkillManager
 from .model import ClientHolder
@@ -414,6 +415,8 @@ async def run_chat(
         model_tools=tool_manager.model_tools(),
         system_prompt=AGENT_SYSTEM_PROMPT,
     )
+    project_instructions = load_project_instructions(session_workspace)
+    context_manager.set_project_instructions(project_instructions.content)
     context_manager.set_model_name(settings.model_name)
     agent_loop = agent_loop or AgentLoop(
         client, tool_manager, max_tool_rounds=max_tool_rounds

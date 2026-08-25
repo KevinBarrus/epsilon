@@ -156,6 +156,7 @@ async def test_run_chat_retries_once_with_forced_context_compaction(
             await self._on_submit("继续完成任务")
 
     client = ContextOverflowClient()
+    (tmp_path / "AGENTS.md").write_text("项目测试约束", encoding="utf-8")
     monkeypatch.setattr(ui, "ChatScreen", FakeScreen)
 
     await ui.run_chat(
@@ -171,6 +172,8 @@ async def test_run_chat_retries_once_with_forced_context_compaction(
         role="system",
         content=ui.AGENT_SYSTEM_PROMPT.replace("{model_name}", "test"),
     )
+    assert client.requests[0][1].role == "system"
+    assert "项目测试约束" in client.requests[0][1].content
     assert any(
         message.content == CONTEXT_FALLBACK_NOTICE
         for message in client.requests[1]
