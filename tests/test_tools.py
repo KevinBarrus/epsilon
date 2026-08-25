@@ -48,6 +48,7 @@ def test_local_registry_registers_and_lists_tools() -> None:
 
     assert registry.get("read_file") is not None
     assert registry.definitions() == [definition]
+    assert definition.execution_mode == "sequential"
 
 
 def test_local_registry_rejects_duplicate_or_non_local_tools() -> None:

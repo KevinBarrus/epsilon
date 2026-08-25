@@ -9,6 +9,7 @@ from ..model import ToolCall, ToolResult
 
 ToolSource = Literal["local", "mcp"]
 ToolPermission = Literal["read", "write", "command"]
+ToolExecutionMode = Literal["parallel", "sequential"]
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,7 @@ class ToolDefinition:
     source: ToolSource
     permission: ToolPermission
     idempotent: bool
+    execution_mode: ToolExecutionMode = "sequential"
     capability: str | None = None
     provider_id: str = "builtin"
     provider_tool_name: str | None = None

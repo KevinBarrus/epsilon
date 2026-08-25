@@ -34,6 +34,22 @@ def _manager(
     return manager
 
 
+def test_read_only_file_tools_declare_parallel_execution(tmp_path: Path) -> None:
+    """测试内置只读文件工具明确允许同批并行。"""
+
+    definitions = [
+        create_read_file_tool(tmp_path)[0],
+        create_list_files_tool(tmp_path)[0],
+        create_search_files_tool(tmp_path)[0],
+    ]
+
+    assert [definition.execution_mode for definition in definitions] == [
+        "parallel",
+        "parallel",
+        "parallel",
+    ]
+
+
 @pytest.mark.asyncio
 async def test_read_file_returns_complete_text(tmp_path: Path) -> None:
     """测试读取工具返回完整文件内容。"""
