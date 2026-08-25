@@ -1,6 +1,7 @@
 """管理单个 SWE-bench 任务的 Agent 执行容器。"""
 
 import asyncio
+import os
 import subprocess
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -53,7 +54,7 @@ class SwebenchTaskContainer:
                 "run",
                 "--detach",
                 "--user",
-                "root",
+                _host_workspace_user(),
                 "--network",
                 "none",
                 "--volume",
@@ -161,3 +162,9 @@ def _docker_error(operation: str, completed: subprocess.CompletedProcess[str]) -
 
     detail = completed.stderr.strip() or completed.stdout.strip() or "未知 Docker 错误"
     return f"{operation}评测容器失败，退出码 {completed.returncode}：{detail}"
+
+
+def _host_workspace_user() -> str:
+    """返回可写入宿主绑定工作区的有效用户身份。"""
+
+    return f"{os.geteuid()}:{os.getegid()}"

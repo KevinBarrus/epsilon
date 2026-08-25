@@ -28,6 +28,8 @@ async def test_task_container_uses_isolated_official_image_workspace(
         return subprocess.CompletedProcess(command, 0, "container-1\n", "")
 
     monkeypatch.setattr("evaluation.swebench_container.subprocess.run", run)
+    monkeypatch.setattr("evaluation.swebench_container.os.geteuid", lambda: 1234)
+    monkeypatch.setattr("evaluation.swebench_container.os.getegid", lambda: 5678)
     container = SwebenchTaskContainer("swebench/example:latest", tmp_path)
 
     container_id = await container.start()
@@ -39,7 +41,7 @@ async def test_task_container_uses_isolated_official_image_workspace(
             "run",
             "--detach",
             "--user",
-            "root",
+            "1234:5678",
             "--network",
             "none",
             "--volume",

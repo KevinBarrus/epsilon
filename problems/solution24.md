@@ -67,7 +67,7 @@ jq '{agent_execution_environment, agent_verification_status, official_harness_st
 
 ## 完成标记
 
-- [ ] 问题一：对齐容器与宿主的工作区写入身份
+- [x] 问题一：对齐容器与宿主的工作区写入身份
 - [ ] 问题二：补丁生成失败的阶段归因与轨迹保留
 - [ ] 问题三：单元测试与完整回归
 - [ ] 验收：单实例冒烟与五个固定样本重跑
