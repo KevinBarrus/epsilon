@@ -1,16 +1,30 @@
 """统一调度已注册工具。"""
 
 import asyncio
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 from ..errors import AgentError
 from ..model import ToolCall, ToolResult
 from .mcp import McpToolProvider, McpToolRegistry
 from .mcp import RegisteredMcpTool
-from .registry import RegisteredTool, ToolRegistry
+from .registry import RegisteredTool, ToolBinding, ToolRegistry
 from .permissions import ApprovalDecision, PermissionDenied, PermissionManager
 from .types import ToolDefinition, ToolHandler
 from .validation import ToolArgumentError, validate_tool_arguments
+
+
+@dataclass(frozen=True)
+class PreparedToolCall:
+    """保存已通过校验和审批、尚未执行的工具调用。"""
+
+    tool_call: ToolCall
+    binding: ToolBinding
+
+    @property
+    def definition(self) -> ToolDefinition:
+        """返回已确认的工具定义。"""
+
+        return self.binding.definition
 
 
 class ToolManager:
@@ -78,7 +92,15 @@ class ToolManager:
         ]
 
     async def execute(self, tool_call: ToolCall) -> ToolResult:
-        """查找并执行工具，将普通异常转换为工具错误结果。"""
+        """兼容原有入口：顺序完成预检后执行工具。"""
+
+        prepared = await self.prepare(tool_call)
+        if isinstance(prepared, ToolResult):
+            return prepared
+        return await self.execute_prepared(prepared)
+
+    async def prepare(self, tool_call: ToolCall) -> PreparedToolCall | ToolResult:
+        """顺序完成工具查找、参数校验与用户审批。"""
 
         registered = self._registry.get(tool_call.name)
         if registered is None:
@@ -103,7 +125,7 @@ class ToolManager:
                     is_error=True,
                     error_category="tool_permission",
                 )
-            return await registered.execute(tool_call)
+            return PreparedToolCall(tool_call, registered)
         except asyncio.CancelledError:
             raise
         except ToolArgumentError as exc:
@@ -142,6 +164,36 @@ class ToolManager:
         except Exception as exc:
             return _tool_error_result(
                 tool_call,
+                AgentError(
+                    category="tool_execution",
+                    operation="tool_execution",
+                    user_message="tool execution failed",
+                    model_message="tool execution failed, adjust based on the error",
+                    cause=exc,
+                ),
+            )
+
+    async def execute_prepared(self, prepared: PreparedToolCall) -> ToolResult:
+        """执行已完成预检的工具，并转换运行期异常。"""
+
+        try:
+            return await prepared.binding.execute(prepared.tool_call)
+        except asyncio.CancelledError:
+            raise
+        except ValueError as exc:
+            return _tool_error_result(
+                prepared.tool_call,
+                AgentError(
+                    category="tool_execution",
+                    operation="tool_execution",
+                    user_message="tool execution failed",
+                    model_message=f"tool execution failed: {exc}",
+                    cause=exc,
+                ),
+            )
+        except Exception as exc:
+            return _tool_error_result(
+                prepared.tool_call,
                 AgentError(
                     category="tool_execution",
                     operation="tool_execution",

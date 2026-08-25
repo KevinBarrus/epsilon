@@ -78,6 +78,28 @@ async def test_tool_manager_executes_registered_tool() -> None:
 
 
 @pytest.mark.asyncio
+async def test_tool_manager_prepares_before_executing_handler() -> None:
+    """测试预检完成前不会执行工具处理函数。"""
+
+    executed = False
+
+    async def handler(tool_call: ToolCall) -> ToolResult:
+        nonlocal executed
+        executed = True
+        return ToolResult(tool_call.call_id, "完成")
+
+    manager = ToolManager()
+    manager.register_local(_definition(), handler)
+
+    prepared = await manager.prepare(ToolCall("call-1", "read_file", {}))
+
+    assert isinstance(prepared, ToolResult) is False
+    assert executed is False
+    assert (await manager.execute_prepared(prepared)).content == "完成"  # type: ignore[arg-type]
+    assert executed is True
+
+
+@pytest.mark.asyncio
 async def test_tool_manager_returns_error_for_unknown_tool() -> None:
     """测试调用不存在的工具时返回结构化错误。"""
 

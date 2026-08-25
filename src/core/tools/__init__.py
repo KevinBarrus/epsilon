@@ -6,7 +6,7 @@ from .file_tools import (
     create_search_files_tool,
 )
 from .command_tool import COMMAND_TIMEOUT_SECONDS, create_run_command_tool
-from .manager import ToolManager
+from .manager import PreparedToolCall, ToolManager
 from .mcp import (
     McpToolProvider,
     McpToolRegistrationError,
@@ -48,6 +48,7 @@ __all__ = [
     "ToolRoute",
     "ToolArgumentError",
     "ToolManager",
+    "PreparedToolCall",
     "McpToolProvider",
     "McpToolRegistrationError",
     "McpToolRegistry",
