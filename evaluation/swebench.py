@@ -457,6 +457,7 @@ def _result(
     """将运行统计汇总成统一评测结果。"""
 
     tool_events = [event for event in events if event.get("type") == "tool_result"]
+    batch_events = [event for event in events if event.get("type") == "tool_batch"]
     return EvaluationResult(
         scenario=task.instance_id,
         task_id=task.instance_id,
@@ -468,6 +469,12 @@ def _result(
         evaluation_type="real-task",
         model_requests=len(client.requests) if client else 0,
         tool_rounds=tool_rounds,
+        parallel_tool_batches=sum(
+            event.get("execution_mode") == "parallel" for event in batch_events
+        ),
+        tool_batch_duration_ms=sum(
+            float(event.get("duration_ms", 0.0)) for event in batch_events
+        ),
         tool_calls=len(tool_events),
         tool_failures=sum(bool(event.get("is_error")) for event in tool_events),
         compactions=sum(event.get("type") == "compaction" for event in events),

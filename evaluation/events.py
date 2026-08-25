@@ -1,6 +1,6 @@
 """将 Agent 运行事件转换为可保存的评测轨迹"""
 
-from core.agent_loop import RetryEvent, ToolExecutionEvent
+from core.agent_loop import RetryEvent, ToolBatchEvent, ToolExecutionEvent
 from core.model import Message, TextDelta, ToolCallEvent, UsageEvent
 
 
@@ -24,6 +24,13 @@ def event_to_record(event: object) -> dict[str, object]:
             "content": event.result.content,
             "is_error": event.result.is_error,
             "error_category": event.result.error_category,
+        }
+    if isinstance(event, ToolBatchEvent):
+        return {
+            "type": "tool_batch",
+            "execution_mode": event.execution_mode,
+            "tool_calls": len(event.tool_calls),
+            "duration_ms": event.duration_ms,
         }
     if isinstance(event, RetryEvent):
         return {

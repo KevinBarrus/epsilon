@@ -123,7 +123,7 @@ def test_swebench_result_keeps_agent_stop_trace() -> None:
         task,
         0.0,
         None,
-        [],
+        [{"type": "tool_batch", "execution_mode": "parallel", "duration_ms": 12.5}],
         (),
         (),
         False,
@@ -135,6 +135,8 @@ def test_swebench_result_keeps_agent_stop_trace() -> None:
 
     assert result.tool_rounds == 4
     assert result.stop_reason == "tool_limit"
+    assert result.parallel_tool_batches == 1
+    assert result.tool_batch_duration_ms == 12.5
 
 
 def test_model_error_record_omits_request_content() -> None:

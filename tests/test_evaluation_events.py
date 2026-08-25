@@ -1,6 +1,6 @@
 import pytest
 
-from core.agent_loop import RetryEvent, ToolExecutionEvent
+from core.agent_loop import RetryEvent, ToolBatchEvent, ToolExecutionEvent
 from core.model import TextDelta, ToolCall, ToolCallEvent, ToolResult, UsageEvent
 from evaluation.events import event_to_record, message_to_record
 
@@ -39,6 +39,23 @@ def test_event_to_record_normalizes_model_retry() -> None:
         "attempt": 1,
         "max_attempts": 2,
         "delay_seconds": 0.5,
+    }
+
+
+def test_event_to_record_normalizes_tool_batch() -> None:
+    """测试工具批次轨迹保留模式、数量和耗时。"""
+
+    assert event_to_record(
+        ToolBatchEvent(
+            (ToolCall("call-1", "read_file", {"path": "a.txt"}),),
+            "sequential",
+            12.5,
+        )
+    ) == {
+        "type": "tool_batch",
+        "execution_mode": "sequential",
+        "tool_calls": 1,
+        "duration_ms": 12.5,
     }
 
 

@@ -45,6 +45,8 @@ def _result_to_record(result: EvaluationResult) -> dict[str, object]:
         "duration_ms": result.duration_ms,
         "model_requests": result.model_requests,
         "tool_rounds": result.tool_rounds,
+        "parallel_tool_batches": result.parallel_tool_batches,
+        "tool_batch_duration_ms": result.tool_batch_duration_ms,
         "tool_calls": result.tool_calls,
         "tool_failures": result.tool_failures,
         "retries": result.retries,
@@ -90,6 +92,8 @@ def _result_from_record(record: object) -> EvaluationResult:
         changed_files=_string_tuple(record.get("changed_files", [])),
         model_requests=_required_int(record, "model_requests"),
         tool_rounds=_required_int_or_default(record, "tool_rounds", 0),
+        parallel_tool_batches=_required_int_or_default(record, "parallel_tool_batches", 0),
+        tool_batch_duration_ms=_required_number_or_default(record, "tool_batch_duration_ms", 0.0),
         tool_calls=_required_int(record, "tool_calls"),
         tool_failures=_required_int(record, "tool_failures"),
         retries=_required_int(record, "retries"),
@@ -194,6 +198,19 @@ def _required_number(record: dict[str, object], key: str) -> float:
     """读取必需的数值字段"""
 
     value = record.get(key)
+    if not isinstance(value, (int, float)):
+        raise ValueError(f"评测结果字段无效：{key}")
+    return float(value)
+
+
+def _required_number_or_default(
+    record: dict[str, object],
+    key: str,
+    default: float,
+) -> float:
+    """读取兼容旧结果的数值字段。"""
+
+    value = record.get(key, default)
     if not isinstance(value, (int, float)):
         raise ValueError(f"评测结果字段无效：{key}")
     return float(value)

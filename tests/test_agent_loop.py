@@ -3,7 +3,7 @@ from collections.abc import AsyncIterator, Sequence
 
 import pytest
 
-from core.agent_loop import AgentLoop, AgentLoopCancelled, ToolExecutionEvent
+from core.agent_loop import AgentLoop, AgentLoopCancelled, ToolBatchEvent, ToolExecutionEvent
 from types import SimpleNamespace
 import core.agent_loop as agent_loop
 from core.context import ContextBuildResult
@@ -74,6 +74,10 @@ async def test_agent_loop_executes_tool_and_continues_model_request(
     )
     assert result.new_messages == result.messages[1:]
     assert any(isinstance(event, ToolExecutionEvent) for event in events)
+    batches = [event for event in events if isinstance(event, ToolBatchEvent)]
+    assert len(batches) == 1
+    assert batches[0].execution_mode == "sequential"
+    assert batches[0].duration_ms >= 0
     assert len(client.requests) == 2
     assert client.tools[0][0]["function"]["name"] == "read_file"  # type: ignore[index]
 

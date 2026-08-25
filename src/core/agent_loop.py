@@ -5,6 +5,7 @@ import random
 from asyncio import sleep as yield_to_event_loop
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
+from time import perf_counter
 from typing import Literal
 
 from .context import ContextBuildResult
@@ -31,6 +32,15 @@ class ToolExecutionEvent:
 
 
 @dataclass(frozen=True)
+class ToolBatchEvent:
+    """表示一批工具调用的执行模式与总耗时。"""
+
+    tool_calls: tuple[ToolCall, ...]
+    execution_mode: Literal["parallel", "sequential"]
+    duration_ms: float
+
+
+@dataclass(frozen=True)
 class RetryEvent:
     """表示一次模型请求失败后即将重试。"""
 
@@ -39,7 +49,7 @@ class RetryEvent:
     delay_seconds: float
 
 
-AgentEvent = ModelEvent | ToolExecutionEvent | RetryEvent
+AgentEvent = ModelEvent | ToolExecutionEvent | ToolBatchEvent | RetryEvent
 EventHandler = Callable[[AgentEvent], Awaitable[None]]
 ContextBuilder = Callable[[Sequence[Message], bool], Awaitable[ContextBuildResult]]
 RETRY_BASE_DELAY_SECONDS = 0.5
@@ -182,6 +192,7 @@ class AgentLoop:
                     )
 
                 tool_rounds += 1
+                batch_started_at = perf_counter()
                 for tool_call in completed_tool_calls:
                     result = await self._tool_manager.execute(tool_call)
                     tool_message = Message(
@@ -193,6 +204,14 @@ class AgentLoop:
                     new_messages.append(tool_message)
                     if on_event is not None:
                         await on_event(ToolExecutionEvent(tool_call, result))
+                if on_event is not None:
+                    await on_event(
+                        ToolBatchEvent(
+                            completed_tool_calls,
+                            "sequential",
+                            (perf_counter() - batch_started_at) * 1000,
+                        )
+                    )
 
             return AgentRunResult(
                 tuple(context),

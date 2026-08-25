@@ -45,6 +45,8 @@ class EvaluationResult:
     changed_files: tuple[str, ...] = ()
     model_requests: int = 0
     tool_rounds: int = 0
+    parallel_tool_batches: int = 0
+    tool_batch_duration_ms: float = 0.0
     tool_calls: int = 0
     tool_failures: int = 0
     retries: int = 0

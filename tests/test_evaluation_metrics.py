@@ -108,6 +108,8 @@ def test_results_can_round_trip_through_jsonl(tmp_path: Path) -> None:
         repetition=2,
         model_requests=expected.model_requests,
         tool_rounds=3,
+        parallel_tool_batches=1,
+        tool_batch_duration_ms=12.5,
         tool_calls=expected.tool_calls,
         tool_failures=expected.tool_failures,
         retries=expected.retries,
