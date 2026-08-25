@@ -5,7 +5,9 @@ import asyncio
 import json
 import shutil
 import subprocess
-from collections.abc import Mapping, Sequence
+import tempfile
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
@@ -378,12 +380,13 @@ def create_patch(baseline: Path, workspace: Path) -> tuple[tuple[str, ...], str]
     baseline = baseline.resolve()
     workspace = workspace.resolve()
     _remove_runtime_artifacts(baseline, workspace)
-    result = subprocess.run(
-        ["git", "diff", "--no-index", "--src-prefix=a/", "--dst-prefix=b/", str(baseline), str(workspace)],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
+    with _hide_runtime_artifacts(baseline, workspace):
+        result = subprocess.run(
+            ["git", "diff", "--no-index", "--src-prefix=a/", "--dst-prefix=b/", str(baseline), str(workspace)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
     if result.returncode not in {0, 1}:
         raise EvaluationWorkspaceError(result.stderr.strip() or "无法生成评测补丁")
     patch = _normalise_patch_paths(result.stdout, baseline, workspace)
@@ -393,14 +396,7 @@ def create_patch(baseline: Path, workspace: Path) -> tuple[tuple[str, ...], str]
 def _remove_runtime_artifacts(baseline: Path, workspace: Path) -> None:
     """移除基线不存在的运行产物，避免将测试生成文件写入补丁。"""
 
-    baseline_paths = {path.relative_to(baseline) for path in baseline.rglob("*")}
-    artifacts = [
-        path
-        for path in workspace.rglob("*")
-        if path.relative_to(workspace) not in baseline_paths
-        and _is_runtime_artifact(path)
-    ]
-    for path in sorted(artifacts, key=lambda item: len(item.parts)):
+    for path in _new_runtime_artifacts(baseline, workspace):
         if not path.exists():
             continue
         if path.is_dir():
@@ -418,6 +414,50 @@ def _is_runtime_artifact(path: Path) -> bool:
         or path.name in RUNTIME_ARTIFACT_FILE_NAMES
         or path.name.endswith(RUNTIME_ARTIFACT_FILE_SUFFIXES)
     )
+
+
+def _new_runtime_artifacts(baseline: Path, workspace: Path) -> tuple[Path, ...]:
+    """返回基线没有且需要从补丁中排除的最外层运行产物。"""
+
+    baseline_paths = {path.relative_to(baseline) for path in baseline.rglob("*")}
+    candidates = sorted(
+        (
+            path
+            for path in workspace.rglob("*")
+            if path.relative_to(workspace) not in baseline_paths
+            and _is_runtime_artifact(path)
+        ),
+        key=lambda item: len(item.parts),
+    )
+    artifacts: list[Path] = []
+    for path in candidates:
+        if not any(parent in path.parents for parent in artifacts):
+            artifacts.append(path)
+    return tuple(artifacts)
+
+
+@contextmanager
+def _hide_runtime_artifacts(baseline: Path, workspace: Path) -> Iterator[None]:
+    """生成 diff 时暂存残留运行产物，结束后立即恢复原工作区。"""
+
+    artifacts = _new_runtime_artifacts(baseline, workspace)
+    if not artifacts:
+        yield
+        return
+
+    staging = Path(tempfile.mkdtemp(prefix="swebench-artifacts-", dir=workspace.parent))
+    moved: list[tuple[Path, Path]] = []
+    try:
+        for index, path in enumerate(artifacts):
+            stored = staging / str(index)
+            path.rename(stored)
+            moved.append((path, stored))
+        yield
+    finally:
+        for path, stored in reversed(moved):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            stored.rename(path)
+        staging.rmdir()
 
 
 def verify_patch(

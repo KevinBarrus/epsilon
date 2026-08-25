@@ -192,6 +192,30 @@ def test_create_patch_removes_only_new_runtime_artifacts(tmp_path: Path) -> None
     assert (workspace / "tracked.egg-info" / "PKG-INFO").exists()
 
 
+def test_create_patch_hides_runtime_artifacts_when_cleanup_misses_them(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """测试 diff 阶段仍会排除清理阶段遗漏的新增运行产物。"""
+
+    baseline = tmp_path / "baseline"
+    workspace = tmp_path / "workspace"
+    baseline.mkdir()
+    workspace.mkdir()
+    (baseline / "module.py").write_text("value = 1\n", encoding="utf-8")
+    (workspace / "module.py").write_text("value = 2\n", encoding="utf-8")
+    artifact = workspace / "new.egg-info" / "PKG-INFO"
+    artifact.parent.mkdir()
+    artifact.write_text("runtime\n", encoding="utf-8")
+    monkeypatch.setattr("evaluation.swebench._remove_runtime_artifacts", lambda *_: None)
+
+    changed_files, patch = create_patch(baseline, workspace)
+
+    assert changed_files == ("module.py",)
+    assert "new.egg-info" not in patch
+    assert artifact.exists()
+
+
 def test_normalise_patch_paths_preserves_standard_headers(tmp_path: Path) -> None:
     """测试路径归一化不破坏标准补丁头部。"""
 
