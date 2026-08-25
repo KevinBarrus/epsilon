@@ -44,7 +44,7 @@ class Settings:
     stream_idle_timeout_seconds: float | None = None
     mcp_stdio: McpStdioSettings | None = None
     stream_usage: bool = False
-    max_tool_rounds: int = 10
+    max_tool_rounds: int | None = None
     price: ModelPrice | None = None
 
     def __post_init__(self) -> None:
@@ -67,7 +67,7 @@ class Settings:
         ):
             if value <= 0:
                 raise ConfigError(f"{name} must be > 0")
-        if self.max_tool_rounds <= 0:
+        if self.max_tool_rounds is not None and self.max_tool_rounds <= 0:
             raise ConfigError("max_tool_rounds must be > 0")
         object.__setattr__(self, "first_byte_timeout_seconds", first_byte_timeout)
         object.__setattr__(self, "stream_idle_timeout_seconds", stream_idle_timeout)
@@ -189,7 +189,7 @@ def _settings_from_data(data: dict) -> Settings:
     )
     max_tool_rounds = _optional_int(
         model.get("max_tool_rounds"),
-        10,
+        None,
         "model.max_tool_rounds",
     )
     price = _optional_model_price(model.get("price"))

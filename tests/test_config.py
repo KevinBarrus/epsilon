@@ -288,11 +288,11 @@ def test_load_settings_rejects_invalid_stream_usage(tmp_path: Path) -> None:
 
 
 def test_load_settings_defaults_max_tool_rounds(tmp_path: Path) -> None:
-    """测试默认工具轮次上限为 10。"""
+    """测试默认不限制交互工具轮次。"""
 
     user_path = _write_user_settings(tmp_path, _valid_model())
 
-    assert load_settings(user_config_path=user_path).max_tool_rounds == 10
+    assert load_settings(user_config_path=user_path).max_tool_rounds is None
 
 
 def test_load_settings_reads_max_tool_rounds(tmp_path: Path) -> None:

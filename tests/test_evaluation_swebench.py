@@ -10,6 +10,7 @@ from core.tools import ToolManager
 from evaluation.swebench import _changed_files, _normalise_patch_paths, create_patch
 from evaluation.swebench import _context_builder
 from evaluation.swebench import (
+    DEFAULT_SWEBENCH_MAX_TOOL_ROUNDS,
     EVALUATION_COMMAND_TIMEOUT_SECONDS,
     HarnessResult,
     SwebenchTask,
@@ -176,6 +177,7 @@ def test_evaluation_command_uses_longer_timeout(tmp_path: Path) -> None:
 
     assert definition.name == "run_command"
     assert EVALUATION_COMMAND_TIMEOUT_SECONDS == 300.0
+    assert DEFAULT_SWEBENCH_MAX_TOOL_ROUNDS == 40
 
 
 def test_verify_patch_marks_harness_exit_without_report_as_environment_failure(

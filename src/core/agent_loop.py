@@ -72,11 +72,13 @@ class AgentLoop:
         self,
         client: ModelClient,
         tool_manager: ToolManager,
-        max_tool_rounds: int = 10,
+        max_tool_rounds: int | None = None,
         thinking_level: str = "high",
     ) -> None:
-        """创建 Agent Loop，并设置单轮工具调用上限与默认推理强度。"""
+        """创建 Agent Loop，可选地限制单轮工具调用次数。"""
 
+        if max_tool_rounds is not None and max_tool_rounds <= 0:
+            raise ValueError("max_tool_rounds must be > 0")
         self._client = client
         self._tool_manager = tool_manager
         self._max_tool_rounds = max_tool_rounds
@@ -125,7 +127,10 @@ class AgentLoop:
         tool_calls: list[ToolCall] = []
         tool_rounds = 0
         try:
-            for _ in range(self._max_tool_rounds):
+            while (
+                self._max_tool_rounds is None
+                or tool_rounds < self._max_tool_rounds
+            ):
                 text_parts = []
                 tool_calls = []
                 request_messages = context

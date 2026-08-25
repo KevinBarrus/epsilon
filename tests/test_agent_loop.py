@@ -119,6 +119,41 @@ async def test_agent_loop_returns_completed_tool_chain_at_round_limit(tmp_path) 
 
 
 @pytest.mark.asyncio
+async def test_agent_loop_without_limit_can_finish_after_ten_tool_rounds(tmp_path) -> None:
+    """测试默认 Agent Loop 不会在第十个工具回合强制停止。"""
+
+    class ManyToolsClient:
+        def __init__(self) -> None:
+            self.requests = 0
+
+        async def stream_response(self, messages, tools=(), thinking_level=None):
+            self.requests += 1
+            if self.requests <= 11:
+                yield ToolCallEvent(
+                    ToolCall(
+                        f"call-{self.requests}",
+                        "read_file",
+                        {"path": "README.md"},
+                    )
+                )
+                return
+            yield TextDelta("完成")
+
+    (tmp_path / "README.md").write_text("项目说明", encoding="utf-8")
+    manager = ToolManager()
+    manager.register_local(*create_read_file_tool(tmp_path))
+    client = ManyToolsClient()
+
+    result = await AgentLoop(client, manager).run(
+        [Message(role="user", content="读取说明")]
+    )
+
+    assert result.stop_reason == "completed"
+    assert result.tool_rounds == 11
+    assert result.final_content == "完成"
+
+
+@pytest.mark.asyncio
 async def test_agent_loop_yields_after_text_delta_for_ui_refresh() -> None:
     """测试连续文本分片之间会让出事件循环给界面刷新任务。"""
 

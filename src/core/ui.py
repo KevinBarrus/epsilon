@@ -103,7 +103,7 @@ async def run_chat(
     context_budget: ContextBudget | None = None,
     balance_provider: BalanceProvider | None = None,
     mcp_provider: StdioMcpProvider | None = None,
-    max_tool_rounds: int = 10,
+    max_tool_rounds: int | None = None,
     agent_loop: AgentLoop | None = None,
 ) -> ChatExitInfo:
     """启动全屏界面，并处理模型的流式回复"""

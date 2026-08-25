@@ -43,6 +43,7 @@ DATASETS = {
     "swebench-full": "SWE-bench/SWE-bench",
 }
 EVALUATION_COMMAND_TIMEOUT_SECONDS = 300.0
+DEFAULT_SWEBENCH_MAX_TOOL_ROUNDS = 40
 
 
 @dataclass(frozen=True)
@@ -138,7 +139,11 @@ async def run_task(
         client = TimedModelClient(OpenAICompatibleClient(settings))
         manager = _tool_manager(prepared.workspace)
         session = Session(prepared.session_root)
-        effective_tool_rounds = max_tool_rounds or settings.max_tool_rounds
+        effective_tool_rounds = (
+            max_tool_rounds
+            if max_tool_rounds is not None
+            else DEFAULT_SWEBENCH_MAX_TOOL_ROUNDS
+        )
         prompt = _agent_prompt(task)
         session.add_user_message(prompt)
         events.append(message_to_record(Message(role="user", content=prompt)))
@@ -556,7 +561,12 @@ def main() -> int:
     parser.add_argument("--harness-python", default="python", help="安装 swebench 的 Python 可执行文件")
     parser.add_argument("--precheck", action="store_true", help="只用参考补丁验证环境，不调用模型")
     parser.add_argument("--compact", action="store_true", help="使用低上下文预算运行")
-    parser.add_argument("--max-tool-rounds", type=int, help="覆盖本次评测的工具轮次上限")
+    parser.add_argument(
+        "--max-tool-rounds",
+        type=int,
+        default=DEFAULT_SWEBENCH_MAX_TOOL_ROUNDS,
+        help="本次评测的工具轮次上限，默认 40",
+    )
     args = parser.parse_args()
     if not args.confirm:
         print("真实评测会发起模型请求，请添加 --confirm 后运行")

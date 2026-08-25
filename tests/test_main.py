@@ -137,7 +137,7 @@ async def test_run_resume_without_id_uses_picker(
         "workspace": tmp_path.resolve(),
         "session_id": session_id,
         "context_budget": ContextBudget(100_000, 16_000, 20_000),
-        "max_tool_rounds": 10,
+        "max_tool_rounds": None,
     }
 
 
