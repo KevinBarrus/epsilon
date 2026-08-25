@@ -80,12 +80,14 @@ def test_result_storage_preserves_verification_classification(tmp_path) -> None:
         EvaluationResult(
             scenario="task",
             duration_ms=1,
-            local_verification_status="failed",
+            agent_execution_environment="official-instance-container",
+            agent_verification_status="failed",
             official_harness_status="environment-error",
         ),
     )
 
     restored = load_results(path)[0]
 
-    assert restored.local_verification_status == "failed"
+    assert restored.agent_execution_environment == "official-instance-container"
+    assert restored.agent_verification_status == "failed"
     assert restored.official_harness_status == "environment-error"

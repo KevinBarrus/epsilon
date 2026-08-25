@@ -58,7 +58,8 @@ def _result_to_record(result: EvaluationResult) -> dict[str, object]:
         "error_stage": result.error_stage,
         "error_message": result.error_message,
         "stop_reason": result.stop_reason,
-        "local_verification_status": result.local_verification_status,
+        "agent_execution_environment": result.agent_execution_environment,
+        "agent_verification_status": result.agent_verification_status,
         "official_harness_status": result.official_harness_status,
         "model_request_durations_ms": list(result.model_request_durations_ms),
         "events": list(result.events),
@@ -107,7 +108,10 @@ def _result_from_record(record: object) -> EvaluationResult:
         error_stage=_optional_string(record.get("error_stage")),
         error_message=_optional_string(record.get("error_message")),
         stop_reason=_optional_string(record.get("stop_reason")),
-        local_verification_status=_optional_string(record.get("local_verification_status")),  # type: ignore[arg-type]
+        agent_execution_environment=_optional_string(record.get("agent_execution_environment")),  # type: ignore[arg-type]
+        agent_verification_status=_optional_string(
+            record.get("agent_verification_status", record.get("local_verification_status"))
+        ),  # type: ignore[arg-type]
         official_harness_status=_optional_string(record.get("official_harness_status")),  # type: ignore[arg-type]
         model_request_durations_ms=tuple(
             float(value)

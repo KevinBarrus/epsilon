@@ -30,6 +30,7 @@ from core.tools import (
     create_search_files_tool,
     create_write_file_tool,
 )
+from core.tools.command_executor import CommandExecutor
 
 from .events import event_to_record, message_to_record
 from .models import EvaluationAssertion, EvaluationResult
@@ -37,6 +38,11 @@ from .online import TimedModelClient
 from .report import generate_report
 from .storage import append_result
 from .swebench_workspace import EvaluationWorkspaceError, prepare_evaluation_workspace
+from .swebench_container import (
+    SwebenchContainerError,
+    SwebenchContainerExecutor,
+    SwebenchTaskContainer,
+)
 
 
 DATASETS = {
@@ -65,6 +71,7 @@ class SwebenchTask:
     base_commit: str
     issue: str
     source: str
+    instance_image: str = ""
 
 
 @dataclass(frozen=True)
@@ -86,12 +93,16 @@ def load_task(instance_id: str, source: str) -> SwebenchTask:
     dataset = load_dataset(dataset_name, split="test")
     for record in dataset:
         if record["instance_id"] == instance_id:
+            image = record.get("image")
+            if not isinstance(image, str) or not image:
+                raise ValueError(f"任务缺少官方实例镜像：{instance_id}")
             return SwebenchTask(
                 instance_id=instance_id,
                 repository=str(record["repo"]),
                 base_commit=str(record["base_commit"]),
                 issue=str(record["problem_statement"]),
                 source=source,
+                instance_image=image,
             )
     raise ValueError(f"数据集不存在任务：{instance_id}")
 
@@ -135,6 +146,7 @@ async def run_task(
     started_at = perf_counter()
     events: list[dict[str, object]] = []
     client: TimedModelClient | None = None
+    agent_execution_environment: str | None = None
     stage = "repository"
     changed_files: tuple[str, ...] = ()
     try:
@@ -144,45 +156,52 @@ async def run_task(
         stage = "workspace"
         baseline = prepare_evaluation_workspace(repository, task.base_commit, result_root)
         prepared = prepare_evaluation_workspace(repository, task.base_commit, result_root)
-        stage = "agent-loop"
-        settings = load_settings()
-        client = TimedModelClient(OpenAICompatibleClient(settings))
-        manager = _tool_manager(prepared.workspace)
-        session = Session(prepared.session_root)
-        effective_tool_rounds = (
-            max_tool_rounds
-            if max_tool_rounds is not None
-            else DEFAULT_SWEBENCH_MAX_TOOL_ROUNDS
-        )
-        prompt = _agent_prompt(task, prepared.workspace)
-        session.add_user_message(prompt)
-        events.append(message_to_record(Message(role="user", content=prompt)))
-        events.append(_configuration_record(effective_tool_rounds))
+        stage = "agent-container"
+        container = SwebenchTaskContainer(task.instance_image, prepared.workspace)
+        async with container.running():
+            agent_execution_environment = "official-instance-container"
+            stage = "agent-loop"
+            settings = load_settings()
+            client = TimedModelClient(OpenAICompatibleClient(settings))
+            manager = _tool_manager(
+                prepared.workspace,
+                SwebenchContainerExecutor(container),
+            )
+            session = Session(prepared.session_root)
+            effective_tool_rounds = (
+                max_tool_rounds
+                if max_tool_rounds is not None
+                else DEFAULT_SWEBENCH_MAX_TOOL_ROUNDS
+            )
+            prompt = _agent_prompt(task, prepared.workspace)
+            session.add_user_message(prompt)
+            events.append(message_to_record(Message(role="user", content=prompt)))
+            events.append(_configuration_record(effective_tool_rounds))
 
-        async def collect_event(event: object) -> None:
-            """保存完整模型和工具轨迹，供结果报告复核。"""
+            async def collect_event(event: object) -> None:
+                """保存完整模型和工具轨迹，供结果报告复核。"""
 
-            events.append(event_to_record(event))
+                events.append(event_to_record(event))
 
-        agent = AgentLoop(
-            client,
-            manager,
-            max_tool_rounds=effective_tool_rounds,
-            end_policy=WriteVerificationPolicy(),
-        )
-        context_builder = _context_builder(
-            session,
-            client,
-            compact,
-            events,
-            settings.model_name,
-            manager,
-        )
-        result = await agent.run(
-            session.get_messages(),
-            on_event=collect_event,
-            build_context=context_builder,
-        )
+            agent = AgentLoop(
+                client,
+                manager,
+                max_tool_rounds=effective_tool_rounds,
+                end_policy=WriteVerificationPolicy(),
+            )
+            context_builder = _context_builder(
+                session,
+                client,
+                compact,
+                events,
+                settings.model_name,
+                manager,
+            )
+            result = await agent.run(
+                session.get_messages(),
+                on_event=collect_event,
+                build_context=context_builder,
+            )
         events.append(_agent_end_record(result))
         for message in result.new_messages:
             session.add_message(message)
@@ -227,7 +246,8 @@ async def run_task(
                 if not verification.passed
                 else None
             ),
-            local_verification_status=_local_verification_status(result),
+            agent_execution_environment=agent_execution_environment,
+            agent_verification_status=_local_verification_status(result),
             official_harness_status=_official_harness_status(verification),
             tool_rounds=result.tool_rounds,
             stop_reason=result.stop_reason,
@@ -239,7 +259,7 @@ async def run_task(
             "model"
             if isinstance(exc, ModelClientError)
             else "environment"
-            if isinstance(exc, EvaluationWorkspaceError)
+            if isinstance(exc, (EvaluationWorkspaceError, SwebenchContainerError))
             else "evaluation"
         )
         return _result(
@@ -254,6 +274,7 @@ async def run_task(
             f"{stage}: {type(exc).__name__}: {exc}",
             error_category,
             error_stage=stage,
+            agent_execution_environment=agent_execution_environment,
         )
     finally:
         # 显式关闭 HTTP 客户端，避免事件循环关闭后 httpx 后台任务报错
@@ -386,7 +407,10 @@ def verify_patch(
     return HarnessResult(task.instance_id in report.get("resolved_ids", []))
 
 
-def _tool_manager(workspace: Path) -> ToolManager:
+def _tool_manager(
+    workspace: Path,
+    command_executor: CommandExecutor | None = None,
+) -> ToolManager:
     """创建真实评测使用的全量本地工具集。"""
 
     async def approve_all(definition, tool_call, allow_session):
@@ -404,7 +428,11 @@ def _tool_manager(workspace: Path) -> ToolManager:
     ):
         manager.register_local(*factory(workspace))
     manager.register_local(
-        *create_run_command_tool(workspace, EVALUATION_COMMAND_TIMEOUT_SECONDS)
+        *create_run_command_tool(
+            workspace,
+            EVALUATION_COMMAND_TIMEOUT_SECONDS,
+            command_executor,
+        )
     )
     return manager
 
@@ -456,7 +484,7 @@ def _agent_prompt(task: SwebenchTask, workspace: Path) -> str:
         "code change, and run relevant tests when possible. Do not modify tests merely to make "
         "them pass.\n\n"
         "Execution environment:\n"
-        f"- Repository workspace: {workspace.resolve()}\n"
+        "- The repository workspace is already selected for every tool. Use relative paths.\n"
         "- run_command already runs from the repository workspace root. Do not cd to assumed "
         "paths such as /workspace.\n"
         "- File tool paths are relative to the workspace. search_files.path must be an existing "
@@ -545,7 +573,8 @@ def _result(
     error_message,
     error_category: str | None = None,
     error_stage: str | None = None,
-    local_verification_status: str | None = None,
+    agent_execution_environment: str | None = None,
+    agent_verification_status: str | None = None,
     official_harness_status: str | None = None,
     tool_rounds: int = 0,
     stop_reason: str | None = None,
@@ -591,7 +620,8 @@ def _result(
             or next((assertion.message for assertion in assertions if not assertion.passed), None)
         ),
         stop_reason=stop_reason,
-        local_verification_status=local_verification_status,  # type: ignore[arg-type]
+        agent_execution_environment=agent_execution_environment,  # type: ignore[arg-type]
+        agent_verification_status=agent_verification_status,  # type: ignore[arg-type]
         official_harness_status=official_harness_status,  # type: ignore[arg-type]
         model_request_durations_ms=tuple(client.durations_ms) if client else (),
         events=tuple(events),

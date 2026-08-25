@@ -17,6 +17,7 @@ LocalVerificationStatus = Literal[
     "failed",
 ]
 OfficialHarnessStatus = Literal["passed", "failed", "environment-error"]
+AgentExecutionEnvironment = Literal["official-instance-container"]
 
 
 @dataclass(frozen=True)
@@ -65,7 +66,8 @@ class EvaluationResult:
     error_stage: str | None = None
     error_message: str | None = None
     stop_reason: str | None = None
-    local_verification_status: LocalVerificationStatus | None = None
+    agent_execution_environment: AgentExecutionEnvironment | None = None
+    agent_verification_status: LocalVerificationStatus | None = None
     official_harness_status: OfficialHarnessStatus | None = None
     model_request_durations_ms: tuple[float, ...] = ()
     events: tuple[dict[str, object], ...] = ()

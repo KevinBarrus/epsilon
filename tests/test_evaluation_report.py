@@ -16,7 +16,8 @@ def test_render_report_contains_metrics_and_scenario_status() -> None:
                 error_category="configuration",
                 error_stage="agent-loop",
                 error_message="ConfigError: <MODEL_NAME> is missing",
-                local_verification_status="failed",
+                agent_execution_environment="official-instance-container",
+                agent_verification_status="failed",
                 official_harness_status="environment-error",
                 assertions=(EvaluationAssertion("done", True),),
             )
@@ -32,7 +33,8 @@ def test_render_report_contains_metrics_and_scenario_status() -> None:
     assert "configuration" in html
     assert "agent-loop" in html
     assert "ConfigError: &lt;MODEL_NAME&gt; is missing" in html
-    assert "写后本地命令" in html
+    assert "Agent 执行环境" in html
+    assert "Agent 验证命令" in html
     assert "official-harness" not in html
     assert "environment-error" in html
     assert "通过" in html

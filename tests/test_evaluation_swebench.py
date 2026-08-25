@@ -1,16 +1,18 @@
 """验证 SWE-bench 评测器的纯本地补丁处理。"""
 
+import sys
+import types
 from pathlib import Path
 
 import pytest
 
 from core.model import ModelClientError
 from core.agent_loop import AgentRunResult
-from core.model import ToolResult
+from core.model import ToolCall, ToolResult
 from core.session import Session
-from core.tools import ToolManager
+from core.tools import CommandExecution, ToolManager
 from evaluation.models import EvaluationAssertion
-from evaluation.swebench import _agent_prompt, _changed_files, _normalise_patch_paths, _project_guide_paths, create_patch
+from evaluation.swebench import _agent_prompt, _changed_files, _normalise_patch_paths, _project_guide_paths, create_patch, load_task
 from evaluation.swebench import _context_builder
 from evaluation.swebench import (
     DEFAULT_SWEBENCH_MAX_TOOL_ROUNDS,
@@ -54,7 +56,7 @@ def test_agent_prompt_states_evaluation_workspace_contract(tmp_path: Path) -> No
 
     prompt = _agent_prompt(task, tmp_path)
 
-    assert str(tmp_path.resolve()) in prompt
+    assert "workspace is already selected for every tool" in prompt
     assert "run_command already runs from the repository workspace root" in prompt
     assert "search_files.path must be an existing directory" in prompt
     assert "source snapshot without Git history" in prompt
@@ -250,12 +252,14 @@ def test_swebench_result_keeps_verification_classification() -> None:
         False,
         None,
         error_stage="official-harness",
-        local_verification_status="failed",
+        agent_execution_environment="official-instance-container",
+        agent_verification_status="failed",
         official_harness_status="failed",
     )
 
     assert result.error_stage == "official-harness"
-    assert result.local_verification_status == "failed"
+    assert result.agent_execution_environment == "official-instance-container"
+    assert result.agent_verification_status == "failed"
     assert result.official_harness_status == "failed"
 
 
@@ -318,3 +322,49 @@ def test_verify_patch_marks_harness_exit_without_report_as_environment_failure(
     assert verify_patch(task, "", tmp_path, "python") == HarnessResult(
         False, "官方 Harness 执行失败，退出码 17"
     )
+
+
+def test_load_task_keeps_official_instance_image(monkeypatch: pytest.MonkeyPatch) -> None:
+    """测试任务加载保留官方 Harness 提供的实例镜像。"""
+
+    dataset_module = types.ModuleType("datasets")
+    dataset_module.load_dataset = lambda *args, **kwargs: [
+        {
+            "instance_id": "example__1",
+            "repo": "example/repo",
+            "base_commit": "base",
+            "problem_statement": "issue",
+            "image": "sweb.eval.x86_64.example__1",
+        }
+    ]
+    monkeypatch.setitem(sys.modules, "datasets", dataset_module)
+
+    task = load_task("example__1", "swebench-lite")
+
+    assert task.instance_image == "sweb.eval.x86_64.example__1"
+
+
+@pytest.mark.asyncio
+async def test_tool_manager_passes_injected_executor_to_run_command(tmp_path: Path) -> None:
+    """测试评测工具管理器会将命令交给评测执行后端。"""
+
+    class FakeExecutor:
+        def __init__(self) -> None:
+            self.command: str | None = None
+
+        async def execute(
+            self,
+            command: str,
+            cwd: Path,
+            timeout_seconds: float,
+        ) -> CommandExecution:
+            self.command = command
+            return CommandExecution(b"container output", b"", 0)
+
+    executor = FakeExecutor()
+    manager = _tool_manager(tmp_path, executor)
+
+    result = await manager.execute(ToolCall("call-1", "run_command", {"command": "pwd"}))
+
+    assert result.content == "container output"
+    assert executor.command == "pwd"
