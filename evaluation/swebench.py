@@ -541,6 +541,9 @@ def main() -> int:
     if args.max_tool_rounds is not None and args.max_tool_rounds <= 0:
         parser.error("--max-tool-rounds 必须大于 0")
     tasks = [load_task(instance_id, args.source) for instance_id in args.instance_id]
+    output = args.result_root / "results.jsonl"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text("", encoding="utf-8")
     results = []
     for task in tasks:
         runner = (
@@ -554,10 +557,8 @@ def main() -> int:
                 args.max_tool_rounds,
             )
         )
-        results.append(asyncio.run(runner))
-    output = args.result_root / "results.jsonl"
-    output.write_text("", encoding="utf-8")
-    for result in results:
+        result = asyncio.run(runner)
+        results.append(result)
         append_result(output, result)
     generate_report(args.result_root / "report.html", results)
     print(f"swebench evaluation: {sum(result.passed for result in results)}/{len(results)} passed")

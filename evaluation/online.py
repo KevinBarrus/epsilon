@@ -186,6 +186,13 @@ class TimedModelClient:
         self.durations_ms: list[float] = []
         self.usages: list[int | None] = []
 
+    async def close(self) -> None:
+        """关闭被包装客户端持有的网络连接"""
+
+        close = getattr(self._client, "close", None)
+        if close is not None:
+            await close()
+
     @property
     def total_actual_tokens(self) -> int | None:
         """汇总所有请求的 total Token，任一请求缺少 usage 时返回 None"""

@@ -31,6 +31,26 @@ async def test_timed_model_client_records_request_duration() -> None:
 
 
 @pytest.mark.asyncio
+async def test_timed_model_client_closes_wrapped_client() -> None:
+    """测试评测包装器会关闭底层网络客户端。"""
+
+    class ClosableClient(FakeModelClient):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
+    wrapped = ClosableClient()
+    client = TimedModelClient(wrapped)
+
+    await client.close()
+
+    assert wrapped.closed is True
+
+
+@pytest.mark.asyncio
 async def test_timed_model_client_records_summary_request_duration() -> None:
     """测试客户端包装器记录摘要请求耗时"""
 
