@@ -220,6 +220,15 @@ async def run_task(
             compact,
             not persistence_ok,
             verification.environment_error,
+            error_stage=(
+                "official-harness-environment"
+                if verification.environment_error is not None
+                else "official-harness"
+                if not verification.passed
+                else None
+            ),
+            local_verification_status=_local_verification_status(result),
+            official_harness_status=_official_harness_status(verification),
             tool_rounds=result.tool_rounds,
             stop_reason=result.stop_reason,
         )
@@ -244,6 +253,7 @@ async def run_task(
             False,
             f"{stage}: {type(exc).__name__}: {exc}",
             error_category,
+            error_stage=stage,
         )
     finally:
         # 显式关闭 HTTP 客户端，避免事件循环关闭后 httpx 后台任务报错
@@ -285,7 +295,9 @@ async def precheck_task(
             duration_ms=(perf_counter() - started_at) * 1000,
             evaluation_type="real-task",
             error_category="environment" if verification.environment_error else None,
+            error_stage=("official-harness-environment" if verification.environment_error else None),
             error_message=verification.environment_error,
+            official_harness_status=_official_harness_status(verification),
             assertions=(
                 EvaluationAssertion("workspace-isolated", not (prepared.workspace / ".git").exists(), "预检工作区包含 Git 历史"),
                 EvaluationAssertion("gold-patch", verification.passed, verification.environment_error or "参考补丁未通过官方 Harness"),
@@ -503,6 +515,24 @@ def _agent_end_record(result: AgentRunResult) -> dict[str, object]:
     }
 
 
+def _local_verification_status(result: AgentRunResult) -> str:
+    """区分写后本地命令未尝试、成功尝试和失败尝试。"""
+
+    if result.write_count == 0:
+        return "not-required"
+    if not result.post_write_command_results:
+        return "not-attempted"
+    return "failed" if any(item.is_error for item in result.post_write_command_results) else "passed"
+
+
+def _official_harness_status(verification: HarnessResult) -> str:
+    """将官方 Harness 结果转换为独立状态，不混入本地命令结果。"""
+
+    if verification.environment_error is not None:
+        return "environment-error"
+    return "passed" if verification.passed else "failed"
+
+
 def _result(
     task,
     started_at,
@@ -514,6 +544,9 @@ def _result(
     persistence_degraded,
     error_message,
     error_category: str | None = None,
+    error_stage: str | None = None,
+    local_verification_status: str | None = None,
+    official_harness_status: str | None = None,
     tool_rounds: int = 0,
     stop_reason: str | None = None,
 ):
@@ -552,11 +585,14 @@ def _result(
             if not all(assertion.passed for assertion in assertions)
             else None
         ),
+        error_stage=error_stage,
         error_message=(
             error_message
             or next((assertion.message for assertion in assertions if not assertion.passed), None)
         ),
         stop_reason=stop_reason,
+        local_verification_status=local_verification_status,  # type: ignore[arg-type]
+        official_harness_status=official_harness_status,  # type: ignore[arg-type]
         model_request_durations_ms=tuple(client.durations_ms) if client else (),
         events=tuple(events),
         assertions=assertions,

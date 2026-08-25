@@ -3,6 +3,7 @@ from evaluation.models import (
     EvaluationResult,
     EvaluationScenario,
 )
+from evaluation.storage import append_result, load_results
 
 
 def test_evaluation_result_passes_when_all_assertions_pass() -> None:
@@ -68,3 +69,23 @@ def test_evaluation_models_keep_real_task_identity() -> None:
     assert result.task_id == "django__django-10914"
     assert result.source == "swebench-lite"
     assert result.changed_files == ("django/conf/global_settings.py",)
+
+
+def test_result_storage_preserves_verification_classification(tmp_path) -> None:
+    """测试 JSONL 往返不会丢失两类验证状态。"""
+
+    path = tmp_path / "results.jsonl"
+    append_result(
+        path,
+        EvaluationResult(
+            scenario="task",
+            duration_ms=1,
+            local_verification_status="failed",
+            official_harness_status="environment-error",
+        ),
+    )
+
+    restored = load_results(path)[0]
+
+    assert restored.local_verification_status == "failed"
+    assert restored.official_harness_status == "environment-error"

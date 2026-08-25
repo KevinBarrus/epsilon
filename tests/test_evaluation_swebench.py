@@ -9,6 +9,7 @@ from core.agent_loop import AgentRunResult
 from core.model import ToolResult
 from core.session import Session
 from core.tools import ToolManager
+from evaluation.models import EvaluationAssertion
 from evaluation.swebench import _agent_prompt, _changed_files, _normalise_patch_paths, _project_guide_paths, create_patch
 from evaluation.swebench import _context_builder
 from evaluation.swebench import (
@@ -19,7 +20,9 @@ from evaluation.swebench import (
     SwebenchTask,
     _configuration_record,
     _agent_end_record,
+    _local_verification_status,
     _model_error_record,
+    _official_harness_status,
     _result,
     _tool_manager,
     prepare_repository,
@@ -115,6 +118,21 @@ def test_agent_end_record_keeps_write_verification_trace() -> None:
     assert record["post_write_command_results"] == [
         {"call_id": "check-1", "is_error": True, "error_category": "tool"}
     ]
+
+
+def test_verification_statuses_keep_local_and_official_results_separate() -> None:
+    """测试宿主命令失败不会被误写为官方 Harness 环境失败。"""
+
+    run = AgentRunResult(
+        (),
+        "完成",
+        write_count=1,
+        post_write_command_results=(ToolResult("check-1", "failed", is_error=True),),
+    )
+
+    assert _local_verification_status(run) == "failed"
+    assert _official_harness_status(HarnessResult(False)) == "failed"
+    assert _official_harness_status(HarnessResult(False, "Docker failed")) == "environment-error"
 
 
 def test_create_patch_ignores_python_runtime_cache(tmp_path: Path) -> None:
@@ -215,6 +233,30 @@ def test_swebench_result_keeps_agent_stop_trace() -> None:
     assert result.stop_reason == "tool_limit"
     assert result.parallel_tool_batches == 1
     assert result.tool_batch_duration_ms == 12.5
+
+
+def test_swebench_result_keeps_verification_classification() -> None:
+    """测试结果分别保存本地命令和官方 Harness 的分类。"""
+
+    task = SwebenchTask("example__1", "example/repo", "base", "issue", "swebench-lite")
+    result = _result(
+        task,
+        0.0,
+        None,
+        [],
+        (EvaluationAssertion("official-harness", False, "官方 Harness 未通过"),),
+        (),
+        False,
+        False,
+        None,
+        error_stage="official-harness",
+        local_verification_status="failed",
+        official_harness_status="failed",
+    )
+
+    assert result.error_stage == "official-harness"
+    assert result.local_verification_status == "failed"
+    assert result.official_harness_status == "failed"
 
 
 def test_model_error_record_omits_request_content() -> None:

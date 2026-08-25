@@ -10,6 +10,13 @@ EvaluationType = Literal[
     "online-special",
     "code-correctness",
 ]
+LocalVerificationStatus = Literal[
+    "not-required",
+    "not-attempted",
+    "passed",
+    "failed",
+]
+OfficialHarnessStatus = Literal["passed", "failed", "environment-error"]
 
 
 @dataclass(frozen=True)
@@ -58,6 +65,8 @@ class EvaluationResult:
     error_stage: str | None = None
     error_message: str | None = None
     stop_reason: str | None = None
+    local_verification_status: LocalVerificationStatus | None = None
+    official_harness_status: OfficialHarnessStatus | None = None
     model_request_durations_ms: tuple[float, ...] = ()
     events: tuple[dict[str, object], ...] = ()
     assertions: tuple[EvaluationAssertion, ...] = ()
