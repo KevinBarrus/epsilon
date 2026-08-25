@@ -688,7 +688,7 @@ class ChatScreen:
         if entry.role == "assistant":
             return _render_assistant_content(entry.content)
         if entry.role == "tool":
-            return self._tool_entry_fragments(entry.content, expanded)
+            return self._tool_history_fragments(entry, expanded)
         if entry.role == "user":
             return self._user_history_fragments(entry.content)
         return [(entry.style, entry.content)]
@@ -889,6 +889,19 @@ class ChatScreen:
                 ]
         summary, _, diff = content.partition("\n")
         return _render_tool_diff(summary, diff)
+
+    def _tool_history_fragments(
+        self,
+        entry: ConversationEntry,
+        expanded: bool,
+    ) -> StyleAndTextTuples:
+        """为终端历史中的工具片段叠加当前执行状态色。"""
+
+        background = entry.style or "class:tool-activity"
+        return [
+            (f"{background} {style}".strip(), text)
+            for style, text in self._tool_entry_fragments(entry.content, expanded)
+        ]
 
     def _set_entry_content(
         self,

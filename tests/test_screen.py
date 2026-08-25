@@ -351,6 +351,23 @@ def test_inline_history_user_message_keeps_gray_background(tmp_path: Path) -> No
     assert "第二行" in to_plain_text(fragments)
 
 
+def test_inline_history_tool_message_keeps_status_and_diff_styles(tmp_path: Path) -> None:
+    """测试写入终端历史的工具消息保留状态背景和 diff 着色。"""
+
+    screen = _create_screen(tmp_path)
+    index = screen.add_entry(
+        "tool",
+        "file edited\n-old\n+new",
+        style="class:tool-success",
+    )
+
+    fragments = screen._history_fragments(index)
+
+    assert ("class:tool-success", "file edited") in fragments
+    assert ("class:tool-success class:tool-diff-del", "-old") in fragments
+    assert ("class:tool-success class:tool-diff-add", "+new") in fragments
+
+
 def test_active_code_block_highlights_after_commit(tmp_path: Path) -> None:
     """测试活动代码块跳过高亮，提交后渲染为最终高亮结果。"""
 
