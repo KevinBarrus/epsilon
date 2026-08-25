@@ -146,7 +146,9 @@ async def run_task(
     started_at = perf_counter()
     events: list[dict[str, object]] = []
     client: TimedModelClient | None = None
+    agent_result: AgentRunResult | None = None
     agent_execution_environment: str | None = None
+    persistence_ok = False
     stage = "repository"
     changed_files: tuple[str, ...] = ()
     try:
@@ -197,16 +199,19 @@ async def run_task(
                 settings.model_name,
                 manager,
             )
-            result = await agent.run(
+            agent_result = await agent.run(
                 session.get_messages(),
                 on_event=collect_event,
                 build_context=context_builder,
             )
-        events.append(_agent_end_record(result))
-        for message in result.new_messages:
+        events.append(_agent_end_record(agent_result))
+        for message in agent_result.new_messages:
             session.add_message(message)
-        events.append(message_to_record(Message(role="assistant", content=result.final_content)))
+        events.append(
+            message_to_record(Message(role="assistant", content=agent_result.final_content))
+        )
         persistence_ok = session.flush_persistence() and session.close()
+        stage = "patch-generation"
         changed_files, patch = await asyncio.to_thread(
             create_patch, baseline.workspace, prepared.workspace
         )
@@ -247,10 +252,10 @@ async def run_task(
                 else None
             ),
             agent_execution_environment=agent_execution_environment,
-            agent_verification_status=_local_verification_status(result),
+            agent_verification_status=_local_verification_status(agent_result),
             official_harness_status=_official_harness_status(verification),
-            tool_rounds=result.tool_rounds,
-            stop_reason=result.stop_reason,
+            tool_rounds=agent_result.tool_rounds,
+            stop_reason=agent_result.stop_reason,
         )
     except Exception as exc:
         if isinstance(exc, ModelClientError):
@@ -259,22 +264,39 @@ async def run_task(
             "model"
             if isinstance(exc, ModelClientError)
             else "environment"
-            if isinstance(exc, (EvaluationWorkspaceError, SwebenchContainerError))
+            if stage == "patch-generation"
+            or isinstance(exc, (EvaluationWorkspaceError, SwebenchContainerError))
             else "evaluation"
+        )
+        agent_verification_status = (
+            _local_verification_status(agent_result)
+            if agent_result is not None
+            else None
         )
         return _result(
             task,
             started_at,
             client,
             events,
-            (EvaluationAssertion("evaluation-error", False, f"{type(exc).__name__}: {exc}"),),
+            (
+                EvaluationAssertion(
+                    "patch-generation"
+                    if stage == "patch-generation"
+                    else "evaluation-error",
+                    False,
+                    f"{type(exc).__name__}: {exc}",
+                ),
+            ),
             changed_files,
             compact,
-            False,
+            agent_result is not None and not persistence_ok,
             f"{stage}: {type(exc).__name__}: {exc}",
             error_category,
             error_stage=stage,
             agent_execution_environment=agent_execution_environment,
+            agent_verification_status=agent_verification_status,
+            tool_rounds=agent_result.tool_rounds if agent_result is not None else 0,
+            stop_reason=agent_result.stop_reason if agent_result is not None else None,
         )
     finally:
         # 显式关闭 HTTP 客户端，避免事件循环关闭后 httpx 后台任务报错

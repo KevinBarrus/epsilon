@@ -2,6 +2,8 @@
 
 import sys
 import types
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -12,6 +14,7 @@ from core.model import ToolCall, ToolResult
 from core.session import Session
 from core.tools import CommandExecution, ToolManager
 from evaluation.models import EvaluationAssertion
+from evaluation.swebench_workspace import EvaluationWorkspace
 from evaluation.swebench import _agent_prompt, _changed_files, _normalise_patch_paths, _project_guide_paths, create_patch, load_task
 from evaluation.swebench import _context_builder
 from evaluation.swebench import (
@@ -29,6 +32,7 @@ from evaluation.swebench import (
     _tool_manager,
     prepare_repository,
     verify_patch,
+    run_task,
 )
 
 
@@ -368,3 +372,91 @@ async def test_tool_manager_passes_injected_executor_to_run_command(tmp_path: Pa
 
     assert result.content == "container output"
     assert executor.command == "pwd"
+
+
+@pytest.mark.asyncio
+async def test_patch_generation_failure_keeps_completed_agent_trace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """测试补丁生成失败不会丢失已结束 Agent 的归因信息。"""
+
+    baseline = tmp_path / "baseline"
+    workspace = tmp_path / "workspace"
+    session_root = tmp_path / "session"
+    for path in (baseline, workspace, session_root):
+        path.mkdir()
+    workspaces = iter(
+        (
+            EvaluationWorkspace(baseline, session_root),
+            EvaluationWorkspace(workspace, session_root),
+        )
+    )
+
+    class FakeContainer:
+        def __init__(self, image: str, container_workspace: Path) -> None:
+            self.container_id = "container-1"
+
+        @asynccontextmanager
+        async def running(self):
+            yield "container-1"
+
+    class FakeAgentLoop:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def run(self, *args, **kwargs) -> AgentRunResult:
+            return AgentRunResult(
+                (),
+                "完成",
+                stop_reason="tool_limit",
+                tool_rounds=7,
+                write_count=1,
+                post_write_command_results=(ToolResult("check-1", "failed", is_error=True),),
+            )
+
+    class FakeTimedClient:
+        requests: list = []
+        durations_ms: list[float] = []
+        total_actual_tokens = None
+
+        def __init__(self, client) -> None:
+            pass
+
+        async def close(self) -> None:
+            pass
+
+    task = SwebenchTask(
+        "example__1",
+        "example/repo",
+        "base",
+        "issue",
+        "swebench-lite",
+        "sweb.eval.example__1",
+    )
+    monkeypatch.setattr("evaluation.swebench.prepare_repository", lambda *args: tmp_path)
+    monkeypatch.setattr("evaluation.swebench.prepare_evaluation_workspace", lambda *args: next(workspaces))
+    monkeypatch.setattr("evaluation.swebench.SwebenchTaskContainer", FakeContainer)
+    monkeypatch.setattr("evaluation.swebench.AgentLoop", FakeAgentLoop)
+    monkeypatch.setattr("evaluation.swebench.OpenAICompatibleClient", lambda settings: object())
+    monkeypatch.setattr("evaluation.swebench.TimedModelClient", FakeTimedClient)
+    monkeypatch.setattr("evaluation.swebench.load_settings", lambda: SimpleNamespace(model_name="test"))
+    monkeypatch.setattr(
+        "evaluation.swebench.create_patch",
+        lambda *args: (_ for _ in ()).throw(PermissionError("cache denied")),
+    )
+    monkeypatch.setattr(
+        "evaluation.swebench.verify_patch",
+        lambda *args: pytest.fail("补丁生成失败后不得调用 Harness"),
+    )
+
+    result = await run_task(task, tmp_path / "result", "python")
+
+    assert result.error_category == "environment"
+    assert result.error_stage == "patch-generation"
+    assert result.tool_rounds == 7
+    assert result.stop_reason == "tool_limit"
+    assert result.agent_execution_environment == "official-instance-container"
+    assert result.agent_verification_status == "failed"
+    assert result.official_harness_status is None
+    assert result.assertions[0].name == "patch-generation"
+    assert any(event["type"] == "agent_end" for event in result.events)
