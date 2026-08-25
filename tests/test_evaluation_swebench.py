@@ -5,6 +5,8 @@ from pathlib import Path
 import pytest
 
 from core.model import ModelClientError
+from core.agent_loop import AgentRunResult
+from core.model import ToolResult
 from core.session import Session
 from core.tools import ToolManager
 from evaluation.swebench import _agent_prompt, _changed_files, _normalise_patch_paths, create_patch
@@ -16,6 +18,7 @@ from evaluation.swebench import (
     SWEBENCH_ENVIRONMENT_CONTRACT_VERSION,
     SwebenchTask,
     _configuration_record,
+    _agent_end_record,
     _model_error_record,
     _result,
     _tool_manager,
@@ -63,6 +66,28 @@ def test_configuration_record_keeps_environment_contract_version() -> None:
         "max_tool_rounds": 40,
         "swebench_environment_contract": SWEBENCH_ENVIRONMENT_CONTRACT_VERSION,
     }
+
+
+def test_agent_end_record_keeps_write_verification_trace() -> None:
+    """测试评测轨迹保留写后验证提醒和命令结果。"""
+
+    record = _agent_end_record(
+        AgentRunResult(
+            (),
+            "完成",
+            verification_reminder_injected=True,
+            write_count=2,
+            post_write_command_results=(
+                ToolResult("check-1", "failed", is_error=True, error_category="tool"),
+            ),
+        )
+    )
+
+    assert record["verification_reminder_injected"] is True
+    assert record["write_count"] == 2
+    assert record["post_write_command_results"] == [
+        {"call_id": "check-1", "is_error": True, "error_category": "tool"}
+    ]
 
 
 def test_create_patch_ignores_python_runtime_cache(tmp_path: Path) -> None:

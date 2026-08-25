@@ -9,6 +9,7 @@ from time import perf_counter
 from typing import Literal
 
 from .context import ContextBuildResult
+from .end_policy import EndPolicySummary, TurnEndPolicy
 from .error_policy import AgentErrorPolicy
 from .errors import AgentError
 from .model import (
@@ -65,6 +66,9 @@ class AgentRunResult:
     new_messages: tuple[Message, ...] = ()
     stop_reason: Literal["completed", "tool_limit"] = "completed"
     tool_rounds: int = 0
+    verification_reminder_injected: bool = False
+    write_count: int = 0
+    post_write_command_results: tuple[ToolResult, ...] = ()
 
 
 class AgentLoopCancelled(asyncio.CancelledError):
@@ -84,6 +88,7 @@ class AgentLoop:
         tool_manager: ToolManager,
         max_tool_rounds: int | None = None,
         thinking_level: str = "high",
+        end_policy: TurnEndPolicy | None = None,
     ) -> None:
         """创建 Agent Loop，可选地限制单轮工具调用次数。"""
 
@@ -95,6 +100,7 @@ class AgentLoop:
         self._error_policy = AgentErrorPolicy()
         self._thinking_level = thinking_level
         self._show_thinking = True
+        self._end_policy = end_policy
 
     @property
     def thinking_level(self) -> str:
@@ -184,12 +190,20 @@ class AgentLoop:
                 text_parts = []
                 tool_calls = []
                 if not completed_tool_calls:
-                    return AgentRunResult(
-                        tuple(context),
-                        assistant_content,
-                        tuple(new_messages),
-                        tool_rounds=tool_rounds,
+                    follow_up = (
+                        self._end_policy.follow_up_message()
+                        if self._end_policy is not None
+                        else None
                     )
+                    if follow_up is None:
+                        return self._run_result(
+                            context,
+                            assistant_content,
+                            new_messages,
+                            tool_rounds,
+                        )
+                    context.append(follow_up)
+                    continue
 
                 tool_rounds += 1
                 results, execution_mode, batch_duration_ms = await self._execute_tool_batch(
@@ -204,6 +218,8 @@ class AgentLoop:
                     )
                     context.append(tool_message)
                     new_messages.append(tool_message)
+                if self._end_policy is not None:
+                    self._end_policy.observe_tool_results(completed_tool_calls, results)
                 if on_event is not None:
                     await on_event(
                         ToolBatchEvent(
@@ -213,10 +229,10 @@ class AgentLoop:
                         )
                     )
 
-            return AgentRunResult(
-                tuple(context),
+            return self._run_result(
+                context,
                 assistant_content,
-                tuple(new_messages),
+                new_messages,
                 stop_reason="tool_limit",
                 tool_rounds=tool_rounds,
             )
@@ -233,6 +249,32 @@ class AgentLoop:
             else:
                 _mark_last_assistant_cancelled(new_messages)
             raise AgentLoopCancelled(tuple(new_messages)) from exc
+
+    def _run_result(
+        self,
+        context: Sequence[Message],
+        final_content: str,
+        new_messages: Sequence[Message],
+        tool_rounds: int,
+        stop_reason: Literal["completed", "tool_limit"] = "completed",
+    ) -> AgentRunResult:
+        """将可选收尾策略的统计统一写入运行结果。"""
+
+        summary = (
+            self._end_policy.summary
+            if self._end_policy is not None
+            else EndPolicySummary(False, 0, ())
+        )
+        return AgentRunResult(
+            tuple(context),
+            final_content,
+            tuple(new_messages),
+            stop_reason,
+            tool_rounds,
+            summary.verification_reminder_injected,
+            summary.write_count,
+            summary.post_write_command_results,
+        )
 
     async def _execute_tool_batch(
         self,

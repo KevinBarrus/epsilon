@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator, Sequence
 import pytest
 
 from core.agent_loop import AgentLoop, AgentLoopCancelled, ToolBatchEvent, ToolExecutionEvent
+from core.end_policy import VERIFICATION_REMINDER, WriteVerificationPolicy
 from types import SimpleNamespace
 import core.agent_loop as agent_loop
 from core.context import ContextBuildResult
@@ -88,6 +89,175 @@ async def test_agent_loop_executes_tool_and_continues_model_request(
     assert batches[0].duration_ms >= 0
     assert len(client.requests) == 2
     assert client.tools[0][0]["function"]["name"] == "read_file"  # type: ignore[index]
+
+
+@pytest.mark.asyncio
+async def test_write_verification_policy_does_not_change_read_only_task() -> None:
+    """测试启用策略后只读任务仍在模型自然结束时直接完成。"""
+
+    class TextOnlyClient:
+        def __init__(self) -> None:
+            self.requests = 0
+
+        async def stream_response(self, messages, tools=(), thinking_level=None):
+            self.requests += 1
+            yield TextDelta("直接回答")
+
+    client = TextOnlyClient()
+    manager = ToolManager()
+    result = await AgentLoop(
+        client,
+        manager,
+        end_policy=WriteVerificationPolicy(),
+    ).run([Message("user", "只回答问题")])
+
+    assert result.verification_reminder_injected is False
+    assert result.write_count == 0
+    assert client.requests == 1
+
+
+@pytest.mark.asyncio
+async def test_write_verification_policy_reminds_once_after_unverified_write() -> None:
+    """测试成功写入后未执行命令时只追加一次验证提醒。"""
+
+    class WriteThenStopClient:
+        def __init__(self) -> None:
+            self.requests: list[list[Message]] = []
+
+        async def stream_response(self, messages, tools=(), thinking_level=None):
+            self.requests.append(list(messages))
+            if len(self.requests) == 1:
+                yield ToolCallEvent(ToolCall("write-1", "write_file", {}))
+            elif len(self.requests) == 2:
+                yield TextDelta("已经完成")
+            else:
+                assert self.requests[-1][-1] == Message("system", VERIFICATION_REMINDER)
+                yield TextDelta("无法运行验证")
+
+    manager = ToolManager()
+    manager.register_local(
+        ToolDefinition("write_file", "write", {"type": "object"}, "local", "read", False),
+        lambda call: _tool_result(call, "written"),
+    )
+    client = WriteThenStopClient()
+    result = await AgentLoop(
+        client,
+        manager,
+        end_policy=WriteVerificationPolicy(),
+    ).run([Message("user", "修改文件")])
+
+    assert result.final_content == "无法运行验证"
+    assert result.verification_reminder_injected is True
+    assert result.write_count == 1
+    assert result.post_write_command_results == ()
+    assert len(client.requests) == 3
+
+
+@pytest.mark.asyncio
+async def test_write_verification_policy_accepts_failed_command_attempt() -> None:
+    """测试写入后的失败命令也属于可追溯验证尝试，不重复提醒。"""
+
+    class WriteThenCommandClient:
+        def __init__(self) -> None:
+            self.requests = 0
+
+        async def stream_response(self, messages, tools=(), thinking_level=None):
+            self.requests += 1
+            if self.requests == 1:
+                yield ToolCallEvent(ToolCall("write-1", "write_file", {}))
+            elif self.requests == 2:
+                yield ToolCallEvent(ToolCall("check-1", "run_command", {}))
+            else:
+                yield TextDelta("验证失败，已说明原因")
+
+    manager = ToolManager()
+    manager.register_local(
+        ToolDefinition("write_file", "write", {"type": "object"}, "local", "read", False),
+        lambda call: _tool_result(call, "written"),
+    )
+    manager.register_local(
+        ToolDefinition("run_command", "check", {"type": "object"}, "local", "read", False),
+        lambda call: _tool_result(call, "failed", is_error=True),
+    )
+    client = WriteThenCommandClient()
+    result = await AgentLoop(
+        client,
+        manager,
+        end_policy=WriteVerificationPolicy(),
+    ).run([Message("user", "修改并验证")])
+
+    assert result.verification_reminder_injected is False
+    assert result.write_count == 1
+    assert result.post_write_command_results == (
+        ToolResult("check-1", "failed", is_error=True),
+    )
+    assert client.requests == 3
+
+
+@pytest.mark.asyncio
+async def test_write_verification_policy_does_not_run_after_tool_limit() -> None:
+    """测试工具上限结束时不会额外注入验证提醒。"""
+
+    class WriteOnlyClient:
+        async def stream_response(self, messages, tools=(), thinking_level=None):
+            yield ToolCallEvent(ToolCall("write-1", "write_file", {}))
+
+    manager = ToolManager()
+    manager.register_local(
+        ToolDefinition("write_file", "write", {"type": "object"}, "local", "read", False),
+        lambda call: _tool_result(call, "written"),
+    )
+    result = await AgentLoop(
+        WriteOnlyClient(),
+        manager,
+        max_tool_rounds=1,
+        end_policy=WriteVerificationPolicy(),
+    ).run([Message("user", "修改")])
+
+    assert result.stop_reason == "tool_limit"
+    assert result.verification_reminder_injected is False
+
+
+@pytest.mark.asyncio
+async def test_write_verification_policy_does_not_remind_after_cancellation() -> None:
+    """测试取消模型请求时不会额外发起验证提醒。"""
+
+    class WriteThenCancelClient:
+        def __init__(self) -> None:
+            self.requests = 0
+
+        async def stream_response(self, messages, tools=(), thinking_level=None):
+            self.requests += 1
+            if self.requests == 1:
+                yield ToolCallEvent(ToolCall("write-1", "write_file", {}))
+                return
+            raise asyncio.CancelledError
+
+    manager = ToolManager()
+    manager.register_local(
+        ToolDefinition("write_file", "write", {"type": "object"}, "local", "read", False),
+        lambda call: _tool_result(call, "written"),
+    )
+    client = WriteThenCancelClient()
+
+    with pytest.raises(AgentLoopCancelled):
+        await AgentLoop(
+            client,
+            manager,
+            end_policy=WriteVerificationPolicy(),
+        ).run([Message("user", "修改")])
+
+    assert client.requests == 2
+
+
+async def _tool_result(
+    tool_call: ToolCall,
+    content: str,
+    is_error: bool = False,
+) -> ToolResult:
+    """为收尾策略测试生成固定工具结果。"""
+
+    return ToolResult(tool_call.call_id, content, is_error=is_error)
 
 
 @pytest.mark.asyncio

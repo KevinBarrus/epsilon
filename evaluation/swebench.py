@@ -10,11 +10,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
 
-from core.agent_loop import AgentLoop
+from core.agent_loop import AgentLoop, AgentRunResult
 from core.config import load_settings
 from core.context import ContextBudget, ContextManager, DEFAULT_CONTEXT_BUDGET, estimate_context_tokens
 from core.model import Message, ModelClientError
 from core.openai_client import OpenAICompatibleClient
+from core.end_policy import WriteVerificationPolicy
 from core.prompts import load_prompt
 from core.session import Session
 from core.tools import (
@@ -159,6 +160,7 @@ async def run_task(
             client,
             manager,
             max_tool_rounds=effective_tool_rounds,
+            end_policy=WriteVerificationPolicy(),
         )
         context_builder = _context_builder(
             session,
@@ -173,13 +175,7 @@ async def run_task(
             on_event=collect_event,
             build_context=context_builder,
         )
-        events.append(
-            {
-                "type": "agent_end",
-                "stop_reason": result.stop_reason,
-                "tool_rounds": result.tool_rounds,
-            }
-        )
+        events.append(_agent_end_record(result))
         for message in result.new_messages:
             session.add_message(message)
         events.append(message_to_record(Message(role="assistant", content=result.final_content)))
@@ -459,6 +455,26 @@ def _configuration_record(max_tool_rounds: int) -> dict[str, object]:
         "type": "configuration",
         "max_tool_rounds": max_tool_rounds,
         "swebench_environment_contract": SWEBENCH_ENVIRONMENT_CONTRACT_VERSION,
+    }
+
+
+def _agent_end_record(result: AgentRunResult) -> dict[str, object]:
+    """记录写后验证提醒及其命令结果，供评测归因。"""
+
+    return {
+        "type": "agent_end",
+        "stop_reason": result.stop_reason,
+        "tool_rounds": result.tool_rounds,
+        "verification_reminder_injected": result.verification_reminder_injected,
+        "write_count": result.write_count,
+        "post_write_command_results": [
+            {
+                "call_id": item.call_id,
+                "is_error": item.is_error,
+                "error_category": item.error_category,
+            }
+            for item in result.post_write_command_results
+        ],
     }
 
 
