@@ -663,6 +663,14 @@ def _agent_end_record(result: AgentRunResult) -> dict[str, object]:
             }
             for item in result.post_write_command_results
         ],
+        "verification_command_results": [
+            {
+                "call_id": item.call_id,
+                "is_error": item.is_error,
+                "error_category": item.error_category,
+            }
+            for item in result.verification_command_results
+        ],
     }
 
 
@@ -671,9 +679,9 @@ def _local_verification_status(result: AgentRunResult) -> str:
 
     if result.write_count == 0:
         return "not-required"
-    if not result.post_write_command_results:
+    if not result.verification_command_results:
         return "not-attempted"
-    return "failed" if any(item.is_error for item in result.post_write_command_results) else "passed"
+    return "failed" if any(item.is_error for item in result.verification_command_results) else "passed"
 
 
 def _official_harness_status(verification: HarnessResult) -> str:

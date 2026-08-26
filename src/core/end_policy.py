@@ -1,8 +1,8 @@
 """定义 Agent 自然结束前的可选收尾策略。"""
 
-from collections.abc import Sequence
 from dataclasses import dataclass
-import re
+import shlex
+from collections.abc import Sequence
 from typing import Protocol
 
 from .model import Message, ToolCall, ToolResult
@@ -16,15 +16,10 @@ FAILED_VERIFICATION_REMINDER = (
     "Your verification command failed after modifying files. Read its output, fix the issue "
     "and rerun the relevant check, or clearly explain the blocker."
 )
-VERIFICATION_COMMAND_PATTERNS = (
-    re.compile(r"\bpytest\b"),
-    re.compile(r"\bpython(?:\d(?:\.\d+)?)?\s+-m\s+unittest\b"),
-    re.compile(r"\b(?:python(?:\d(?:\.\d+)?)?\s+)?manage\.py\s+test\b"),
-    re.compile(r"\b(?:tox|nox)\b"),
-    re.compile(r"\b(?:python(?:\d(?:\.\d+)?)?\s+-m\s+)?(?:compileall|py_compile)\b"),
-    re.compile(r"\b(?:ruff\s+check|flake8|mypy|eslint)\b"),
-    re.compile(r"\b(?:make|cargo|go|npm|pnpm|yarn)\s+test\b"),
-)
+DIRECT_VERIFICATION_COMMANDS = frozenset({"pytest", "tox", "nox", "flake8", "mypy", "eslint"})
+PYTHON_MODULE_CHECKS = frozenset({"pytest", "unittest", "compileall", "py_compile"})
+TEST_SUBCOMMANDS = frozenset({"make", "cargo", "go", "npm", "pnpm", "yarn"})
+SHELL_CONNECTORS = frozenset({"&&", "||", ";", "|"})
 
 
 @dataclass(frozen=True)
@@ -34,6 +29,7 @@ class EndPolicySummary:
     verification_reminder_injected: bool
     write_count: int
     post_write_command_results: tuple[ToolResult, ...]
+    verification_command_results: tuple[ToolResult, ...]
 
 
 class TurnEndPolicy(Protocol):
@@ -60,7 +56,52 @@ def is_verification_command(tool_call: ToolCall) -> bool:
     command = tool_call.arguments.get("command")
     if not isinstance(command, str):
         return False
-    return any(pattern.search(command) for pattern in VERIFICATION_COMMAND_PATTERNS)
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return False
+    return any(_is_verification_segment(segment) for segment in _command_segments(tokens))
+
+
+def _command_segments(tokens: Sequence[str]) -> tuple[tuple[str, ...], ...]:
+    """按 shell 连接符拆分命令，避免把参数文本当作命令名。"""
+
+    segments: list[tuple[str, ...]] = []
+    current: list[str] = []
+    for token in tokens:
+        if token in SHELL_CONNECTORS:
+            if current:
+                segments.append(tuple(current))
+                current = []
+        else:
+            current.append(token)
+    if current:
+        segments.append(tuple(current))
+    return tuple(segments)
+
+
+def _is_verification_segment(tokens: Sequence[str]) -> bool:
+    """只按命令名及独立参数判断单段 shell 命令。"""
+
+    if not tokens:
+        return False
+    command = tokens[0].rsplit("/", 1)[-1]
+    if command in DIRECT_VERIFICATION_COMMANDS:
+        return True
+    if command in {"python", "python3", "python3.11"} and len(tokens) >= 3:
+        return (
+            tokens[1] == "-m" and tokens[2] in PYTHON_MODULE_CHECKS
+            or tokens[1].rsplit("/", 1)[-1] == "manage.py" and tokens[2] == "test"
+        )
+    if command == "manage.py" and len(tokens) >= 2:
+        return tokens[1] == "test"
+    if command == "ruff" and len(tokens) >= 2:
+        return tokens[1] == "check"
+    if command in TEST_SUBCOMMANDS and len(tokens) >= 2:
+        return tokens[1] == "test" or tokens[1] == "run" and len(tokens) >= 3 and tokens[2] == "test"
+    if command in {"uv", "poetry"} and len(tokens) >= 3:
+        return tokens[1] == "run" and _is_verification_segment(tokens[2:])
+    return False
 
 
 class WriteVerificationPolicy:
@@ -74,6 +115,7 @@ class WriteVerificationPolicy:
         self._last_verification_failed = False
         self._reminder_injected = False
         self._post_write_command_results: list[ToolResult] = []
+        self._verification_command_results: list[ToolResult] = []
 
     def observe_tool_results(
         self,
@@ -89,8 +131,10 @@ class WriteVerificationPolicy:
                 self._last_verification_failed = False
             elif tool_call.name == "run_command" and self._needs_verification:
                 self._post_write_command_results.append(result)
-                self._needs_verification = result.is_error
-                self._last_verification_failed = result.is_error
+                if is_verification_command(tool_call):
+                    self._verification_command_results.append(result)
+                    self._needs_verification = result.is_error
+                    self._last_verification_failed = result.is_error
 
     def follow_up_message(self) -> Message | None:
         """在缺少或失败的写后验证时最多追加一次固定提醒。"""
@@ -113,4 +157,5 @@ class WriteVerificationPolicy:
             self._reminder_injected,
             self._write_count,
             tuple(self._post_write_command_results),
+            tuple(self._verification_command_results),
         )

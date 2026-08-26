@@ -69,6 +69,7 @@ class AgentRunResult:
     verification_reminder_injected: bool = False
     write_count: int = 0
     post_write_command_results: tuple[ToolResult, ...] = ()
+    verification_command_results: tuple[ToolResult, ...] = ()
 
 
 class AgentLoopCancelled(asyncio.CancelledError):
@@ -263,7 +264,7 @@ class AgentLoop:
         summary = (
             self._end_policy.summary
             if self._end_policy is not None
-            else EndPolicySummary(False, 0, ())
+            else EndPolicySummary(False, 0, (), ())
         )
         return AgentRunResult(
             tuple(context),
@@ -274,6 +275,7 @@ class AgentLoop:
             summary.verification_reminder_injected,
             summary.write_count,
             summary.post_write_command_results,
+            summary.verification_command_results,
         )
 
     async def _execute_tool_batch(

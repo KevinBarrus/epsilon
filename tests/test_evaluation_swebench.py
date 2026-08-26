@@ -116,12 +116,18 @@ def test_agent_end_record_keeps_write_verification_trace() -> None:
             post_write_command_results=(
                 ToolResult("check-1", "failed", is_error=True, error_category="tool"),
             ),
+            verification_command_results=(
+                ToolResult("check-1", "failed", is_error=True, error_category="tool"),
+            ),
         )
     )
 
     assert record["verification_reminder_injected"] is True
     assert record["write_count"] == 2
     assert record["post_write_command_results"] == [
+        {"call_id": "check-1", "is_error": True, "error_category": "tool"}
+    ]
+    assert record["verification_command_results"] == [
         {"call_id": "check-1", "is_error": True, "error_category": "tool"}
     ]
 
@@ -134,6 +140,7 @@ def test_verification_statuses_keep_local_and_official_results_separate() -> Non
         "完成",
         write_count=1,
         post_write_command_results=(ToolResult("check-1", "failed", is_error=True),),
+        verification_command_results=(ToolResult("check-1", "failed", is_error=True),),
     )
 
     assert _local_verification_status(run) == "failed"
@@ -502,6 +509,7 @@ async def test_patch_generation_failure_keeps_completed_agent_trace(
                 tool_rounds=7,
                 write_count=1,
                 post_write_command_results=(ToolResult("check-1", "failed", is_error=True),),
+                verification_command_results=(ToolResult("check-1", "failed", is_error=True),),
             )
 
     class FakeTimedClient:

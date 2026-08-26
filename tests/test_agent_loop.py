@@ -100,6 +100,7 @@ async def test_agent_loop_executes_tool_and_continues_model_request(
     "command",
     (
         "uv run pytest tests/test_agent_loop.py",
+        "pytest && python -m py_compile module.py",
         "python -m unittest",
         "python manage.py test sessions",
         "python -m py_compile module.py",
@@ -115,7 +116,10 @@ def test_is_verification_command_accepts_common_checks(command: str) -> None:
     assert is_verification_command(ToolCall("check", "run_command", {"command": command}))
 
 
-@pytest.mark.parametrize("command", ("pwd", "ls -la", "pip list", "git status", "which python"))
+@pytest.mark.parametrize(
+    "command",
+    ("pwd", "ls -la", "ls test.txt", "echo test", "pip list", "git status", "which python"),
+)
 def test_is_verification_command_rejects_information_commands(command: str) -> None:
     """测试环境查询命令不能作为代码验证证据。"""
 
@@ -126,6 +130,24 @@ def test_is_verification_command_rejects_missing_command() -> None:
     """测试缺少字符串命令参数时保持保守判断。"""
 
     assert not is_verification_command(ToolCall("missing", "run_command", {}))
+
+
+def test_write_verification_policy_separates_check_commands_from_information_commands() -> None:
+    """测试写后轨迹保留全部命令，同时单独记录有效检查命令。"""
+
+    policy = WriteVerificationPolicy()
+    information = ToolCall("info", "run_command", {"command": "pip list"})
+    check = ToolCall("check", "run_command", {"command": "pytest tests"})
+    information_result = ToolResult("info", "packages")
+    check_result = ToolResult("check", "passed")
+
+    policy.observe_tool_results(
+        (ToolCall("write", "write_file", {}), information, check),
+        (ToolResult("write", "written"), information_result, check_result),
+    )
+
+    assert policy.summary.post_write_command_results == (information_result, check_result)
+    assert policy.summary.verification_command_results == (check_result,)
 
 
 @pytest.mark.asyncio
@@ -203,7 +225,7 @@ async def test_write_verification_policy_reminds_once_after_failed_command() -> 
             if self.requests == 1:
                 yield ToolCallEvent(ToolCall("write-1", "write_file", {}))
             elif self.requests == 2:
-                yield ToolCallEvent(ToolCall("check-1", "run_command", {}))
+                yield ToolCallEvent(ToolCall("check-1", "run_command", {"command": "pytest"}))
             elif self.requests == 3:
                 yield TextDelta("验证失败，已说明原因")
             else:
@@ -216,7 +238,14 @@ async def test_write_verification_policy_reminds_once_after_failed_command() -> 
         lambda call: _tool_result(call, "written"),
     )
     manager.register_local(
-        ToolDefinition("run_command", "check", {"type": "object"}, "local", "read", False),
+        ToolDefinition(
+            "run_command",
+            "check",
+            {"type": "object", "properties": {"command": {"type": "string"}}},
+            "local",
+            "read",
+            False,
+        ),
         lambda call: _tool_result(call, "failed", is_error=True),
     )
     client = WriteThenCommandClient()
@@ -247,7 +276,9 @@ async def test_write_verification_policy_accepts_success_after_failed_command() 
             if self.requests == 1:
                 yield ToolCallEvent(ToolCall("write-1", "write_file", {}))
             elif self.requests in {2, 3}:
-                yield ToolCallEvent(ToolCall(f"check-{self.requests}", "run_command", {}))
+                yield ToolCallEvent(
+                    ToolCall(f"check-{self.requests}", "run_command", {"command": "pytest"})
+                )
             else:
                 yield TextDelta("验证成功")
 
@@ -268,7 +299,14 @@ async def test_write_verification_policy_accepts_success_after_failed_command() 
         lambda call: _tool_result(call, "written"),
     )
     manager.register_local(
-        ToolDefinition("run_command", "check", {"type": "object"}, "local", "read", False),
+        ToolDefinition(
+            "run_command",
+            "check",
+            {"type": "object", "properties": {"command": {"type": "string"}}},
+            "local",
+            "read",
+            False,
+        ),
         command_result,
     )
 
