@@ -36,8 +36,8 @@ UI 编排 ── Session 持久化 ── Context Manager
 需要 Python 3.11+ 和 [uv](https://docs.astral.sh/uv/)。
 
 ```bash
-git clone https://github.com/KevinBarrus/864code.git
-cd 864code
+git clone https://github.com/KevinBarrus/epsilon.git
+cd epsilon
 uv sync
 uv run epsilon
 ```
