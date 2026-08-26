@@ -213,6 +213,54 @@ async def test_write_verification_policy_reminds_once_after_unverified_write() -
 
 
 @pytest.mark.asyncio
+async def test_write_verification_policy_reminds_after_information_command() -> None:
+    """测试写后环境查询成功不能取消代码检查提醒。"""
+
+    class WriteThenInspectClient:
+        def __init__(self) -> None:
+            self.requests: list[list[Message]] = []
+
+        async def stream_response(self, messages, tools=(), thinking_level=None):
+            self.requests.append(list(messages))
+            if len(self.requests) == 1:
+                yield ToolCallEvent(ToolCall("write-1", "write_file", {}))
+            elif len(self.requests) == 2:
+                yield ToolCallEvent(ToolCall("inspect-1", "run_command", {"command": "pip list"}))
+            elif len(self.requests) == 3:
+                yield TextDelta("已经完成")
+            else:
+                assert self.requests[-1][-1] == Message("system", VERIFICATION_REMINDER)
+                yield TextDelta("无法运行相关检查")
+
+    manager = ToolManager()
+    manager.register_local(
+        ToolDefinition("write_file", "write", {"type": "object"}, "local", "read", False),
+        lambda call: _tool_result(call, "written"),
+    )
+    manager.register_local(
+        ToolDefinition(
+            "run_command",
+            "command",
+            {"type": "object", "properties": {"command": {"type": "string"}}},
+            "local",
+            "read",
+            False,
+        ),
+        lambda call: _tool_result(call, "packages"),
+    )
+    client = WriteThenInspectClient()
+
+    result = await AgentLoop(client, manager, end_policy=WriteVerificationPolicy()).run(
+        [Message("user", "修改并验证")]
+    )
+
+    assert result.verification_reminder_injected is True
+    assert len(result.post_write_command_results) == 1
+    assert result.verification_command_results == ()
+    assert len(client.requests) == 4
+
+
+@pytest.mark.asyncio
 async def test_write_verification_policy_reminds_once_after_failed_command() -> None:
     """测试写后命令失败时追加一次受限的收尾提醒。"""
 
