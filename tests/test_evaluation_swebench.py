@@ -388,6 +388,36 @@ def test_verify_patch_marks_harness_exit_without_report_as_environment_failure(
     )
 
 
+def test_verify_patch_reports_unparseable_harness_test_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """测试 Harness 未解析测试日志时保留真实失败并给出诊断。"""
+
+    task = SwebenchTask("example__1", "example/repo", "base", "issue", "swebench-lite")
+    run_id = "example-1"
+    (tmp_path / f"epsilon.{run_id}.json").write_text(
+        '{"resolved_ids": [], "infra_failure_instances": 0, "error_instances": 0}',
+        encoding="utf-8",
+    )
+    instance_report = tmp_path / "logs" / "run_evaluation" / run_id / "epsilon" / task.instance_id / "report.json"
+    instance_report.parent.mkdir(parents=True)
+    instance_report.write_text(
+        '{"example__1": {"patch_exists": true, "patch_successfully_applied": false, "infra_failure": false}}',
+        encoding="utf-8",
+    )
+
+    class Completed:
+        returncode = 0
+        stdout = "harness completed"
+
+    monkeypatch.setattr("evaluation.swebench.subprocess.run", lambda *args, **kwargs: Completed())
+
+    assert verify_patch(task, "patch", tmp_path, "python") == HarnessResult(
+        False,
+        diagnostic="官方 Harness 已完成任务，但测试日志未能解析为结果；该字段不等同于 Git 补丁未应用",
+    )
+
+
 def test_load_task_keeps_official_instance_image(monkeypatch: pytest.MonkeyPatch) -> None:
     """测试任务加载保留官方 Harness 提供的实例镜像。"""
 

@@ -93,6 +93,7 @@ class HarnessResult:
 
     passed: bool
     environment_error: str | None = None
+    diagnostic: str | None = None
 
 
 def load_task(instance_id: str, source: str) -> SwebenchTask:
@@ -237,7 +238,11 @@ async def run_task(
             harness_python,
         )
         assertions = (
-            EvaluationAssertion("official-harness", verification.passed, verification.environment_error or "官方 Harness 未通过"),
+            EvaluationAssertion(
+                "official-harness",
+                verification.passed,
+                verification.environment_error or verification.diagnostic or "官方 Harness 未通过",
+            ),
             EvaluationAssertion("patch-created", bool(patch), "Agent 没有生成代码补丁"),
             EvaluationAssertion("persistence", persistence_ok, "评测 Session 持久化失败"),
             EvaluationAssertion("workspace-isolated", not (prepared.workspace / ".git").exists(), "Agent 工作区包含 Git 历史"),
@@ -499,7 +504,30 @@ def verify_patch(
     report = json.loads(report_path.read_text(encoding="utf-8"))
     if report.get("infra_failure_instances") or report.get("error_instances"):
         return HarnessResult(False, "官方 Harness 环境失败")
-    return HarnessResult(task.instance_id in report.get("resolved_ids", []))
+    return HarnessResult(
+        task.instance_id in report.get("resolved_ids", []),
+        diagnostic=_harness_diagnostic(result_root, run_id, task.instance_id),
+    )
+
+
+def _harness_diagnostic(result_root: Path, run_id: str, instance_id: str) -> str | None:
+    """解释 Harness 中名称容易误导的未解析测试结果状态。"""
+
+    report_path = result_root / "logs" / "run_evaluation" / run_id / "epsilon" / instance_id / "report.json"
+    if not report_path.is_file():
+        return None
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        instance_report = report[instance_id]
+    except (json.JSONDecodeError, KeyError, TypeError):
+        return None
+    if (
+        instance_report.get("patch_exists")
+        and not instance_report.get("patch_successfully_applied")
+        and not instance_report.get("infra_failure")
+    ):
+        return "官方 Harness 已完成任务，但测试日志未能解析为结果；该字段不等同于 Git 补丁未应用"
+    return None
 
 
 def _tool_manager(
