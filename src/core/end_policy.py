@@ -2,6 +2,7 @@
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+import re
 from typing import Protocol
 
 from .model import Message, ToolCall, ToolResult
@@ -14,6 +15,15 @@ VERIFICATION_REMINDER = (
 FAILED_VERIFICATION_REMINDER = (
     "Your verification command failed after modifying files. Read its output, fix the issue "
     "and rerun the relevant check, or clearly explain the blocker."
+)
+VERIFICATION_COMMAND_PATTERNS = (
+    re.compile(r"\bpytest\b"),
+    re.compile(r"\bpython(?:\d(?:\.\d+)?)?\s+-m\s+unittest\b"),
+    re.compile(r"\b(?:python(?:\d(?:\.\d+)?)?\s+)?manage\.py\s+test\b"),
+    re.compile(r"\b(?:tox|nox)\b"),
+    re.compile(r"\b(?:python(?:\d(?:\.\d+)?)?\s+-m\s+)?(?:compileall|py_compile)\b"),
+    re.compile(r"\b(?:ruff\s+check|flake8|mypy|eslint)\b"),
+    re.compile(r"\b(?:make|cargo|go|npm|pnpm|yarn)\s+test\b"),
 )
 
 
@@ -42,6 +52,15 @@ class TurnEndPolicy(Protocol):
     @property
     def summary(self) -> EndPolicySummary:
         """返回本轮收尾决策的可追溯结果。"""
+
+
+def is_verification_command(tool_call: ToolCall) -> bool:
+    """判断命令工具调用是否具有测试、检查或构建验证语义。"""
+
+    command = tool_call.arguments.get("command")
+    if not isinstance(command, str):
+        return False
+    return any(pattern.search(command) for pattern in VERIFICATION_COMMAND_PATTERNS)
 
 
 class WriteVerificationPolicy:

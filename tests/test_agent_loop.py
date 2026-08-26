@@ -8,6 +8,7 @@ from core.end_policy import (
     FAILED_VERIFICATION_REMINDER,
     VERIFICATION_REMINDER,
     WriteVerificationPolicy,
+    is_verification_command,
 )
 from types import SimpleNamespace
 import core.agent_loop as agent_loop
@@ -93,6 +94,38 @@ async def test_agent_loop_executes_tool_and_continues_model_request(
     assert batches[0].duration_ms >= 0
     assert len(client.requests) == 2
     assert client.tools[0][0]["function"]["name"] == "read_file"  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "uv run pytest tests/test_agent_loop.py",
+        "python -m unittest",
+        "python manage.py test sessions",
+        "python -m py_compile module.py",
+        "ruff check src",
+        "make test",
+        "cargo test",
+        "go test ./...",
+    ),
+)
+def test_is_verification_command_accepts_common_checks(command: str) -> None:
+    """测试常见测试与静态检查命令会被识别。"""
+
+    assert is_verification_command(ToolCall("check", "run_command", {"command": command}))
+
+
+@pytest.mark.parametrize("command", ("pwd", "ls -la", "pip list", "git status", "which python"))
+def test_is_verification_command_rejects_information_commands(command: str) -> None:
+    """测试环境查询命令不能作为代码验证证据。"""
+
+    assert not is_verification_command(ToolCall("info", "run_command", {"command": command}))
+
+
+def test_is_verification_command_rejects_missing_command() -> None:
+    """测试缺少字符串命令参数时保持保守判断。"""
+
+    assert not is_verification_command(ToolCall("missing", "run_command", {}))
 
 
 @pytest.mark.asyncio
