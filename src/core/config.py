@@ -43,7 +43,7 @@ class Settings:
     first_byte_timeout_seconds: float | None = None
     stream_idle_timeout_seconds: float | None = None
     mcp_stdio: McpStdioSettings | None = None
-    stream_usage: bool = False
+    stream_usage: bool = True
     max_tool_rounds: int | None = None
     price: ModelPrice | None = None
 
@@ -184,7 +184,7 @@ def _settings_from_data(data: dict) -> Settings:
     )
     stream_usage = _optional_bool(
         model.get("stream_usage"),
-        False,
+        True,
         "model.stream_usage",
     )
     max_tool_rounds = _optional_int(

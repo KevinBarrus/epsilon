@@ -257,12 +257,12 @@ def test_load_settings_rejects_non_object_json(tmp_path: Path) -> None:
         load_settings(user_config_path=user_path)
 
 
-def test_load_settings_defaults_stream_usage_off(tmp_path: Path) -> None:
-    """测试默认关闭服务端 usage 采集。"""
+def test_load_settings_defaults_stream_usage_on(tmp_path: Path) -> None:
+    """测试默认采集服务端 usage，供上下文估算使用。"""
 
     user_path = _write_user_settings(tmp_path, _valid_model())
 
-    assert load_settings(user_config_path=user_path).stream_usage is False
+    assert load_settings(user_config_path=user_path).stream_usage is True
 
 
 def test_load_settings_reads_stream_usage(tmp_path: Path) -> None:

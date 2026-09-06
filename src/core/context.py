@@ -1,5 +1,6 @@
 """提供模型上下文的 Token 估算和预算配置。"""
 
+import hashlib
 import json
 from dataclasses import dataclass, replace
 from math import ceil
@@ -806,8 +807,55 @@ def estimate_model_request_tokens(
 ) -> int:
     """估算完整模型请求的消息、协议和工具定义开销。"""
 
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if (
+            message.role == "assistant"
+            and message.usage is not None
+            and message.request_fingerprint
+            == model_request_fingerprint(messages[:index], tools)
+        ):
+            return message.usage.prompt_tokens + _estimate_messages(
+                messages[index:],
+                MESSAGE_PROTOCOL_TOKENS,
+            )
+
     return (
         estimate_request_fixed_tokens(tools)
         + len(messages) * MESSAGE_PROTOCOL_TOKENS
         + estimate_context_tokens(messages)
     )
+
+
+def model_request_fingerprint(
+    messages: Sequence[Message],
+    tools: Sequence[Mapping[str, object]] = (),
+) -> str:
+    """为实际请求内容生成稳定指纹，防止复用失效的 usage。"""
+
+    payload = {
+        "messages": [
+            {
+                "role": message.role,
+                "content": message.content,
+                "tool_calls": [
+                    {
+                        "call_id": call.call_id,
+                        "name": call.name,
+                        "arguments": call.arguments,
+                    }
+                    for call in message.tool_calls
+                ],
+                "tool_call_id": message.tool_call_id,
+            }
+            for message in messages
+        ],
+        "tools": list(tools),
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()

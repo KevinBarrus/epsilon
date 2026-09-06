@@ -8,7 +8,7 @@ from dataclasses import dataclass, replace
 from time import perf_counter
 from typing import Literal
 
-from .context import ContextBuildResult
+from .context import ContextBuildResult, model_request_fingerprint
 from .end_policy import EndPolicySummary, TurnEndPolicy
 from .error_policy import AgentErrorPolicy
 from .errors import AgentError
@@ -20,6 +20,7 @@ from .model import (
     ToolCall,
     ToolCallEvent,
     ToolResult,
+    UsageEvent,
 )
 from .tools import ToolManager
 
@@ -150,6 +151,7 @@ class AgentLoop:
             ):
                 text_parts = []
                 tool_calls = []
+                latest_usage: UsageEvent | None = None
                 request_messages = context
                 for force_compaction in (False, True):
                     if build_context is not None:
@@ -169,6 +171,8 @@ class AgentLoop:
                                 text_parts.append(event.content)
                             elif isinstance(event, ToolCallEvent):
                                 tool_calls.append(event.tool_call)
+                            elif isinstance(event, UsageEvent):
+                                latest_usage = event
                             if on_event is not None:
                                 await on_event(event)
                             if isinstance(event, TextDelta):
@@ -185,6 +189,15 @@ class AgentLoop:
                     role="assistant",
                     content=assistant_content,
                     tool_calls=completed_tool_calls,
+                    usage=latest_usage,
+                    request_fingerprint=(
+                        model_request_fingerprint(
+                            request_messages,
+                            self._tool_manager.model_tools(),
+                        )
+                        if latest_usage is not None
+                        else None
+                    ),
                 )
                 context.append(assistant_message)
                 new_messages.append(assistant_message)

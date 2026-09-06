@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .errors import is_error_category
-from .model import Message, MessageStatus, ToolCall
+from .model import Message, MessageStatus, ToolCall, UsageEvent
 
 
 class SessionStoreError(ValueError):
@@ -276,6 +276,15 @@ class SessionStore:
             ]
         if message.tool_call_id is not None:
             record["tool_call_id"] = message.tool_call_id
+        if message.usage is not None:
+            record["usage"] = {
+                "prompt_tokens": message.usage.prompt_tokens,
+                "completion_tokens": message.usage.completion_tokens,
+                "total_tokens": message.usage.total_tokens,
+                "cached_tokens": message.usage.cached_tokens,
+            }
+        if message.request_fingerprint is not None:
+            record["request_fingerprint"] = message.request_fingerprint
         return record
 
     @staticmethod
@@ -322,6 +331,10 @@ class SessionStore:
             raise SessionStoreError(f"line {line_number} has an invalid tool call id")
         if role == "tool" and not tool_call_id:
             raise SessionStoreError(f"line {line_number} is missing a tool call id")
+        usage = _usage_from_record(record.get("usage"), line_number)
+        request_fingerprint = record.get("request_fingerprint")
+        if request_fingerprint is not None and not isinstance(request_fingerprint, str):
+            raise SessionStoreError(f"line {line_number} has an invalid request fingerprint")
         return Message(
             role=role,
             content=content,
@@ -329,6 +342,8 @@ class SessionStore:
             tool_call_id=tool_call_id,
             status=status,
             error_category=error_category,
+            usage=usage,
+            request_fingerprint=request_fingerprint,
         )
 
     @staticmethod
@@ -384,3 +399,34 @@ def _delete_file(path: Path) -> None:
     except (OSError, subprocess.TimeoutExpired):
         pass
     path.unlink(missing_ok=True)
+
+
+def _usage_from_record(value: object, line_number: int) -> UsageEvent | None:
+    """校验并恢复 assistant 消息携带的服务端 Token 用量。"""
+
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise SessionStoreError(f"line {line_number} has invalid token usage")
+    fields = (
+        value.get("prompt_tokens"),
+        value.get("completion_tokens"),
+        value.get("total_tokens"),
+    )
+    cached = value.get("cached_tokens")
+    if (
+        any(
+            not isinstance(item, int) or isinstance(item, bool) or item < 0
+            for item in fields
+        )
+        or (
+            cached is not None
+            and (
+                not isinstance(cached, int)
+                or isinstance(cached, bool)
+                or cached < 0
+            )
+        )
+    ):
+        raise SessionStoreError(f"line {line_number} has invalid token usage")
+    return UsageEvent(fields[0], fields[1], fields[2], cached)

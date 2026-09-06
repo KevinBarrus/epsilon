@@ -21,6 +21,7 @@ from core.model import (
     ToolCall,
     ToolCallEvent,
     ToolResult,
+    UsageEvent,
 )
 from core.tools import (
     ApprovalDecision,
@@ -57,6 +58,24 @@ class FakeModelClient:
             )
             return
         yield TextDelta("文件已经读取")
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_attaches_usage_to_assistant_message() -> None:
+    """测试服务端用量和请求指纹跟随对应 assistant 消息返回。"""
+
+    class UsageClient:
+        async def stream_response(self, messages, tools=(), thinking_level=None):
+            yield TextDelta("完成")
+            yield UsageEvent(120, 4, 124)
+
+    result = await AgentLoop(UsageClient(), ToolManager()).run(
+        [Message(role="user", content="任务")]
+    )
+
+    assistant = result.new_messages[-1]
+    assert assistant.usage == UsageEvent(120, 4, 124)
+    assert assistant.request_fingerprint is not None
 
 
 @pytest.mark.asyncio

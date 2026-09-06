@@ -83,6 +83,7 @@ def _settings() -> Settings:
         base_url="https://example.com/v1",
         model_name="test-model",
         api_key="test-key",
+        stream_usage=False,
     )
 
 
@@ -93,6 +94,7 @@ def _deepseek_settings() -> Settings:
         base_url="https://api.deepseek.com/",
         model_name="deepseek-test",
         api_key="test-key",
+        stream_usage=False,
     )
 
 

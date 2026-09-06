@@ -16,10 +16,11 @@ from core.context import (
     estimate_message_tokens,
     estimate_text_tokens,
     generate_context_summary,
+    model_request_fingerprint,
     select_recent_messages,
 )
 from core.context import _fit_messages_to_budget, _has_valid_tool_chain, _split_oversized_latest_turn
-from core.model import Message, ModelClientError, ToolCall
+from core.model import Message, ModelClientError, ToolCall, UsageEvent
 from core.session_store import CompactionRecord
 
 
@@ -71,6 +72,38 @@ def test_estimate_context_tokens_sums_messages() -> None:
     ]
 
     assert estimate_context_tokens(messages) == 3
+
+
+def test_request_estimate_uses_matching_server_usage_anchor() -> None:
+    """测试相同请求前缀使用服务端用量并只估算后续消息。"""
+
+    user = Message(role="user", content="short")
+    assistant = Message(
+        role="assistant",
+        content="done",
+        usage=UsageEvent(900, 10, 910),
+        request_fingerprint=model_request_fingerprint([user]),
+    )
+
+    assert estimate_model_request_tokens([user, assistant]) >= 900
+
+
+def test_request_estimate_rejects_usage_anchor_after_prefix_changes() -> None:
+    """测试系统提示词变化后不会复用旧请求的 Token 用量。"""
+
+    user = Message(role="user", content="short")
+    assistant = Message(
+        role="assistant",
+        content="done",
+        usage=UsageEvent(900, 10, 910),
+        request_fingerprint=model_request_fingerprint([user]),
+    )
+
+    estimated = estimate_model_request_tokens(
+        [Message(role="system", content="new"), user, assistant]
+    )
+
+    assert estimated < 900
 
 
 def test_context_manager_counts_tool_schema_and_message_protocol() -> None:

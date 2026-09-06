@@ -69,6 +69,8 @@ class Message:
     tool_call_id: str | None = None
     status: MessageStatus = "completed"
     error_category: ErrorCategory | None = None
+    usage: UsageEvent | None = None
+    request_fingerprint: str | None = None
 
 
 class ModelClientError(AgentError):

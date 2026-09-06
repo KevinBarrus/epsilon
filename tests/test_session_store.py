@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from core.model import Message, ToolCall
+from core.model import Message, ToolCall, UsageEvent
 from core.session_store import CompactionRecord, SessionStore, SessionStoreError
 
 
@@ -52,6 +52,23 @@ def test_load_messages_restores_history_in_order(tmp_path: Path) -> None:
         store.append_message(session_id, message)
 
     assert store.load_messages(session_id) == expected
+
+
+def test_jsonl_persists_assistant_usage_anchor(tmp_path: Path) -> None:
+    """测试服务端 usage 和请求指纹可跨进程恢复。"""
+
+    store = SessionStore(tmp_path)
+    session_id = str(uuid.uuid4())
+    expected = Message(
+        role="assistant",
+        content="完成",
+        usage=UsageEvent(120, 8, 128, 20),
+        request_fingerprint="request-hash",
+    )
+
+    store.append_message(session_id, expected)
+
+    assert store.load_messages(session_id) == [expected]
 
 
 def test_load_messages_ignores_incomplete_tail_record(tmp_path: Path) -> None:
