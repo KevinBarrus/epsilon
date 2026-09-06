@@ -11,6 +11,7 @@ from .config import ConfigError, default_user_config_path, load_settings
 from .context import ContextBudget
 from .balance import create_balance_provider
 from .openai_client import OpenAICompatibleClient
+from .model_capabilities import resolve_model_capabilities
 from .session_picker import SessionPicker
 from .session_store import SessionStore
 from .session_store import SessionStoreError
@@ -45,6 +46,7 @@ async def run(
             return
     settings = load_settings(user_config_path=config_path)
     client = OpenAICompatibleClient(settings)
+    capabilities = await resolve_model_capabilities(settings, client)
     mcp_provider = (
         StdioMcpProvider(
             (settings.mcp_stdio.command, *settings.mcp_stdio.arguments),
@@ -64,7 +66,7 @@ async def run(
         workspace,
         session_id,
         context_budget=ContextBudget(
-            settings.context_window,
+            capabilities.context_window,
             settings.reserve_tokens,
             settings.keep_recent_tokens,
         ),

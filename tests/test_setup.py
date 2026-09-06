@@ -139,6 +139,11 @@ async def test_run_setup_guide_writes_config(
         "list_models",
         lambda base_url, api_key: ["deepseek-v4-pro", "deepseek-v4-flash"],
     )
+    monkeypatch.setattr(
+        setup,
+        "discover_context_window",
+        lambda base_url, api_key, model_name: 128_000,
+    )
 
     completed = await run_setup_guide(target)
 
@@ -148,6 +153,7 @@ async def test_run_setup_guide_writes_config(
             "base_url": "https://api.deepseek.com/",
             "api_key": "secret-key",
             "model_name": "deepseek-v4-pro",
+            "context_window": 128000,
         }
     }
 
@@ -175,6 +181,11 @@ async def test_run_setup_guide_manual_model_when_list_fails(
     monkeypatch.setattr(setup, "_prompt_api_key", fake_api_key)
     monkeypatch.setattr(setup, "_pick_model", fake_model)
     monkeypatch.setattr(setup, "list_models", lambda base_url, api_key: None)
+    monkeypatch.setattr(
+        setup,
+        "discover_context_window",
+        lambda base_url, api_key, model_name: 128_000,
+    )
 
     completed = await run_setup_guide(target)
 

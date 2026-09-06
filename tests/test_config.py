@@ -45,6 +45,7 @@ def test_load_settings_reads_required_values(tmp_path: Path) -> None:
     assert settings.base_url == "https://example.com/v1"
     assert settings.model_name == "test-model"
     assert settings.api_key == "test-key"
+    assert settings.context_window is None
     assert settings.price is None
 
 

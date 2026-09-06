@@ -10,6 +10,7 @@ from openai import AsyncOpenAI
 
 from .config import Settings
 from .errors import ErrorCategory
+from .model_capabilities import extract_context_window
 from .model import (
     Message,
     ModelEvent,
@@ -71,6 +72,15 @@ class OpenAICompatibleClient:
         """关闭底层 HTTP 客户端，避免事件循环关闭后资源泄漏。"""
 
         await self._client.close()
+
+    async def discover_context_window(self) -> int | None:
+        """读取模型元数据中的上下文窗口，兼容服务商常见字段名。"""
+
+        try:
+            model = await self._client.models.retrieve(self._model_name)
+        except Exception:
+            return None
+        return extract_context_window(model)
 
     async def stream_response(
         self,

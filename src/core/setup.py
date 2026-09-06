@@ -17,6 +17,8 @@ from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.shortcuts import prompt
 from prompt_toolkit.styles import Style
 
+from .model_capabilities import extract_context_window
+
 PROVIDER_HINTS = "↑/↓ move, Space select, Enter confirm, Esc cancel"
 
 
@@ -70,6 +72,21 @@ def list_models(base_url: str, api_key: str, timeout: float = 15.0) -> list[str]
         return None
 
 
+def discover_context_window(
+    base_url: str,
+    api_key: str,
+    model_name: str,
+    timeout: float = 15.0,
+) -> int | None:
+    """在首次配置时读取服务端模型窗口，服务端不提供则返回 None。"""
+
+    try:
+        client = OpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
+        return extract_context_window(client.models.retrieve(model_name))
+    except Exception:
+        return None
+
+
 async def write_settings_atomically(path: Path, data: dict) -> None:
     """原子写入 settings.json，先写临时文件再重命名，避免写半截文件。"""
 
@@ -95,6 +112,16 @@ async def run_setup_guide(target_path: Path) -> bool:
     model_name = await _pick_model(models)
     if model_name is None:
         return False
+    context_window = await asyncio.to_thread(
+        discover_context_window,
+        base_url,
+        api_key,
+        model_name,
+    )
+    if context_window is None:
+        context_window = await _prompt_context_window()
+        if context_window is None:
+            return False
     await write_settings_atomically(
         target_path,
         {
@@ -102,6 +129,7 @@ async def run_setup_guide(target_path: Path) -> bool:
                 "base_url": base_url,
                 "api_key": api_key,
                 "model_name": model_name,
+                "context_window": context_window,
             }
         },
     )
@@ -156,6 +184,22 @@ async def _pick_model(models: list[str] | None) -> str | None:
     if value is None:
         return None
     return value.strip() or None
+
+
+async def _prompt_context_window() -> int | None:
+    """服务端未声明模型窗口时要求用户显式输入。"""
+
+    while True:
+        value = await _prompt_text("Context window in tokens: ")
+        if value is None:
+            return None
+        try:
+            context_window = int(value)
+        except ValueError:
+            context_window = 0
+        if context_window > 0:
+            return context_window
+        print("Context window must be a positive integer.")
 
 
 async def _prompt_text(prompt_text: str, *, is_password: bool = False) -> str | None:

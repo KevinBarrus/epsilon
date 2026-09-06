@@ -127,7 +127,9 @@ async def test_run_resume_without_id_uses_picker(
     monkeypatch.setattr(
         main,
         "load_settings",
-        lambda user_config_path=None: Settings("https://example.com", "test", "key"),
+        lambda user_config_path=None: Settings(
+            "https://example.com", "test", "key", context_window=100_000
+        ),
     )
     monkeypatch.setattr(main, "run_chat", fake_run_chat)
 
@@ -188,7 +190,9 @@ async def test_run_resume_with_id_skips_picker(
     monkeypatch.setattr(
         main,
         "load_settings",
-        lambda user_config_path=None: Settings("https://example.com", "test", "key"),
+        lambda user_config_path=None: Settings(
+            "https://example.com", "test", "key", context_window=100_000
+        ),
     )
     monkeypatch.setattr(main, "run_chat", fake_run_chat)
 
@@ -242,6 +246,7 @@ async def test_run_creates_configured_stdio_mcp_provider(
             "https://example.com",
             "test",
             "key",
+            context_window=100_000,
             mcp_stdio=McpStdioSettings("node", ("server.js",), "demo"),
         ),
     )

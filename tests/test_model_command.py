@@ -105,7 +105,12 @@ def _make_context(tmp_path: Path) -> tuple[CommandContext, FakeAgentLoop, FakeSc
     """构造带假依赖的命令上下文。"""
 
     screen = FakeScreen()
-    settings = Settings(BASE_URL, "deepseek-v4-pro", API_KEY)
+    settings = Settings(
+        BASE_URL,
+        "deepseek-v4-pro",
+        API_KEY,
+        context_window=100_000,
+    )
     holder = ClientHolder(settings, FakeClient())
     loop = FakeAgentLoop()
     manager = FakeContextManager()
@@ -195,7 +200,7 @@ async def test_model_command_new_config_writes_project_settings(
 
     context, loop, screen = _make_context(tmp_path)
     screen.choice_results = [NEW_CONFIG_OPTION, "DeepSeek", "deepseek-v4-pro"]
-    screen.text_results = ["new-api-key"]
+    screen.text_results = ["new-api-key", "100000"]
 
     def fake_list_models(base_url: str, api_key: str):
         if api_key == "new-api-key":
@@ -213,6 +218,7 @@ async def test_model_command_new_config_writes_project_settings(
         "base_url": "https://api.deepseek.com/",
         "api_key": "new-api-key",
         "model_name": "deepseek-v4-pro",
+        "context_window": 100000,
     }
     assert len(loop.swapped_clients) == 1
     assert context.client_holder.settings.model_name == "deepseek-v4-pro"
@@ -230,7 +236,12 @@ async def test_model_command_new_config_manual_model_when_list_fails(
 
     context, loop, screen = _make_context(tmp_path)
     screen.choice_results = [NEW_CONFIG_OPTION, "Manual"]
-    screen.text_results = ["https://custom.example.com/v1", "new-api-key", "custom-model"]
+    screen.text_results = [
+        "https://custom.example.com/v1",
+        "new-api-key",
+        "custom-model",
+        "100000",
+    ]
 
     monkeypatch.setattr(
         "core.commands.model.list_models",
@@ -246,6 +257,7 @@ async def test_model_command_new_config_manual_model_when_list_fails(
         "base_url": "https://custom.example.com/v1",
         "api_key": "new-api-key",
         "model_name": "custom-model",
+        "context_window": 100000,
     }
     assert context.client_holder.settings.base_url == "https://custom.example.com/v1"
     assert context.client_holder.settings.model_name == "custom-model"

@@ -36,7 +36,7 @@ class Settings:
     base_url: str
     model_name: str
     api_key: str
-    context_window: int = 100_000
+    context_window: int | None = None
     reserve_tokens: int = 16_000
     keep_recent_tokens: int = 20_000
     request_timeout_seconds: float = 120.0
@@ -154,7 +154,7 @@ def _settings_from_data(data: dict) -> Settings:
     api_key = _required_value(model.get("api_key"), "model.api_key")
     context_window = _optional_int(
         model.get("context_window"),
-        100_000,
+        None,
         "model.context_window",
     )
     reserve_tokens = _optional_int(
@@ -193,9 +193,11 @@ def _settings_from_data(data: dict) -> Settings:
         "model.max_tool_rounds",
     )
     price = _optional_model_price(model.get("price"))
-    if context_window <= 0:
+    if context_window is not None and context_window <= 0:
         raise ConfigError("model.context_window must be > 0")
-    if reserve_tokens < 0 or reserve_tokens >= context_window:
+    if reserve_tokens < 0:
+        raise ConfigError("model.reserve_tokens must be >= 0")
+    if context_window is not None and reserve_tokens >= context_window:
         raise ConfigError("model.reserve_tokens must be < model.context_window")
     if keep_recent_tokens <= 0:
         raise ConfigError("model.keep_recent_tokens must be > 0")

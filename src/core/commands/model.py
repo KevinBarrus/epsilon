@@ -6,6 +6,7 @@ from dataclasses import replace
 from ..config import Settings
 from ..context import ContextBudget
 from ..openai_client import OpenAICompatibleClient
+from ..model_capabilities import resolve_model_capabilities
 from ..setup import VENDORS, list_models, write_settings_atomically
 from .registry import CommandContext, SlashCommand
 
@@ -42,10 +43,10 @@ async def model_command(context: CommandContext) -> None:
         model_name = await context.screen.request_text_input("Enter model name")
         if model_name is None:
             return
-        _apply_model_switch(context, replace(current, model_name=model_name))
+        await _apply_model_switch(context, replace(current, model_name=model_name))
         context.screen.add_entry("tool", f"Switched to model: {model_name}")
         return
-    _apply_model_switch(context, replace(current, model_name=choice))
+    await _apply_model_switch(context, replace(current, model_name=choice))
     context.screen.add_entry("tool", f"Switched to model: {choice}")
 
 
@@ -78,12 +79,22 @@ async def _create_new_config(context: CommandContext) -> None:
         base_url=base_url,
         model_name=model_name,
         api_key=api_key,
+        context_window=None,
     )
+    applied = await _apply_model_switch(context, settings)
+    if applied is None:
+        return
+    model_config: dict[str, object] = {
+        "base_url": base_url,
+        "api_key": api_key,
+        "model_name": model_name,
+    }
+    if applied.context_window is not None:
+        model_config["context_window"] = applied.context_window
     await _save_model_config(
         context.project_dir / ".epsilon" / "settings.json",
-        {"base_url": base_url, "api_key": api_key, "model_name": model_name},
+        model_config,
     )
-    _apply_model_switch(context, settings)
     context.screen.add_entry("tool", f"Switched to model: {model_name}")
 
 
@@ -119,20 +130,44 @@ async def _pick_vendor(context: CommandContext) -> str | None:
     )
 
 
-def _apply_model_switch(context: CommandContext, settings: Settings) -> None:
+async def _apply_model_switch(
+    context: CommandContext,
+    settings: Settings,
+) -> Settings | None:
     """统一替换客户端引用并更新上下文预算，不动已持久化的会话。"""
 
     new_client = OpenAICompatibleClient(settings)
+    try:
+        capabilities = await resolve_model_capabilities(settings, new_client)
+    except Exception as exc:
+        await new_client.close()
+        value = await context.screen.request_text_input(
+            "Provider did not report a context window; enter token limit"
+        )
+        if value is None:
+            context.screen.add_entry("tool", f"Could not switch model: {exc}")
+            return None
+        try:
+            context_window = int(value)
+            if context_window <= settings.reserve_tokens:
+                raise ValueError
+        except ValueError:
+            context.screen.add_entry("tool", "Context window must be a valid token count")
+            return None
+        settings = replace(settings, context_window=context_window)
+        new_client = OpenAICompatibleClient(settings)
+        capabilities = await resolve_model_capabilities(settings, new_client)
     context.client_holder.swap(settings, new_client)
     context.agent_loop.swap_client(new_client)
     context.context_manager.set_model_name(settings.model_name)
     context.context_manager.update_budget(
         ContextBudget(
-            settings.context_window,
+            capabilities.context_window,
             settings.reserve_tokens,
             settings.keep_recent_tokens,
         )
     )
+    return settings
 
 
 model_command_slash = SlashCommand(

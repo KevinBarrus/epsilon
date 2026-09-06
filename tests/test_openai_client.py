@@ -57,6 +57,23 @@ class FakeClient:
 
         self.completions = FakeCompletions(chunks)
         self.chat = SimpleNamespace(completions=self.completions)
+        self.models = SimpleNamespace()
+
+
+@pytest.mark.asyncio
+async def test_client_discovers_context_window_from_model_metadata() -> None:
+    """测试客户端读取服务端声明的模型上下文窗口。"""
+
+    fake_sdk = FakeClient([])
+
+    async def retrieve(model_name: str) -> object:
+        assert model_name == "test-model"
+        return SimpleNamespace(model_extra={"context_window": 1_000_000})
+
+    fake_sdk.models.retrieve = retrieve
+    client = OpenAICompatibleClient(_settings(), fake_sdk)  # type: ignore[arg-type]
+
+    assert await client.discover_context_window() == 1_000_000
 
 
 def _settings() -> Settings:
