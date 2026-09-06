@@ -9,6 +9,7 @@ from core.context import (
     ContextCompactionRequired,
     ContextManager,
     ContextSummaryError,
+    UserInputTooLarge,
     CONTEXT_FALLBACK_NOTICE,
     SUMMARY_OMITTED_NOTICE,
     estimate_context_tokens,
@@ -116,6 +117,21 @@ def test_context_manager_counts_tool_schema_and_message_protocol() -> None:
     assert estimate_model_request_tokens(messages, tools) > estimate_context_tokens(messages)
     with pytest.raises(ContextCompactionRequired):
         manager.build(messages)
+
+
+@pytest.mark.asyncio
+async def test_oversized_user_input_is_never_summarized_or_truncated() -> None:
+    """测试单条超大用户指令会在摘要请求前被明确拒绝。"""
+
+    client = FakeSummaryClient([SUMMARY])
+    manager = ContextManager(ContextBudget(100, 20, 30))
+    message = Message(role="user", content="关键要求" + "x" * 1_000)
+
+    with pytest.raises(UserInputTooLarge) as error:
+        await manager.build_for_model_result(client, [message])
+
+    assert error.value.estimated_tokens > error.value.max_tokens
+    assert client.calls == 0
 
 
 def test_context_manager_fallback_honors_full_request_budget() -> None:

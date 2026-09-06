@@ -467,6 +467,43 @@ class _ThinkingScreen:
 
 
 @pytest.mark.asyncio
+async def test_oversized_input_is_rejected_and_draft_is_restored(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """测试超大输入不会进入模型或 Session，并恢复输入草稿。"""
+
+    class NeverClient:
+        async def stream_response(self, messages, tools=(), thinking_level=None):
+            raise AssertionError("超大输入不应请求模型")
+            yield
+
+    class OversizedScreen(_ThinkingScreen):
+        restored = False
+
+        async def run_async(self) -> None:
+            await self._on_submit("x" * 500_000)
+
+        def restore_submitted_draft(self) -> None:
+            self.restored = True
+
+    _ThinkingScreen.instances = []
+    monkeypatch.setattr(ui, "ChatScreen", OversizedScreen)
+
+    await ui.run_chat(
+        NeverClient(),
+        create_status_info("test-model", "暂不可查询", tmp_path),
+        Settings("https://example.com", "test", "key"),
+        workspace=tmp_path,
+    )
+
+    screen = _ThinkingScreen.instances[0]
+    assert screen.restored is True
+    assert any("Input too large" in content for _, content in screen.entries)
+    assert SessionStore(tmp_path).list_sessions() == []
+
+
+@pytest.mark.asyncio
 async def test_reasoning_renders_as_thinking_entry(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,

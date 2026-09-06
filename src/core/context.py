@@ -48,6 +48,17 @@ class ContextSummaryError(RuntimeError):
     """表示上下文摘要请求在重试后仍然失败。"""
 
 
+class UserInputTooLarge(ValueError):
+    """表示单条用户输入已经无法完整放入模型上下文。"""
+
+    def __init__(self, estimated_tokens: int, max_tokens: int) -> None:
+        super().__init__(
+            f"input needs about {estimated_tokens} tokens, but only {max_tokens} are available"
+        )
+        self.estimated_tokens = estimated_tokens
+        self.max_tokens = max_tokens
+
+
 @dataclass(frozen=True)
 class ContextBuildResult:
     """保存模型上下文及本次新生成的压缩记录。"""
@@ -157,6 +168,16 @@ class ContextManager:
 
         return self._estimate(messages)
 
+    def validate_user_input(self, content: str) -> None:
+        """确保当前用户原文无需摘要或截断即可进入模型请求。"""
+
+        estimated = self._estimate([Message(role="user", content=content)])
+        if estimated > self._budget.compaction_threshold:
+            raise UserInputTooLarge(
+                estimated,
+                self._budget.compaction_threshold,
+            )
+
     @property
     def _message_budget(self) -> int:
         """返回扣除协议和工具定义后的消息可用预算。"""
@@ -246,6 +267,16 @@ class ContextManager:
         """构建模型上下文，并返回成功生成的压缩记录。"""
 
         original_messages = list(messages)
+        latest_user = next(
+            (
+                message
+                for message in reversed(original_messages)
+                if message.role == "user"
+            ),
+            None,
+        )
+        if latest_user is not None:
+            self.validate_user_input(latest_user.content)
         messages = _apply_latest_compaction(original_messages, compactions)
         original_system_messages = [
             message for message in original_messages if message.role == "system"

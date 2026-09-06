@@ -39,7 +39,12 @@ from .balance import UNAVAILABLE_BALANCE, BalanceProvider
 from .config import Settings
 from .cost import UsageTotals, cache_hit_rate, format_tokens
 from .setup import infer_provider
-from .context import ContextBudget, ContextManager, DEFAULT_CONTEXT_BUDGET
+from .context import (
+    ContextBudget,
+    ContextManager,
+    DEFAULT_CONTEXT_BUDGET,
+    UserInputTooLarge,
+)
 from .prompts import load_prompt
 from .project_instructions import load_project_instructions
 from .session import Session
@@ -157,6 +162,17 @@ async def run_chat(
             if await command_registry.dispatch(prompt, command_context):
                 return
             screen.add_entry("tool", f"Unknown command: {prompt}")
+            return
+
+        try:
+            context_manager.validate_user_input(prompt)
+        except UserInputTooLarge as exc:
+            screen.add_entry(
+                "tool",
+                f"Input too large ({exc.estimated_tokens}/{exc.max_tokens} tokens). "
+                "Save large text as a workspace file and send its path instead.",
+            )
+            screen.restore_submitted_draft()
             return
 
         # 先更新界面，让用户立即看到本轮输入和待生成的回复区域

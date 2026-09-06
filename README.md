@@ -50,11 +50,12 @@ uv run epsilon
     "base_url": "https://api.example.com/v1",
     "api_key": "your-api-key",
     "model_name": "your-model",
-    "context_window": 100000,
     "reserve_tokens": 16000
   }
 }
 ```
+
+Epsilon 默认从模型服务元数据读取上下文窗口；如果服务商不返回该字段，首次配置会要求显式填写 `context_window`。
 
 项目目录下的 `.epsilon/settings.json` 可按字段覆盖用户级配置。不要提交包含 API Key 的配置文件。
 

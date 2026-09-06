@@ -1485,6 +1485,11 @@ class ChatScreen:
         )
         self.application.invalidate()
 
+    def restore_submitted_draft(self) -> None:
+        """供应用层拒绝请求时恢复刚刚提交的输入。"""
+
+        self._restore_submitted_draft()
+
     def _navigate_input_history(self, direction: int) -> None:
         """在当前会话历史中移动，并把光标放到恢复文本末尾。"""
 
