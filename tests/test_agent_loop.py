@@ -3,7 +3,13 @@ from collections.abc import AsyncIterator, Sequence
 
 import pytest
 
-from core.agent_loop import AgentLoop, AgentLoopCancelled, ToolBatchEvent, ToolExecutionEvent
+from core.agent_loop import (
+    AgentLoop,
+    AgentLoopCancelled,
+    AgentLoopFailed,
+    ToolBatchEvent,
+    ToolExecutionEvent,
+)
 from core.end_policy import (
     FAILED_VERIFICATION_REMINDER,
     VERIFICATION_REMINDER,
@@ -942,6 +948,47 @@ async def test_agent_loop_keeps_completed_tool_chain_when_cancelled(tmp_path) ->
             content="",
             tool_calls=(ToolCall("call-1", "read_file", {"path": "README.md"}),),
             status="cancelled",
+        ),
+        Message(role="tool", content="项目说明", tool_call_id="call-1"),
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_keeps_completed_tool_chain_on_model_failure(tmp_path) -> None:
+    """测试工具完成后的模型错误会携带本轮完整工具轨迹。"""
+
+    class FailingAfterToolClient(FakeModelClient):
+        async def stream_response(
+            self,
+            messages: Sequence[Message],
+            tools: Sequence[dict[str, object]] = (),
+            thinking_level: str | None = None,
+        ) -> AsyncIterator[ModelEvent]:
+            self.requests.append(list(messages))
+            if len(self.requests) == 1:
+                yield ToolCallEvent(
+                    ToolCall("call-1", "read_file", {"path": "README.md"})
+                )
+                return
+            raise AgentError("network", "model_request", "模型请求失败")
+            yield TextDelta("")
+
+    (tmp_path / "README.md").write_text("项目说明", encoding="utf-8")
+    client = FailingAfterToolClient()
+    manager = ToolManager()
+    manager.register_local(*create_read_file_tool(tmp_path))
+
+    with pytest.raises(AgentLoopFailed) as error:
+        await AgentLoop(client, manager).run(
+            [Message(role="user", content="读取说明")]
+        )
+
+    assert error.value.category == "network"
+    assert error.value.new_messages == (
+        Message(
+            role="assistant",
+            content="",
+            tool_calls=(ToolCall("call-1", "read_file", {"path": "README.md"}),),
         ),
         Message(role="tool", content="项目说明", tool_call_id="call-1"),
     )

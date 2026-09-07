@@ -7,6 +7,7 @@ from pathlib import Path
 from .agent_loop import (
     AgentLoop,
     AgentLoopCancelled,
+    AgentLoopFailed,
     RetryEvent,
     ToolExecutionEvent,
 )
@@ -245,6 +246,7 @@ async def run_chat(
                     screen.append_to_entry(response_index, event.content)
             elif isinstance(event, ToolCallEvent):
                 screen.commit_entry(response_index)
+                response_parts.clear()
                 summary = _tool_call_summary(event.tool_call)
                 tool_activity_indices[event.tool_call.call_id] = screen.add_active_entry(
                     "tool",
@@ -319,6 +321,11 @@ async def run_chat(
             raise
         except AgentError as exc:
             # 模型请求失败时保留部分回复和结构化错误状态
+            if isinstance(exc, AgentLoopFailed):
+                _persist_new_messages(session, exc.new_messages)
+            if awaiting_response_after_tool:
+                response_index = screen.add_active_entry("assistant", "")
+                awaiting_response_after_tool = False
             response = "".join(response_parts)
             session.add_message(
                 Message(

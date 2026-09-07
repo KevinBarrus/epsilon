@@ -81,6 +81,23 @@ class AgentLoopCancelled(asyncio.CancelledError):
         self.new_messages = new_messages
 
 
+class AgentLoopFailed(AgentError):
+    """保存失败前已完成消息的 Agent Loop 异常。"""
+
+    def __init__(self, error: AgentError, new_messages: tuple[Message, ...]) -> None:
+        """保留原始错误信息和本轮已经完成的消息。"""
+
+        super().__init__(
+            category=error.category,
+            operation=error.operation,
+            user_message=error.user_message,
+            model_message=error.model_message,
+            retryable=error.retryable,
+            cause=error.cause,
+        )
+        self.new_messages = new_messages
+
+
 class AgentLoop:
     """负责请求模型、执行工具并把结果继续交给模型。"""
 
@@ -263,6 +280,10 @@ class AgentLoop:
             else:
                 _mark_last_assistant_cancelled(new_messages)
             raise AgentLoopCancelled(tuple(new_messages)) from exc
+        except AgentError as exc:
+            if not new_messages:
+                raise
+            raise AgentLoopFailed(exc, tuple(new_messages)) from exc
 
     def _run_result(
         self,
