@@ -56,6 +56,7 @@ EventHandler = Callable[[AgentEvent], Awaitable[None]]
 ContextBuilder = Callable[[Sequence[Message], bool], Awaitable[ContextBuildResult]]
 RETRY_BASE_DELAY_SECONDS = 0.5
 RETRY_MAX_DELAY_SECONDS = 4.0
+TOOL_CANCELLED_UNKNOWN = "tool call cancelled; execution outcome unknown"
 
 
 @dataclass(frozen=True)
@@ -96,6 +97,21 @@ class AgentLoopFailed(AgentError):
             cause=error.cause,
         )
         self.new_messages = new_messages
+
+
+class _ToolBatchCancelled(asyncio.CancelledError):
+    """携带工具批次取消前已经确定的全部结果。"""
+
+    def __init__(
+        self,
+        results: tuple[ToolResult, ...],
+        unknown_call_ids: frozenset[str],
+    ) -> None:
+        """保存按原调用顺序排列的结果和状态未知的调用标识。"""
+
+        super().__init__("tool batch cancelled")
+        self.results = results
+        self.unknown_call_ids = unknown_call_ids
 
 
 class AgentLoop:
@@ -237,10 +253,29 @@ class AgentLoop:
                     continue
 
                 tool_rounds += 1
-                results, execution_mode, batch_duration_ms = await self._execute_tool_batch(
-                    completed_tool_calls,
-                    on_event,
-                )
+                try:
+                    results, execution_mode, batch_duration_ms = (
+                        await self._execute_tool_batch(
+                            completed_tool_calls,
+                            on_event,
+                        )
+                    )
+                except _ToolBatchCancelled as exc:
+                    for tool_call, result in zip(completed_tool_calls, exc.results):
+                        new_messages.append(
+                            Message(
+                                role="tool",
+                                content=result.content,
+                                tool_call_id=tool_call.call_id,
+                                status=(
+                                    "cancelled"
+                                    if tool_call.call_id in exc.unknown_call_ids
+                                    else "completed"
+                                ),
+                                error_category=result.error_category,
+                            )
+                        )
+                    raise
                 for tool_call, result in zip(completed_tool_calls, results):
                     tool_message = Message(
                         role="tool",
@@ -320,41 +355,60 @@ class AgentLoop:
         """顺序预检工具，再按本批执行模式运行并保持结果源顺序。"""
 
         results: list[ToolResult | None] = [None] * len(tool_calls)
-        prepared_calls = []
-        for index, tool_call in enumerate(tool_calls):
-            prepared = await self._tool_manager.prepare(tool_call)
-            if isinstance(prepared, ToolResult):
-                results[index] = prepared
-                if on_event is not None:
-                    await on_event(ToolExecutionEvent(tool_call, prepared))
-            else:
-                prepared_calls.append((index, prepared))
+        try:
+            prepared_calls = []
+            for index, tool_call in enumerate(tool_calls):
+                prepared = await self._tool_manager.prepare(tool_call)
+                if isinstance(prepared, ToolResult):
+                    results[index] = prepared
+                    if on_event is not None:
+                        await on_event(ToolExecutionEvent(tool_call, prepared))
+                else:
+                    prepared_calls.append((index, prepared))
 
-        execution_mode: Literal["parallel", "sequential"] = (
-            "parallel"
-            if prepared_calls
-            and all(
-                prepared.definition.execution_mode == "parallel"
-                for _, prepared in prepared_calls
+            execution_mode: Literal["parallel", "sequential"] = (
+                "parallel"
+                if prepared_calls
+                and all(
+                    prepared.definition.execution_mode == "parallel"
+                    for _, prepared in prepared_calls
+                )
+                else "sequential"
             )
-            else "sequential"
-        )
-        batch_started_at = perf_counter()
-        if execution_mode == "parallel":
-            await self._execute_parallel_prepared_calls(
-                prepared_calls,
-                results,
-                on_event,
+            batch_started_at = perf_counter()
+            if execution_mode == "parallel":
+                await self._execute_parallel_prepared_calls(
+                    prepared_calls,
+                    results,
+                    on_event,
+                )
+            else:
+                for index, prepared in prepared_calls:
+                    result = await self._tool_manager.execute_prepared(prepared)
+                    results[index] = result
+                    if on_event is not None:
+                        await on_event(ToolExecutionEvent(prepared.tool_call, result))
+            batch_duration_ms = (perf_counter() - batch_started_at) * 1000
+            assert all(result is not None for result in results)
+            return [result for result in results if result is not None], execution_mode, batch_duration_ms
+        except asyncio.CancelledError as exc:
+            unknown_call_ids = frozenset(
+                tool_call.call_id
+                for index, tool_call in enumerate(tool_calls)
+                if results[index] is None
             )
-        else:
-            for index, prepared in prepared_calls:
-                result = await self._tool_manager.execute_prepared(prepared)
-                results[index] = result
-                if on_event is not None:
-                    await on_event(ToolExecutionEvent(prepared.tool_call, result))
-        batch_duration_ms = (perf_counter() - batch_started_at) * 1000
-        assert all(result is not None for result in results)
-        return [result for result in results if result is not None], execution_mode, batch_duration_ms
+            completed_results = tuple(
+                result
+                if result is not None
+                else ToolResult(
+                    call_id=tool_calls[index].call_id,
+                    content=TOOL_CANCELLED_UNKNOWN,
+                    is_error=True,
+                    error_category="tool_execution",
+                )
+                for index, result in enumerate(results)
+            )
+            raise _ToolBatchCancelled(completed_results, unknown_call_ids) from exc
 
     async def _execute_parallel_prepared_calls(
         self,
@@ -380,7 +434,11 @@ class AgentLoop:
         except BaseException:
             for task in tasks:
                 task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+            completed_results = await asyncio.gather(*tasks, return_exceptions=True)
+            for completed in completed_results:
+                if isinstance(completed, tuple):
+                    index, _, result = completed
+                    results[index] = result
             raise
 
     async def _stream_model_events(

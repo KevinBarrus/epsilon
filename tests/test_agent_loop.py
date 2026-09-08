@@ -995,6 +995,123 @@ async def test_agent_loop_keeps_completed_tool_chain_on_model_failure(tmp_path) 
 
 
 @pytest.mark.asyncio
+async def test_agent_loop_keeps_partial_parallel_results_when_cancelled() -> None:
+    """测试并行批次取消后保留已完成结果并补齐未知结果。"""
+
+    class ParallelClient:
+        async def stream_response(self, messages, tools=(), thinking_level=None):
+            yield ToolCallEvent(ToolCall("call-fast", "fast", {}))
+            yield ToolCallEvent(ToolCall("call-blocking", "blocking", {}))
+
+    fast_finished = asyncio.Event()
+    blocking_started = asyncio.Event()
+
+    async def fast(tool_call: ToolCall) -> ToolResult:
+        fast_finished.set()
+        return ToolResult(tool_call.call_id, "fast result")
+
+    async def blocking(tool_call: ToolCall) -> ToolResult:
+        blocking_started.set()
+        await asyncio.Event().wait()
+        return ToolResult(tool_call.call_id, "unreachable")
+
+    manager = ToolManager()
+    for name, handler in (("fast", fast), ("blocking", blocking)):
+        manager.register_local(
+            ToolDefinition(
+                name=name,
+                description=name,
+                parameters={"type": "object"},
+                source="local",
+                permission="read",
+                idempotent=True,
+                execution_mode="parallel",
+            ),
+            handler,
+        )
+
+    task = asyncio.create_task(
+        AgentLoop(ParallelClient(), manager).run(
+            [Message(role="user", content="并行读取")]
+        )
+    )
+    await fast_finished.wait()
+    await blocking_started.wait()
+    task.cancel()
+
+    with pytest.raises(AgentLoopCancelled) as error:
+        await task
+
+    assert error.value.new_messages[1:] == (
+        Message(role="tool", content="fast result", tool_call_id="call-fast"),
+        Message(
+            role="tool",
+            content=agent_loop.TOOL_CANCELLED_UNKNOWN,
+            tool_call_id="call-blocking",
+            status="cancelled",
+            error_category="tool_execution",
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_completes_all_parallel_tool_pairs_when_cancelled() -> None:
+    """测试全部并行工具未完成时取消也不会留下孤立调用。"""
+
+    class ParallelClient:
+        async def stream_response(self, messages, tools=(), thinking_level=None):
+            yield ToolCallEvent(ToolCall("call-1", "blocking_1", {}))
+            yield ToolCallEvent(ToolCall("call-2", "blocking_2", {}))
+
+    both_started = asyncio.Event()
+    started = 0
+
+    async def blocking(tool_call: ToolCall) -> ToolResult:
+        nonlocal started
+        started += 1
+        if started == 2:
+            both_started.set()
+        await asyncio.Event().wait()
+        return ToolResult(tool_call.call_id, "unreachable")
+
+    manager = ToolManager()
+    for name in ("blocking_1", "blocking_2"):
+        manager.register_local(
+            ToolDefinition(
+                name=name,
+                description=name,
+                parameters={"type": "object"},
+                source="local",
+                permission="read",
+                idempotent=True,
+                execution_mode="parallel",
+            ),
+            blocking,
+        )
+
+    task = asyncio.create_task(
+        AgentLoop(ParallelClient(), manager).run(
+            [Message(role="user", content="并行读取")]
+        )
+    )
+    await both_started.wait()
+    task.cancel()
+
+    with pytest.raises(AgentLoopCancelled) as error:
+        await task
+
+    tool_calls = error.value.new_messages[0].tool_calls
+    tool_results = error.value.new_messages[1:]
+    assert [tool_call.call_id for tool_call in tool_calls] == ["call-1", "call-2"]
+    assert [message.tool_call_id for message in tool_results] == ["call-1", "call-2"]
+    assert all(message.status == "cancelled" for message in tool_results)
+    assert all(
+        message.content == agent_loop.TOOL_CANCELLED_UNKNOWN
+        for message in tool_results
+    )
+
+
+@pytest.mark.asyncio
 async def test_agent_loop_emits_retry_event(monkeypatch: pytest.MonkeyPatch) -> None:
     """测试重试前通过 on_event 发出 RetryEvent 供界面展示。"""
 
