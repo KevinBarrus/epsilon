@@ -437,17 +437,29 @@ def _collect_file_operations(
     messages: Sequence[Message],
     tool_capabilities: Mapping[str, str],
 ) -> tuple[list[str], list[str]]:
-    """根据工具能力标签累计读取和修改过的文件路径。"""
+    """根据成功工具结果累计读取和修改过的文件路径。"""
 
     read_files: set[str] = set()
     modified_files: set[str] = set()
+    tool_results = {
+        message.tool_call_id: message
+        for message in messages
+        if message.role == "tool" and message.tool_call_id is not None
+    }
     for message in messages:
         if message.role != "assistant":
             continue
         for tool_call in message.tool_calls:
             path = tool_call.arguments.get("path")
             capability = tool_capabilities.get(tool_call.name)
-            if not isinstance(path, str) or capability not in {"file.read", "file.write"}:
+            result = tool_results.get(tool_call.call_id)
+            if (
+                not isinstance(path, str)
+                or capability not in {"file.read", "file.write"}
+                or result is None
+                or result.status != "completed"
+                or result.error_category is not None
+            ):
                 continue
             if capability == "file.read":
                 read_files.add(path)
@@ -765,6 +777,11 @@ def _serialize_messages(messages: Sequence[Message]) -> str:
             )
         if message.tool_call_id is not None:
             parts.append(f"[tool_call_id] {message.tool_call_id}")
+        if message.role == "tool":
+            status = f"[tool_status] {message.status}"
+            if message.error_category is not None:
+                status += f" category={message.error_category}"
+            parts.append(status)
     return "\n\n".join(parts)
 
 

@@ -121,6 +121,55 @@ async def test_agent_loop_executes_tool_and_continues_model_request(
     assert client.tools[0][0]["function"]["name"] == "read_file"  # type: ignore[index]
 
 
+@pytest.mark.asyncio
+async def test_agent_loop_preserves_failed_tool_result_status() -> None:
+    """测试失败工具结果会保留错误状态和类别。"""
+
+    class FailingToolClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def stream_response(self, messages, tools=(), thinking_level=None):
+            self.calls += 1
+            if self.calls == 1:
+                yield ToolCallEvent(ToolCall("call-1", "failing_tool", {}))
+                return
+            yield TextDelta("已收到失败结果")
+
+    async def fail(tool_call: ToolCall) -> ToolResult:
+        return ToolResult(
+            tool_call.call_id,
+            "工具执行失败",
+            is_error=True,
+            error_category="tool_execution",
+        )
+
+    manager = ToolManager()
+    manager.register_local(
+        ToolDefinition(
+            name="failing_tool",
+            description="fail",
+            parameters={"type": "object"},
+            source="local",
+            permission="read",
+            idempotent=True,
+        ),
+        fail,
+    )
+
+    result = await AgentLoop(FailingToolClient(), manager).run(
+        [Message(role="user", content="执行工具")]
+    )
+
+    assert result.new_messages[1] == Message(
+        role="tool",
+        content="工具执行失败",
+        tool_call_id="call-1",
+        status="error",
+        error_category="tool_execution",
+    )
+
+
 @pytest.mark.parametrize(
     "command",
     (

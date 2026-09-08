@@ -20,7 +20,13 @@ from core.context import (
     model_request_fingerprint,
     select_recent_messages,
 )
-from core.context import _fit_messages_to_budget, _has_valid_tool_chain, _split_oversized_latest_turn
+from core.context import (
+    _collect_file_operations,
+    _fit_messages_to_budget,
+    _has_valid_tool_chain,
+    _serialize_messages,
+    _split_oversized_latest_turn,
+)
 from core.model import Message, ModelClientError, ToolCall, UsageEvent
 from core.session_store import CompactionRecord
 
@@ -724,6 +730,59 @@ async def test_context_manager_accumulates_file_operations_in_summary() -> None:
     summary = result.messages[0].content
     assert "<read-files>\n- src/app.py\n</read-files>" in summary
     assert "<modified-files>\n- src/app.py\n</modified-files>" in summary
+
+
+def test_context_manager_ignores_failed_file_operations_in_summary() -> None:
+    """测试失败或缺少结果的文件调用不会成为摘要事实。"""
+
+    messages = [
+        Message(role="user", content="修改文件"),
+        Message(
+            role="assistant",
+            content="",
+            tool_calls=(
+                ToolCall("write-ok", "write_file", {"path": "src/ok.py"}),
+                ToolCall("write-failed", "write_file", {"path": "src/failed.py"}),
+                ToolCall("write-missing", "write_file", {"path": "src/missing.py"}),
+            ),
+        ),
+        Message(role="tool", content="已写入", tool_call_id="write-ok"),
+        Message(
+            role="tool",
+            content="写入失败",
+            tool_call_id="write-failed",
+            status="error",
+            error_category="tool_execution",
+        ),
+        Message(role="assistant", content="处理结束"),
+    ]
+
+    read_files, modified_files = _collect_file_operations(
+        messages,
+        {"read_file": "file.read", "write_file": "file.write"},
+    )
+
+    assert read_files == []
+    assert modified_files == ["src/ok.py"]
+
+
+def test_summary_serialization_preserves_tool_error_status() -> None:
+    """测试摘要输入明确包含工具执行状态和错误类别。"""
+
+    serialized = _serialize_messages(
+        [
+            Message(
+                role="tool",
+                content="写入失败",
+                tool_call_id="call-1",
+                status="error",
+                error_category="tool_execution",
+            )
+        ]
+    )
+
+    assert "[tool_call_id] call-1" in serialized
+    assert "[tool_status] error category=tool_execution" in serialized
 
 
 def test_context_manager_injects_model_name_into_system_prompt() -> None:

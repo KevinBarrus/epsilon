@@ -263,25 +263,17 @@ class AgentLoop:
                 except _ToolBatchCancelled as exc:
                     for tool_call, result in zip(completed_tool_calls, exc.results):
                         new_messages.append(
-                            Message(
-                                role="tool",
-                                content=result.content,
-                                tool_call_id=tool_call.call_id,
-                                status=(
-                                    "cancelled"
-                                    if tool_call.call_id in exc.unknown_call_ids
-                                    else "completed"
+                            _tool_result_message(
+                                tool_call,
+                                result,
+                                cancelled=(
+                                    tool_call.call_id in exc.unknown_call_ids
                                 ),
-                                error_category=result.error_category,
                             )
                         )
                     raise
                 for tool_call, result in zip(completed_tool_calls, results):
-                    tool_message = Message(
-                        role="tool",
-                        content=result.content,
-                        tool_call_id=tool_call.call_id,
-                    )
+                    tool_message = _tool_result_message(tool_call, result)
                     context.append(tool_message)
                     new_messages.append(tool_message)
                 if self._end_policy is not None:
@@ -484,6 +476,26 @@ def _mark_last_assistant_cancelled(messages: list[Message]) -> None:
         if messages[index].role == "assistant":
             messages[index] = replace(messages[index], status="cancelled")
             return
+
+
+def _tool_result_message(
+    tool_call: ToolCall,
+    result: ToolResult,
+    *,
+    cancelled: bool = False,
+) -> Message:
+    """将工具结果转换为保留执行状态的消息。"""
+
+    status = "cancelled" if cancelled else "completed"
+    if result.is_error and not cancelled:
+        status = "error"
+    return Message(
+        role="tool",
+        content=result.content,
+        tool_call_id=tool_call.call_id,
+        status=status,
+        error_category=result.error_category,
+    )
 
 
 def _retry_delay_seconds(decision, attempt: int) -> float:
