@@ -223,7 +223,9 @@ async def test_cancelled_response_is_kept_in_memory(tmp_path: Path) -> None:
         await handle_submit("第一次输入")
 
     assert session.flush_persistence()
+    session.close()
     restored = Session.restore(tmp_path, session.session_id)
+    session = restored
     assert restored.get_messages() == [
         Message(role="user", content="第一次输入"),
         Message(

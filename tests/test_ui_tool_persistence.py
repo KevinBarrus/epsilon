@@ -46,6 +46,7 @@ def test_ui_restores_cancelled_tool_chain(tmp_path: Path) -> None:
     )
     _persist_new_messages(session, new_messages)
     assert session.flush_persistence()
+    session.close()
 
     restored = Session.restore(tmp_path, session.session_id)
 
@@ -82,6 +83,7 @@ def test_ui_restores_tool_chain_carried_by_model_failure(tmp_path: Path) -> None
         )
     )
     assert session.flush_persistence()
+    session.close()
 
     restored = Session.restore(tmp_path, session.session_id)
 

@@ -6,7 +6,7 @@ import pytest
 from core.context import ContextBudget, ContextManager
 from core.model import Message, ToolCall
 from core.session import Session
-from core.session_store import CompactionRecord, SessionStore
+from core.session_store import CompactionRecord, SessionStore, SessionStoreError
 
 
 def test_new_sessions_have_unique_ids(tmp_path: Path) -> None:
@@ -17,6 +17,57 @@ def test_new_sessions_have_unique_ids(tmp_path: Path) -> None:
 
     assert uuid.UUID(first.session_id)
     assert first.session_id != second.session_id
+
+
+def test_same_session_cannot_be_opened_twice(tmp_path: Path) -> None:
+    """测试同一 Session 同时只能有一个写入者。"""
+
+    session = Session(tmp_path)
+
+    with pytest.raises(SessionStoreError, match="session is already open"):
+        Session(tmp_path, session.session_id)
+
+    session.close()
+
+
+def test_closed_session_can_be_opened_again(tmp_path: Path) -> None:
+    """测试关闭 Session 后会释放独占锁。"""
+
+    first = Session(tmp_path)
+    session_id = first.session_id
+    first.close()
+
+    second = Session(tmp_path, session_id)
+
+    assert second.session_id == session_id
+    second.close()
+
+
+def test_different_sessions_can_be_opened_together(tmp_path: Path) -> None:
+    """测试不同 Session 的锁互不影响。"""
+
+    first = Session(tmp_path)
+    second = Session(tmp_path)
+
+    assert first.session_id != second.session_id
+    first.close()
+    second.close()
+
+
+def test_restore_failure_releases_session_lock(tmp_path: Path) -> None:
+    """测试恢复异常不会把 Session 锁永久留在当前进程。"""
+
+    session = Session(tmp_path)
+    session_id = session.session_id
+    session.close()
+    session_path = tmp_path / ".epsilon" / "sessions" / f"{session_id}.jsonl"
+    session_path.write_text("not-json\n", encoding="utf-8")
+
+    with pytest.raises(SessionStoreError):
+        Session.restore(tmp_path, session_id)
+
+    reopened = Session(tmp_path, session_id)
+    reopened.close()
 
 
 def test_session_updates_memory_and_store(tmp_path: Path) -> None:
@@ -94,6 +145,7 @@ def test_restore_rebuilds_session_memory(tmp_path: Path) -> None:
     original.add_user_message("第一次输入")
     original.add_assistant_message("第一次回复")
     assert original.flush_persistence()
+    original.close()
 
     restored = Session.restore(tmp_path, original.session_id)
 
@@ -110,6 +162,7 @@ def test_restored_session_can_continue_writing(tmp_path: Path) -> None:
     original = Session(tmp_path)
     original.add_user_message("之前的问题")
     assert original.flush_persistence()
+    original.close()
 
     restored = Session.restore(tmp_path, original.session_id)
     restored.add_assistant_message("之前的回答")
@@ -136,6 +189,7 @@ def test_session_restores_tool_messages(tmp_path: Path) -> None:
     for message in messages:
         original.add_message(message)
     assert original.flush_persistence()
+    original.close()
 
     restored = Session.restore(tmp_path, original.session_id)
 
@@ -148,6 +202,7 @@ def test_restore_rebuilds_compaction_records(tmp_path: Path) -> None:
     original = Session(tmp_path)
     compaction = CompactionRecord("早期摘要", 1, 1200)
     SessionStore(tmp_path).append_compaction(original.session_id, compaction)
+    original.close()
 
     restored = Session.restore(tmp_path, original.session_id)
 
@@ -239,6 +294,7 @@ async def test_restore_rebuilds_context_after_compaction(tmp_path: Path) -> None
     )
     assert first_result.compaction is not None
     session.add_compaction(first_result.compaction)
+    session.close()
 
     restored = Session.restore(tmp_path, session.session_id)
     restored_result = await manager.build_for_model_result(
@@ -280,6 +336,7 @@ async def test_restore_keeps_file_operation_sections_in_context(tmp_path: Path) 
     )
     assert first_result.compaction is not None
     session.add_compaction(first_result.compaction)
+    session.close()
 
     restored = Session.restore(tmp_path, session.session_id)
     restored_result = await manager.build_for_model_result(

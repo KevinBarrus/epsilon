@@ -2,6 +2,7 @@
 
 import uuid
 from pathlib import Path
+from typing import TextIO
 
 from .memory import Memory
 from .model import Message
@@ -19,6 +20,9 @@ class Session:
         self.session_id = session_id or str(uuid.uuid4())
         self._memory = Memory()
         self._store = SessionStore(workspace)
+        self._lock_file: TextIO | None = self._store.acquire_session_lock(
+            self.session_id
+        )
         self._compactions: list[CompactionRecord] = []
         self._transient_compactions: list[CompactionRecord] = []
         self._compaction_persistence_degraded = False
@@ -35,23 +39,27 @@ class Session:
         """从已有 JSONL 文件恢复一个会话"""
 
         session = cls(workspace, session_id)
-        messages = session._store.load_messages(session.session_id)
-        pending_messages = session._store.load_pending_messages(session.session_id)
-        recovered_count = 0
-        for message in pending_messages:
-            try:
-                session._store.append_message(session.session_id, message)
-            except Exception:
-                break
-            recovered_count += 1
-        session._store.replace_pending_messages(
-            session.session_id,
-            pending_messages[recovered_count:],
-        )
-        for message in [*messages, *pending_messages]:
-            session._add_to_memory(message)
-        session._compactions = session._store.load_compactions(session.session_id)
-        return session
+        try:
+            messages = session._store.load_messages(session.session_id)
+            pending_messages = session._store.load_pending_messages(session.session_id)
+            recovered_count = 0
+            for message in pending_messages:
+                try:
+                    session._store.append_message(session.session_id, message)
+                except Exception:
+                    break
+                recovered_count += 1
+            session._store.replace_pending_messages(
+                session.session_id,
+                pending_messages[recovered_count:],
+            )
+            for message in [*messages, *pending_messages]:
+                session._add_to_memory(message)
+            session._compactions = session._store.load_compactions(session.session_id)
+            return session
+        except BaseException:
+            session.close()
+            raise
 
     def add_user_message(self, content: str) -> None:
         """持久化并追加一条用户消息"""
@@ -98,7 +106,12 @@ class Session:
     def close(self) -> bool:
         """刷新并关闭当前会话的持久化队列"""
 
-        return self._persistence.close()
+        try:
+            return self._persistence.close()
+        finally:
+            if self._lock_file is not None:
+                self._store.release_session_lock(self._lock_file)
+                self._lock_file = None
 
     def mark_deleted(self) -> None:
         """标记当前会话已删除，供退出时省略恢复指引"""

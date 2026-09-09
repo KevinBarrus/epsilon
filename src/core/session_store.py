@@ -1,5 +1,6 @@
 """负责会话消息的 JSONL 文件读写。"""
 
+import fcntl
 import json
 import os
 import subprocess
@@ -7,6 +8,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TextIO
 
 from .errors import is_error_category
 from .model import Message, MessageStatus, ToolCall, UsageEvent
@@ -41,6 +43,30 @@ class SessionStore:
         """记录工作区路径，不提前创建运行时目录。"""
 
         self._sessions_dir = workspace / ".epsilon" / "sessions"
+
+    def acquire_session_lock(self, session_id: str) -> TextIO:
+        """非阻塞获取指定 Session 的跨进程独占锁。"""
+
+        lock_path = self._lock_path(session_id)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_file = lock_path.open("a+", encoding="utf-8")
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            lock_file.close()
+            raise SessionStoreError(
+                f"session is already open: {session_id}"
+            ) from exc
+        return lock_file
+
+    @staticmethod
+    def release_session_lock(lock_file: TextIO) -> None:
+        """释放 Session 独占锁并关闭锁文件。"""
+
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        finally:
+            lock_file.close()
 
     def append_message(self, session_id: str, message: Message) -> None:
         """将一条消息追加到指定会话的 JSONL 文件。"""
@@ -213,6 +239,12 @@ class SessionStore:
 
         self._session_path(session_id)
         return self._sessions_dir / f".{session_id}.pending.jsonl"
+
+    def _lock_path(self, session_id: str) -> Path:
+        """生成指定会话的隐藏锁文件路径。"""
+
+        self._session_path(session_id)
+        return self._sessions_dir / f".{session_id}.lock"
 
     def _append_record(
         self,

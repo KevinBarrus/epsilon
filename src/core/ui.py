@@ -136,11 +136,6 @@ async def run_chat(
             current_balance = refreshed
             screen.application.invalidate()
 
-    session = (
-        Session.restore(session_workspace, session_id)
-        if session_id
-        else Session(session_workspace)
-    )
     skill_manager = SkillManager(session_workspace)
     command_registry = _default_command_registry()
     client_holder = ClientHolder(settings, client)
@@ -445,14 +440,24 @@ async def run_chat(
         client, tool_manager, max_tool_rounds=max_tool_rounds
     )
 
-    history = session.get_messages()
-    screen.add_history_entries(
-        [(message.role, message.content) for message in history]
-    )
-    flush_history = getattr(screen, "flush_history", None)
-    if flush_history is not None:
-        await flush_history()
     try:
+        session = (
+            Session.restore(session_workspace, session_id)
+            if session_id
+            else Session(session_workspace)
+        )
+    except BaseException:
+        if mcp_provider is not None:
+            await mcp_provider.close()
+        raise
+    try:
+        history = session.get_messages()
+        screen.add_history_entries(
+            [(message.role, message.content) for message in history]
+        )
+        flush_history = getattr(screen, "flush_history", None)
+        if flush_history is not None:
+            await flush_history()
         await screen.application.run_async()
     finally:
         flush_history = getattr(screen, "flush_history", None)
