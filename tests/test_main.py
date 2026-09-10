@@ -219,10 +219,11 @@ async def test_run_creates_configured_stdio_mcp_provider(
     class FakeProvider:
         """记录启动层传入的 MCP 配置。"""
 
-        def __init__(self, command, provider_id, cwd) -> None:
+        def __init__(self, command, provider_id, cwd, trusted_read_tools) -> None:
             self.command = command
             self.provider_id = provider_id
             self.cwd = cwd
+            self.trusted_read_tools = trusted_read_tools
 
     async def fake_run_chat(
         client,
@@ -260,3 +261,4 @@ async def test_run_creates_configured_stdio_mcp_provider(
     assert provider.command == ("node", "server.js")
     assert provider.provider_id == "demo"
     assert provider.cwd == tmp_path.resolve()
+    assert provider.trusted_read_tools == ()

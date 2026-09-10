@@ -73,6 +73,7 @@ async def test_run_chat_renders_restored_history(
     session.add_user_message("历史问题")
     session.add_assistant_message("历史回答")
     assert session.flush_persistence()
+    session.close()
     monkeypatch.setattr(ui, "ChatScreen", FakeScreen)
 
     exit_info = await ui.run_chat(

@@ -166,6 +166,7 @@ def test_load_settings_reads_optional_stdio_mcp_provider(tmp_path: Path) -> None
                 "command": "node",
                 "arguments": ["server.js", "--readonly"],
                 "provider_id": "demo",
+                "trusted_read_tools": ["remote_echo"],
             },
         },
     )
@@ -174,6 +175,7 @@ def test_load_settings_reads_optional_stdio_mcp_provider(tmp_path: Path) -> None
         command="node",
         arguments=("server.js", "--readonly"),
         provider_id="demo",
+        trusted_read_tools=("remote_echo",),
     )
 
 
@@ -193,6 +195,26 @@ def test_load_settings_rejects_invalid_stdio_mcp_arguments(tmp_path: Path) -> No
     )
 
     with pytest.raises(ConfigError, match="mcp_stdio.arguments"):
+        load_settings(user_config_path=user_path)
+
+
+def test_load_settings_rejects_invalid_trusted_mcp_tools(tmp_path: Path) -> None:
+    """测试 MCP 只读可信名单必须是非空字符串数组。"""
+
+    user_path = _write_user_settings(
+        tmp_path,
+        {
+            **_valid_model(),
+            "mcp_stdio": {
+                "command": "node",
+                "arguments": [],
+                "provider_id": "demo",
+                "trusted_read_tools": "remote_echo",
+            },
+        },
+    )
+
+    with pytest.raises(ConfigError, match="mcp_stdio.trusted_read_tools"):
         load_settings(user_config_path=user_path)
 
 

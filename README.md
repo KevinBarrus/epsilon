@@ -59,6 +59,8 @@ Epsilon 默认从模型服务元数据读取上下文窗口；如果服务商不
 
 项目目录下的 `.epsilon/settings.json` 可按字段覆盖用户级配置。不要提交包含 API Key 的配置文件。
 
+stdio MCP 工具默认需要审批；确认可信的只读工具可在对应的 `mcp_stdio.trusted_read_tools` 字符串数组中按原始工具名配置。
+
 ## 使用
 
 ```bash

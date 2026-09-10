@@ -7,7 +7,11 @@ from pathlib import Path
 
 from ..model import ToolCall, ToolResult
 from .mcp import McpToolProvider
+from .output_limits import limit_tool_output
 from .types import ToolDefinition
+
+
+MCP_REQUEST_TIMEOUT_SECONDS = 30.0
 
 
 class McpProtocolError(RuntimeError):
@@ -22,6 +26,7 @@ class StdioMcpProvider(McpToolProvider):
         command: Sequence[str],
         provider_id: str,
         cwd: Path | None = None,
+        trusted_read_tools: Sequence[str] = (),
     ) -> None:
         """保存 MCP Server 启动命令和提供者身份。"""
 
@@ -32,6 +37,7 @@ class StdioMcpProvider(McpToolProvider):
         self._command = tuple(command)
         self._provider_id = provider_id
         self._cwd = cwd
+        self._trusted_read_tools = frozenset(trusted_read_tools)
         self._process: asyncio.subprocess.Process | None = None
         self._next_request_id = 1
         self._request_lock = asyncio.Lock()
@@ -58,15 +64,16 @@ class StdioMcpProvider(McpToolProvider):
             annotations = raw_tool.get("annotations", {})
             if not isinstance(annotations, Mapping):
                 raise McpProtocolError(f"invalid mcp tool annotations: {name}")
-            read_only = annotations.get("readOnlyHint") is True
             definitions.append(
                 ToolDefinition(
                     name=name,
                     description=description,
                     parameters=schema,
                     source="mcp",
-                    permission="read" if read_only else "write",
-                    idempotent=annotations.get("idempotentHint") is True,
+                    permission=(
+                        "read" if name in self._trusted_read_tools else "write"
+                    ),
+                    idempotent=False,
                     provider_id=self._provider_id,
                 )
             )
@@ -83,7 +90,12 @@ class StdioMcpProvider(McpToolProvider):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            return ToolResult(tool_call.call_id, f"mcp call failed: {exc}", True)
+            return ToolResult(
+                tool_call.call_id,
+                f"mcp call failed: {exc}",
+                True,
+                error_category="tool_execution",
+            )
 
         content = result.get("content", [])
         if not isinstance(content, list):
@@ -96,7 +108,7 @@ class StdioMcpProvider(McpToolProvider):
         text = "\n".join(part for part in text_parts if isinstance(part, str))
         return ToolResult(
             tool_call.call_id,
-            text,
+            limit_tool_output(text),
             bool(result.get("isError", False)),
         )
 
@@ -118,35 +130,24 @@ class StdioMcpProvider(McpToolProvider):
         """发送一个串行 JSON-RPC 请求并读取对应响应。"""
 
         async with self._request_lock:
-            await self._ensure_started()
-            assert self._process is not None
-            assert self._process.stdin is not None
-            assert self._process.stdout is not None
+            try:
+                return await asyncio.wait_for(
+                    self._request_with_lock(method, params),
+                    timeout=MCP_REQUEST_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError as exc:
+                await self.close()
+                raise McpProtocolError(f"mcp request timed out: {method}") from exc
 
-            request_id = self._next_request_id
-            self._next_request_id += 1
-            payload = {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "method": method,
-                "params": params,
-            }
-            self._process.stdin.write((json.dumps(payload) + "\n").encode())
-            await self._process.stdin.drain()
+    async def _request_with_lock(
+        self,
+        method: str,
+        params: dict[str, object],
+    ) -> dict[str, object]:
+        """在请求锁和超时边界内完成初始化与一次请求。"""
 
-            while True:
-                line = await self._process.stdout.readline()
-                if not line:
-                    raise McpProtocolError("mcp server exited")
-                response = json.loads(line)
-                if response.get("id") != request_id:
-                    continue
-                if "error" in response:
-                    raise McpProtocolError(str(response["error"]))
-                result = response.get("result")
-                if not isinstance(result, dict):
-                    raise McpProtocolError("mcp response is missing a result object")
-                return result
+        await self._ensure_started()
+        return await self._request_without_lock(method, params)
 
     async def _ensure_started(self) -> None:
         """按需启动进程并完成 MCP 初始化握手。"""

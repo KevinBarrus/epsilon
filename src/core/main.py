@@ -52,6 +52,7 @@ async def run(
             (settings.mcp_stdio.command, *settings.mcp_stdio.arguments),
             settings.mcp_stdio.provider_id,
             cwd=workspace,
+            trusted_read_tools=settings.mcp_stdio.trusted_read_tools,
         )
         if settings.mcp_stdio is not None
         else None

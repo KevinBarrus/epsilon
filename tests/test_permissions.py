@@ -10,7 +10,7 @@ from core.tools import (
 )
 
 
-def _definition(permission: str) -> ToolDefinition:
+def _definition(permission: str, *, idempotent: bool | None = None) -> ToolDefinition:
     """构造测试用工具定义。"""
 
     return ToolDefinition(
@@ -19,7 +19,7 @@ def _definition(permission: str) -> ToolDefinition:
         parameters={"type": "object"},
         source="local",
         permission=permission,  # type: ignore[arg-type]
-        idempotent=permission == "read",
+        idempotent=permission == "read" if idempotent is None else idempotent,
     )
 
 
@@ -99,8 +99,8 @@ async def test_session_grant_skips_future_confirmation() -> None:
         return ApprovalResult(ApprovalDecision.ALLOW_SESSION)
 
     manager = PermissionManager(approve)
-    first = await manager.authorize(_definition("write"), _call())
-    second = await manager.authorize(_definition("write"), _call())
+    first = await manager.authorize(_definition("write", idempotent=True), _call())
+    second = await manager.authorize(_definition("write", idempotent=True), _call())
 
     assert first.decision == ApprovalDecision.ALLOW_SESSION
     assert second.decision == ApprovalDecision.ALLOW_SESSION
@@ -122,6 +122,27 @@ async def test_command_never_grants_session_permission() -> None:
     manager = PermissionManager(approve)
     first = await manager.authorize(_definition("command"), _call())
     second = await manager.authorize(_definition("command"), _call())
+
+    assert first.decision == ApprovalDecision.ALLOW_ONCE
+    assert second.decision == ApprovalDecision.ALLOW_ONCE
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_non_idempotent_tool_never_grants_session_permission() -> None:
+    """测试不可幂等工具的会话授权会退化为单次授权。"""
+
+    calls = 0
+
+    async def approve(definition, tool_call, allow_session) -> ApprovalResult:
+        nonlocal calls
+        calls += 1
+        assert allow_session is False
+        return ApprovalResult(ApprovalDecision.ALLOW_SESSION)
+
+    manager = PermissionManager(approve)
+    first = await manager.authorize(_definition("write", idempotent=False), _call())
+    second = await manager.authorize(_definition("write", idempotent=False), _call())
 
     assert first.decision == ApprovalDecision.ALLOW_ONCE
     assert second.decision == ApprovalDecision.ALLOW_ONCE

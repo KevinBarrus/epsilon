@@ -17,6 +17,7 @@ class McpStdioSettings:
     command: str
     arguments: tuple[str, ...]
     provider_id: str
+    trusted_read_tools: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -304,16 +305,22 @@ def _optional_mcp_stdio_settings(data: dict) -> McpStdioSettings | None:
     command = mcp.get("command")
     arguments = mcp.get("arguments")
     provider_id = mcp.get("provider_id")
+    trusted_read_tools = mcp.get("trusted_read_tools", [])
     if all(value is None for value in (command, arguments, provider_id)):
         return None
     if not isinstance(arguments, list) or not all(
         isinstance(argument, str) for argument in arguments
     ):
         raise ConfigError("mcp_stdio.arguments must be an array of strings")
+    if not isinstance(trusted_read_tools, list) or not all(
+        isinstance(tool_name, str) and tool_name for tool_name in trusted_read_tools
+    ):
+        raise ConfigError("mcp_stdio.trusted_read_tools must be an array of strings")
     return McpStdioSettings(
         command=_required_value(command, "mcp_stdio.command"),
         arguments=tuple(arguments),
         provider_id=_required_value(provider_id, "mcp_stdio.provider_id"),
+        trusted_read_tools=tuple(trusted_read_tools),
     )
 
 
