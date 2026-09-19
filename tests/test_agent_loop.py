@@ -1,4 +1,5 @@
 import asyncio
+import json
 from collections.abc import AsyncIterator, Sequence
 
 import pytest
@@ -1256,3 +1257,42 @@ async def test_agent_loop_keeps_request_prefix_stable_across_tool_round(
     first_round = client.requests[0]
     second_round = client.requests[1]
     assert second_round[: len(first_round)] == first_round
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_serialized_request_prefix_is_byte_stable(
+    tmp_path,
+) -> None:
+    """测试工具循环前后两轮请求按 DeepSeek 协议序列化后的字节前缀一致。
+
+    前缀缓存要求连续请求的公共前缀序列化结果逐字节一致；
+    这里直接在 reasoning_content 回传开启的序列化输出上验证。
+    """
+
+    from core.openai_client import _serialize_message
+
+    def to_wire_bytes(messages) -> bytes:
+        payload = "".join(
+            json.dumps(
+                _serialize_message(message, include_reasoning=True),
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            + "\n"
+            for message in messages
+        )
+        return payload.encode("utf-8")
+
+    (tmp_path / "README.md").write_text("项目说明", encoding="utf-8")
+    client = FakeModelClient()
+    manager = ToolManager()
+    manager.register_local(*create_read_file_tool(tmp_path))
+
+    await AgentLoop(tool_manager=manager, client=client).run(
+        [Message(role="user", content="读取说明")]
+    )
+
+    assert len(client.requests) == 2
+    first_bytes = to_wire_bytes(client.requests[0])
+    second_bytes = to_wire_bytes(client.requests[1])
+    assert second_bytes.startswith(first_bytes)
