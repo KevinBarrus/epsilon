@@ -297,6 +297,8 @@ class SessionStore:
             record["status"] = message.status
         if message.error_category is not None:
             record["error_category"] = message.error_category
+        if message.reasoning:
+            record["reasoning"] = message.reasoning
         if message.tool_calls:
             record["tool_calls"] = [
                 {
@@ -334,11 +336,12 @@ class SessionStore:
             raise SessionStoreError(f"line {line_number} has invalid content")
 
         status = record.get("status", "completed")
-        if status not in {"completed", "cancelled", "error"}:
-            raise SessionStoreError(f"line {line_number} has an invalid message status")
         error_category = record.get("error_category")
         if error_category is not None and not is_error_category(error_category):
             raise SessionStoreError(f"line {line_number} has an invalid error category")
+        reasoning = record.get("reasoning", "")
+        if not isinstance(reasoning, str):
+            raise SessionStoreError(f"line {line_number} has invalid reasoning")
 
         raw_tool_calls = record.get("tool_calls", [])
         if not isinstance(raw_tool_calls, list):
@@ -376,6 +379,7 @@ class SessionStore:
             error_category=error_category,
             usage=usage,
             request_fingerprint=request_fingerprint,
+            reasoning=reasoning,
         )
 
     @staticmethod

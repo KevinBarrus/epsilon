@@ -71,6 +71,7 @@ class Message:
     error_category: ErrorCategory | None = None
     usage: UsageEvent | None = None
     request_fingerprint: str | None = None
+    reasoning: str = ""
 
 
 class ModelClientError(AgentError):

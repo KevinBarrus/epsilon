@@ -766,6 +766,8 @@ def _serialize_messages(messages: Sequence[Message]) -> str:
     parts: list[str] = []
     for message in messages:
         parts.append(f"[{message.role}] {message.content}")
+        if message.reasoning:
+            parts.append(f"[reasoning] {message.reasoning}")
         for tool_call in message.tool_calls:
             arguments = json.dumps(
                 tool_call.arguments,
@@ -794,14 +796,19 @@ def _is_structured_summary(summary: str) -> bool:
 def estimate_message_tokens(message: Message) -> int:
     """使用字符数估算单条消息的 Token 数。"""
 
-    return estimate_text_tokens(message.content) + sum(
-        estimate_text_tokens(tool_call.name)
-        + estimate_text_tokens(tool_call.call_id)
-        + estimate_text_tokens(
-            json.dumps(tool_call.arguments, ensure_ascii=False, sort_keys=True)
+    return (
+        estimate_text_tokens(message.content)
+        + estimate_text_tokens(message.reasoning)
+        + sum(
+            estimate_text_tokens(tool_call.name)
+            + estimate_text_tokens(tool_call.call_id)
+            + estimate_text_tokens(
+                json.dumps(tool_call.arguments, ensure_ascii=False, sort_keys=True)
+            )
+            for tool_call in message.tool_calls
         )
-        for tool_call in message.tool_calls
-    ) + estimate_text_tokens(message.tool_call_id or "")
+        + estimate_text_tokens(message.tool_call_id or "")
+    )
 
 
 def estimate_text_tokens(content: str) -> int:

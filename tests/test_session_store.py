@@ -387,3 +387,48 @@ def test_delete_session_missing_returns_false(tmp_path: Path) -> None:
     assert (
         store.delete_session("22222222-2222-2222-2222-222222222222") is False
     )
+
+
+def test_jsonl_persists_assistant_reasoning(tmp_path: Path) -> None:
+    """测试 assistant 思考内容可跨进程恢复。"""
+
+    store = SessionStore(tmp_path)
+    session_id = str(uuid.uuid4())
+    expected = Message(role="assistant", content="完成", reasoning="先分析任务")
+
+    store.append_message(session_id, expected)
+
+    assert store.load_messages(session_id) == [expected]
+
+
+def test_legacy_record_without_reasoning_restores_empty(tmp_path: Path) -> None:
+    """测试旧格式记录缺少 reasoning 字段时默认恢复为空。"""
+
+    store = SessionStore(tmp_path)
+    session_id = str(uuid.uuid4())
+    path = tmp_path / ".epsilon" / "sessions" / f"{session_id}.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        '{"type":"message","role":"assistant","content":"历史回复"}\n',
+        encoding="utf-8",
+    )
+
+    assert store.load_messages(session_id) == [
+        Message(role="assistant", content="历史回复", reasoning="")
+    ]
+
+
+def test_invalid_reasoning_record_raises_clear_error(tmp_path: Path) -> None:
+    """测试 reasoning 字段类型非法时报明确错误。"""
+
+    store = SessionStore(tmp_path)
+    session_id = str(uuid.uuid4())
+    path = tmp_path / ".epsilon" / "sessions" / f"{session_id}.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        '{"type":"message","role":"assistant","content":"回复","reasoning":42}\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SessionStoreError, match="invalid reasoning"):
+        store.load_messages(session_id)

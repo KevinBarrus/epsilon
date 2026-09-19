@@ -97,6 +97,37 @@ async def test_run_chat_renders_restored_history(
 
 
 @pytest.mark.asyncio
+async def test_run_chat_renders_restored_reasoning_block(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """测试恢复会话时 assistant 思考内容以思考块样式展示。"""
+
+    session = Session(tmp_path)
+    session.add_user_message("历史问题")
+    session.add_message(
+        Message(role="assistant", content="历史回答", reasoning="历史思考")
+    )
+    assert session.flush_persistence()
+    session.close()
+    monkeypatch.setattr(ui, "ChatScreen", FakeScreen)
+
+    await ui.run_chat(
+        EmptyClient(),
+        create_status_info("test", "暂不可查询", tmp_path),
+        settings=Settings("https://example.com", "test", "key"),
+        workspace=tmp_path,
+        session_id=session.session_id,
+    )
+
+    assert FakeScreen.last is not None
+    assert FakeScreen.last.entries == [
+        ("user", "历史问题"),
+        ("assistant", "\x00历史思考\x00历史回答"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_run_chat_registers_and_closes_mcp_provider(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

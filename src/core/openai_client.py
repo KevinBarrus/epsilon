@@ -90,7 +90,10 @@ class OpenAICompatibleClient:
     ) -> AsyncIterator[ModelEvent]:
         """发送消息并解析文本和工具调用事件。"""
 
-        request_messages = [_serialize_message(message) for message in messages]
+        request_messages = [
+            _serialize_message(message, include_reasoning=self._is_deepseek)
+            for message in messages
+        ]
         request: dict[str, object] = {
             "model": self._model_name,
             "messages": request_messages,
@@ -249,13 +252,23 @@ def _error_codes(error: BaseException) -> tuple[str, ...]:
     )
 
 
-def _serialize_message(message: Message) -> dict[str, object]:
-    """将内部消息转换为 OpenAI-compatible 消息。"""
+def _serialize_message(
+    message: Message,
+    *,
+    include_reasoning: bool = False,
+) -> dict[str, object]:
+    """将内部消息转换为 OpenAI-compatible 消息。
+
+    reasoning_content 仅在直连 DeepSeek 时回传：官方协议要求思考模式下
+    工具循环回传历史推理内容，而其他服务端会拒绝未知字段。
+    """
 
     request: dict[str, object] = {
         "role": message.role,
         "content": message.content,
     }
+    if include_reasoning and message.role == "assistant" and message.reasoning:
+        request["reasoning_content"] = message.reasoning
     if message.tool_calls:
         request["tool_calls"] = [
             {

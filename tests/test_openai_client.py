@@ -799,3 +799,64 @@ async def test_client_streams_openai_compatible_reasoning_fields(field: str) -> 
     events = [event async for event in client.stream_response([Message(role="user", content="hi")])]
 
     assert events == [TextDelta("", reasoning="分析")]
+
+
+@pytest.mark.asyncio
+async def test_client_sends_reasoning_content_for_deepseek() -> None:
+    """测试直连 DeepSeek 时 assistant 的 reasoning_content 随请求回传。"""
+
+    fake_sdk = FakeClient(
+        [SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content="好"))])]
+    )
+    client = OpenAICompatibleClient(_deepseek_settings(), fake_sdk)  # type: ignore[arg-type]
+    history = [
+        Message(role="user", content="任务"),
+        Message(role="assistant", content="", reasoning="先分析任务"),
+    ]
+
+    async for _ in client.stream_response(history):
+        pass
+
+    sent = fake_sdk.completions.received["messages"]
+    assert sent[1]["reasoning_content"] == "先分析任务"
+
+
+@pytest.mark.asyncio
+async def test_client_omits_reasoning_content_for_other_endpoints() -> None:
+    """测试非 DeepSeek 服务端不发送 reasoning_content 未知字段。"""
+
+    fake_sdk = FakeClient(
+        [SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content="好"))])]
+    )
+    client = OpenAICompatibleClient(_settings(), fake_sdk)  # type: ignore[arg-type]
+    history = [
+        Message(role="user", content="任务"),
+        Message(role="assistant", content="", reasoning="先分析任务"),
+    ]
+
+    async for _ in client.stream_response(history):
+        pass
+
+    assert "reasoning_content" not in fake_sdk.completions.received["messages"][1]
+
+
+@pytest.mark.asyncio
+async def test_client_omits_reasoning_content_when_empty() -> None:
+    """测试 reasoning 为空时不发送该字段，非 assistant 角色也不发送。"""
+
+    fake_sdk = FakeClient(
+        [SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content="好"))])]
+    )
+    client = OpenAICompatibleClient(_deepseek_settings(), fake_sdk)  # type: ignore[arg-type]
+    history = [
+        Message(role="user", content="任务"),
+        Message(role="assistant", content="完成"),
+        Message(role="user", content="继续", reasoning="用户侧不应携带"),
+    ]
+
+    async for _ in client.stream_response(history):
+        pass
+
+    sent = fake_sdk.completions.received["messages"]
+    assert "reasoning_content" not in sent[1]
+    assert "reasoning_content" not in sent[2]

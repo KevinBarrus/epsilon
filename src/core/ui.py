@@ -453,7 +453,10 @@ async def run_chat(
     try:
         history = session.get_messages()
         screen.add_history_entries(
-            [(message.role, message.content) for message in history]
+            [
+                (message.role, _history_display(message, agent_loop.show_thinking))
+                for message in history
+            ]
         )
         flush_history = getattr(screen, "flush_history", None)
         if flush_history is not None:
@@ -471,6 +474,15 @@ async def run_chat(
         session_id=None if session.deleted else session.session_id,
         usage_totals=usage_totals if latest_usage is not None else None,
     )
+
+
+def _history_display(message: Message, show_thinking: bool) -> str:
+    """将消息格式化为历史展示文本，思考块用 \x00 标记包裹。"""
+
+    if not message.reasoning:
+        return message.content
+    thinking = message.reasoning if show_thinking else "Thinking..."
+    return f"\x00{thinking}\x00{message.content}"
 
 
 def _tool_call_summary(tool_call) -> str:

@@ -816,3 +816,22 @@ def test_context_manager_updates_model_name_on_switch() -> None:
 
     assert "deepseek-v4-pro" in first
     assert "deepseek-v4-flash" in second
+
+
+def test_estimate_message_tokens_counts_reasoning() -> None:
+    """测试思考内容计入单条消息的 Token 估算。"""
+
+    without = Message(role="assistant", content="完成")
+    with_reasoning = Message(role="assistant", content="完成", reasoning="先分析任务")
+
+    assert estimate_message_tokens(with_reasoning) > estimate_message_tokens(without)
+
+
+def test_summary_source_text_includes_reasoning() -> None:
+    """测试摘要输入文本包含 assistant 思考内容。"""
+
+    text = _serialize_messages(
+        [Message(role="assistant", content="完成", reasoning="先分析任务")]
+    )
+
+    assert "[reasoning] 先分析任务" in text

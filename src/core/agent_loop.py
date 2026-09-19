@@ -176,6 +176,7 @@ class AgentLoop:
         new_messages: list[Message] = []
         text_parts: list[str] = []
         tool_calls: list[ToolCall] = []
+        reasoning_parts: list[str] = []
         tool_rounds = 0
         try:
             while (
@@ -184,6 +185,7 @@ class AgentLoop:
             ):
                 text_parts = []
                 tool_calls = []
+                reasoning_parts = []
                 latest_usage: UsageEvent | None = None
                 request_messages = context
                 for force_compaction in (False, True):
@@ -201,6 +203,8 @@ class AgentLoop:
                             on_event=on_event,
                         ):
                             if isinstance(event, TextDelta):
+                                if event.reasoning:
+                                    reasoning_parts.append(event.reasoning)
                                 text_parts.append(event.content)
                             elif isinstance(event, ToolCallEvent):
                                 tool_calls.append(event.tool_call)
@@ -221,6 +225,7 @@ class AgentLoop:
                 assistant_message = Message(
                     role="assistant",
                     content=assistant_content,
+                    reasoning="".join(reasoning_parts),
                     tool_calls=completed_tool_calls,
                     usage=latest_usage,
                     request_fingerprint=(
@@ -236,6 +241,7 @@ class AgentLoop:
                 new_messages.append(assistant_message)
                 text_parts = []
                 tool_calls = []
+                reasoning_parts = []
                 if not completed_tool_calls:
                     follow_up = (
                         self._end_policy.follow_up_message()
@@ -295,11 +301,12 @@ class AgentLoop:
                 tool_rounds=tool_rounds,
             )
         except asyncio.CancelledError as exc:
-            if text_parts or tool_calls:
+            if text_parts or tool_calls or reasoning_parts:
                 new_messages.append(
                     Message(
                         role="assistant",
                         content="".join(text_parts),
+                        reasoning="".join(reasoning_parts),
                         tool_calls=tuple(tool_calls),
                         status="cancelled",
                     )

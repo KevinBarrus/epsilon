@@ -1193,3 +1193,66 @@ async def test_agent_loop_emits_retry_event(monkeypatch: pytest.MonkeyPatch) -> 
     assert len(retries) == 1
     assert retries[0].attempt == 1
     assert retries[0].max_attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_accumulates_reasoning_into_message() -> None:
+    """测试流式思考内容累计进 assistant 消息的 reasoning 字段。"""
+
+    class ReasoningClient:
+        async def stream_response(self, messages, tools=(), thinking_level=None):
+            yield TextDelta("", reasoning="先分析")
+            yield TextDelta("", reasoning="任务")
+            yield TextDelta("完成")
+
+    result = await AgentLoop(ReasoningClient(), ToolManager()).run(
+        [Message(role="user", content="任务")]
+    )
+
+    assistant = result.new_messages[-1]
+    assert assistant.content == "完成"
+    assert assistant.reasoning == "先分析任务"
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_persists_partial_reasoning_on_cancel() -> None:
+    """测试纯思考阶段被取消时半截 reasoning 照常存档。"""
+
+    class CancelledReasoningClient:
+        async def stream_response(self, messages, tools=(), thinking_level=None):
+            yield TextDelta("", reasoning="思考到一半")
+            raise asyncio.CancelledError
+
+    loop = AgentLoop(CancelledReasoningClient(), ToolManager())
+
+    with pytest.raises(AgentLoopCancelled) as error_info:
+        await loop.run([Message(role="user", content="任务")])
+
+    cancelled_messages = error_info.value.new_messages
+    assert cancelled_messages[-1].reasoning == "思考到一半"
+    assert cancelled_messages[-1].status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_keeps_request_prefix_stable_across_tool_round(
+    tmp_path,
+) -> None:
+    """测试工具循环第二轮请求是第一轮请求的严格前缀延伸。
+
+    DeepSeek 前缀缓存要求连续请求的公共前缀序列化结果一致；
+    在内部消息层面前缀稳定即满足该约束。
+    """
+
+    (tmp_path / "README.md").write_text("项目说明", encoding="utf-8")
+    client = FakeModelClient()
+    manager = ToolManager()
+    manager.register_local(*create_read_file_tool(tmp_path))
+
+    await AgentLoop(tool_manager=manager, client=client).run(
+        [Message(role="user", content="读取说明")]
+    )
+
+    assert len(client.requests) == 2
+    first_round = client.requests[0]
+    second_round = client.requests[1]
+    assert second_round[: len(first_round)] == first_round
