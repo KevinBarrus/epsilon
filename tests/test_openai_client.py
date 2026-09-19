@@ -728,6 +728,77 @@ async def test_client_omits_cached_tokens_when_details_missing() -> None:
 
 
 @pytest.mark.asyncio
+async def test_client_reads_deepseek_cache_hit_and_miss_tokens() -> None:
+    """测试 DeepSeek 的 prompt_cache_hit/miss_tokens 解析进用量事件。"""
+
+    fake_sdk = FakeClient(
+        [
+            SimpleNamespace(
+                choices=[],
+                usage=SimpleNamespace(
+                    prompt_tokens=100,
+                    completion_tokens=8,
+                    total_tokens=108,
+                    prompt_cache_hit_tokens=64,
+                    prompt_cache_miss_tokens=36,
+                ),
+            ),
+        ]
+    )
+    settings = Settings(
+        base_url="https://api.deepseek.com/",
+        model_name="deepseek-chat",
+        api_key="test-key",
+        stream_usage=True,
+    )
+    client = OpenAICompatibleClient(settings, fake_sdk)  # type: ignore[arg-type]
+
+    events = await _collect_events(client)
+
+    assert events == [
+        UsageEvent(
+            prompt_tokens=100,
+            completion_tokens=8,
+            total_tokens=108,
+            cached_tokens=64,
+            cache_miss_tokens=36,
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_client_prefers_deepseek_cache_fields_over_details() -> None:
+    """测试两种缓存字段并存时优先采用 DeepSeek 的 hit/miss 字段。"""
+
+    fake_sdk = FakeClient(
+        [
+            SimpleNamespace(
+                choices=[],
+                usage=SimpleNamespace(
+                    prompt_tokens=100,
+                    completion_tokens=8,
+                    total_tokens=108,
+                    prompt_cache_hit_tokens=64,
+                    prompt_cache_miss_tokens=36,
+                    prompt_tokens_details=SimpleNamespace(cached_tokens=99),
+                ),
+            ),
+        ]
+    )
+    settings = Settings(
+        base_url="https://api.deepseek.com/",
+        model_name="deepseek-chat",
+        api_key="test-key",
+        stream_usage=True,
+    )
+    client = OpenAICompatibleClient(settings, fake_sdk)  # type: ignore[arg-type]
+
+    events = await _collect_events(client)
+
+    assert events[0].cached_tokens == 64
+
+
+@pytest.mark.asyncio
 async def test_client_skips_incomplete_usage() -> None:
     """测试服务端 usage 字段不完整时不产出用量事件。"""
 

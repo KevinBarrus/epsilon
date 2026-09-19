@@ -736,6 +736,8 @@ def _result(
         compactions=sum(event.get("type") == "compaction" for event in events),
         estimated_tokens=sum(estimate_context_tokens(request) for request in client.requests) if client else 0,
         actual_tokens=client.total_actual_tokens if client else None,
+        cached_tokens=client.total_cached_tokens if client else None,
+        cache_hit_rate=client.cache_hit_rate if client else None,
         persistence_degraded=persistence_degraded,
         error_category=(
             error_category

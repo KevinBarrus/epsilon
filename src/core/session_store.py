@@ -311,12 +311,15 @@ class SessionStore:
         if message.tool_call_id is not None:
             record["tool_call_id"] = message.tool_call_id
         if message.usage is not None:
-            record["usage"] = {
+            usage_record: dict[str, object] = {
                 "prompt_tokens": message.usage.prompt_tokens,
                 "completion_tokens": message.usage.completion_tokens,
                 "total_tokens": message.usage.total_tokens,
                 "cached_tokens": message.usage.cached_tokens,
             }
+            if message.usage.cache_miss_tokens is not None:
+                usage_record["cache_miss_tokens"] = message.usage.cache_miss_tokens
+            record["usage"] = usage_record
         if message.request_fingerprint is not None:
             record["request_fingerprint"] = message.request_fingerprint
         return record
@@ -450,6 +453,7 @@ def _usage_from_record(value: object, line_number: int) -> UsageEvent | None:
         value.get("total_tokens"),
     )
     cached = value.get("cached_tokens")
+    cache_miss = value.get("cache_miss_tokens")
     if (
         any(
             not isinstance(item, int) or isinstance(item, bool) or item < 0
@@ -463,6 +467,14 @@ def _usage_from_record(value: object, line_number: int) -> UsageEvent | None:
                 or cached < 0
             )
         )
+        or (
+            cache_miss is not None
+            and (
+                not isinstance(cache_miss, int)
+                or isinstance(cache_miss, bool)
+                or cache_miss < 0
+            )
+        )
     ):
         raise SessionStoreError(f"line {line_number} has invalid token usage")
-    return UsageEvent(fields[0], fields[1], fields[2], cached)
+    return UsageEvent(fields[0], fields[1], fields[2], cached, cache_miss)

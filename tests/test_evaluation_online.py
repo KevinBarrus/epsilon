@@ -103,6 +103,46 @@ async def test_timed_model_client_collects_usage_from_summary_request() -> None:
 
 
 @pytest.mark.asyncio
+async def test_timed_model_client_summarizes_cache_metrics() -> None:
+    """测试包装器按任务汇总缓存命中 Token 与命中率。"""
+
+    client = TimedModelClient(
+        FakeModelClient(
+            [
+                [TextDelta("完成"), UsageEvent(100, 4, 104, cached_tokens=60)],
+                [TextDelta("继续"), UsageEvent(200, 6, 206, cached_tokens=140)],
+            ]
+        )
+    )
+
+    _ = [event async for event in client.stream_response([])]
+    _ = [event async for event in client.stream_response([])]
+
+    assert client.total_cached_tokens == 200
+    assert client.cache_hit_rate == pytest.approx(200 / 300)
+
+
+@pytest.mark.asyncio
+async def test_timed_model_client_cache_metrics_none_when_field_missing() -> None:
+    """测试任一请求缺少缓存字段时缓存汇总与命中率保持 None。"""
+
+    client = TimedModelClient(
+        FakeModelClient(
+            [
+                [TextDelta("完成"), UsageEvent(100, 4, 104, cached_tokens=60)],
+                [TextDelta("继续"), UsageEvent(200, 6, 206)],
+            ]
+        )
+    )
+
+    _ = [event async for event in client.stream_response([])]
+    _ = [event async for event in client.stream_response([])]
+
+    assert client.total_cached_tokens is None
+    assert client.cache_hit_rate is None
+
+
+@pytest.mark.asyncio
 async def test_online_suite_runs_requested_repetitions_and_keeps_failures(
     monkeypatch,
 ) -> None:

@@ -339,13 +339,24 @@ def _build_usage_event(usage: object) -> UsageEvent | None:
         total_tokens = prompt_tokens + completion_tokens
     if not isinstance(prompt_tokens, int) or not isinstance(completion_tokens, int) or not isinstance(total_tokens, int):
         return None
-    # 缓存命中 token 来自 prompt_tokens_details.cached_tokens，缺失时置 None
-    details = getattr(usage, "prompt_tokens_details", None)
-    cached_tokens = getattr(details, "cached_tokens", None)
-    cached = cached_tokens if isinstance(cached_tokens, int) else None
+    # 缓存命中优先读 DeepSeek 的 hit/miss 字段，缺失时回退 OpenAI 的 details 格式
+    cached: int | None = None
+    cache_miss: int | None = None
+    hit_tokens = getattr(usage, "prompt_cache_hit_tokens", None)
+    miss_tokens = getattr(usage, "prompt_cache_miss_tokens", None)
+    if isinstance(hit_tokens, int):
+        cached = hit_tokens
+    if isinstance(miss_tokens, int):
+        cache_miss = miss_tokens
+    if cached is None:
+        details = getattr(usage, "prompt_tokens_details", None)
+        details_cached = getattr(details, "cached_tokens", None)
+        if isinstance(details_cached, int):
+            cached = details_cached
     return UsageEvent(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         total_tokens=total_tokens,
         cached_tokens=cached,
+        cache_miss_tokens=cache_miss,
     )

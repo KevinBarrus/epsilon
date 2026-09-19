@@ -54,6 +54,7 @@ class UsageEvent:
     completion_tokens: int
     total_tokens: int
     cached_tokens: int | None = None
+    cache_miss_tokens: int | None = None
 
 
 ModelEvent = TextDelta | ToolCallEvent | UsageEvent

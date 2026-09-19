@@ -121,7 +121,7 @@ def _evaluation_section(
 
     metrics = calculate_metrics(results)
     rows = "\n".join(_result_row(result) for result in results)
-    rows = rows or "<tr><td colspan=25>暂无结果</td></tr>"
+    rows = rows or "<tr><td colspan=27>暂无结果</td></tr>"
     failures = "\n".join(
         _failure_row(result, assertion)
         for result in results
@@ -149,10 +149,12 @@ def _evaluation_section(
     {_metric("平均请求耗时", f"{metrics.average_model_request_duration_ms:.2f} ms")}
     {_metric(_percentile_label("请求 P50", metrics.scenario_count), f"{metrics.p50_model_request_duration_ms:.2f} ms")}
     {_metric(_percentile_label("请求 P95", metrics.scenario_count), f"{metrics.p95_model_request_duration_ms:.2f} ms")}
+    {_metric("平均缓存命中率", "" if metrics.average_cache_hit_rate is None else f"{metrics.average_cache_hit_rate:.1%}")}
+    {_metric("缓存命中 Token 合计", "" if metrics.total_cached_tokens is None else str(metrics.total_cached_tokens))}
   </section>
   <h3>场景结果</h3>
   <table>
-    <thead><tr><th>场景</th><th>任务 ID</th><th>来源</th><th>分组</th><th>基线提交</th><th>变更文件</th><th>类型</th><th>状态</th><th>错误类别</th><th>失败阶段</th><th>错误详情</th><th>停止原因</th><th>Agent 执行环境</th><th>Agent 验证命令</th><th>官方 Harness</th><th>耗时</th><th>模型请求</th><th>工具回合</th><th>并行批次</th><th>工具批次耗时</th><th>工具调用</th><th>重试</th><th>压缩</th><th>估算上下文 Token</th><th>服务端实际 Token</th></tr></thead>
+    <thead><tr><th>场景</th><th>任务 ID</th><th>来源</th><th>分组</th><th>基线提交</th><th>变更文件</th><th>类型</th><th>状态</th><th>错误类别</th><th>失败阶段</th><th>错误详情</th><th>停止原因</th><th>Agent 执行环境</th><th>Agent 验证命令</th><th>官方 Harness</th><th>耗时</th><th>模型请求</th><th>工具回合</th><th>并行批次</th><th>工具批次耗时</th><th>工具调用</th><th>重试</th><th>压缩</th><th>估算上下文 Token</th><th>服务端实际 Token</th><th>缓存命中 Token</th><th>缓存命中率</th></tr></thead>
     <tbody>{rows}</tbody>
   </table>
   <h3>失败断言</h3>
@@ -191,7 +193,9 @@ def _result_row(result: EvaluationResult) -> str:
         f"<td>{result.tool_calls}</td>"
         f"<td>{result.retries}</td><td>{result.compactions}</td>"
         f"<td>{result.estimated_tokens}</td>"
-        f"<td>{'' if result.actual_tokens is None else result.actual_tokens}</td></tr>"
+        f"<td>{'' if result.actual_tokens is None else result.actual_tokens}</td>"
+        f"<td>{'' if result.cached_tokens is None else result.cached_tokens}</td>"
+        f"<td>{'' if result.cache_hit_rate is None else f'{result.cache_hit_rate:.1%}'}</td></tr>"
     )
 
 

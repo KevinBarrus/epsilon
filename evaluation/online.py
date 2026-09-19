@@ -184,7 +184,7 @@ class TimedModelClient:
         self._client = client
         self.requests: list[list[Message]] = []
         self.durations_ms: list[float] = []
-        self.usages: list[int | None] = []
+        self.usages: list[UsageEvent | None] = []
 
     async def close(self) -> None:
         """关闭被包装客户端持有的网络连接"""
@@ -193,13 +193,43 @@ class TimedModelClient:
         if close is not None:
             await close()
 
+    def _completed_usages(self) -> list[UsageEvent] | None:
+        """返回全部请求的完整用量，任一请求缺少 usage 时返回 None。"""
+
+        if not self.usages or any(usage is None for usage in self.usages):
+            return None
+        return [usage for usage in self.usages if usage is not None]
+
     @property
     def total_actual_tokens(self) -> int | None:
         """汇总所有请求的 total Token，任一请求缺少 usage 时返回 None"""
 
-        if not self.usages or any(usage is None for usage in self.usages):
+        usages = self._completed_usages()
+        if usages is None:
             return None
-        return sum(usage for usage in self.usages if usage is not None)
+        return sum(usage.total_tokens for usage in usages)
+
+    @property
+    def total_cached_tokens(self) -> int | None:
+        """汇总缓存命中 Token，任一请求缺少缓存字段时返回 None"""
+
+        usages = self._completed_usages()
+        if usages is None or any(usage.cached_tokens is None for usage in usages):
+            return None
+        return sum(usage.cached_tokens or 0 for usage in usages)
+
+    @property
+    def cache_hit_rate(self) -> float | None:
+        """缓存命中 Token 占输入 Token 的比例，数据不完整时返回 None"""
+
+        usages = self._completed_usages()
+        if usages is None:
+            return None
+        prompt_total = sum(usage.prompt_tokens for usage in usages)
+        cached_total = self.total_cached_tokens
+        if prompt_total <= 0 or cached_total is None:
+            return None
+        return cached_total / prompt_total
 
     async def stream_response(
         self,
@@ -216,7 +246,7 @@ class TimedModelClient:
         try:
             async for event in self._client.stream_response(messages, tools):
                 if isinstance(event, UsageEvent):
-                    self.usages[usage_index] = event.total_tokens
+                    self.usages[usage_index] = event
                 yield event
         finally:
             self.durations_ms.append((perf_counter() - started_at) * 1000)
@@ -231,7 +261,7 @@ class TimedModelClient:
         try:
             async for event in self._client.stream_response(messages):
                 if isinstance(event, UsageEvent):
-                    self.usages[usage_index] = event.total_tokens
+                    self.usages[usage_index] = event
                 elif isinstance(event, TextDelta):
                     yield event.content
         finally:
@@ -440,6 +470,8 @@ async def _run_online_file_task(
                 estimate_context_tokens(request) for request in client.requests
             ),
             actual_tokens=client.total_actual_tokens,
+            cached_tokens=client.total_cached_tokens,
+            cache_hit_rate=client.cache_hit_rate,
             persistence_degraded=not persistence_ok,
             model_request_durations_ms=tuple(client.durations_ms),
             events=tuple(events),
@@ -564,6 +596,8 @@ async def _run_online_code_task(
                 estimate_context_tokens(request) for request in client.requests
             ),
             actual_tokens=client.total_actual_tokens,
+            cached_tokens=client.total_cached_tokens,
+            cache_hit_rate=client.cache_hit_rate,
             persistence_degraded=not persistence_ok,
             model_request_durations_ms=tuple(client.durations_ms),
             events=tuple(events),
@@ -872,6 +906,8 @@ async def _run_online_compaction_smoke(
                 estimate_context_tokens(request) for request in client.requests
             ),
             actual_tokens=client.total_actual_tokens,
+            cached_tokens=client.total_cached_tokens,
+            cache_hit_rate=client.cache_hit_rate,
             persistence_degraded=not persistence_ok,
             model_request_durations_ms=tuple(client.durations_ms),
             assertions=assertions,
@@ -931,6 +967,8 @@ async def _run_online_network_error_smoke(
             estimate_context_tokens(request) for request in client.requests
         ),
         actual_tokens=client.total_actual_tokens,
+        cached_tokens=client.total_cached_tokens,
+        cache_hit_rate=client.cache_hit_rate,
         model_request_durations_ms=tuple(client.durations_ms),
         events=(
             message_to_record(Message(role="user", content="测试网络异常处理")),

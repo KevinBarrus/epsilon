@@ -516,6 +516,8 @@ async def test_patch_generation_failure_keeps_completed_agent_trace(
         requests: list = []
         durations_ms: list[float] = []
         total_actual_tokens = None
+        total_cached_tokens = None
+        cache_hit_rate = None
 
         def __init__(self, client) -> None:
             pass

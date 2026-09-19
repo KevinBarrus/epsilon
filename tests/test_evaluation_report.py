@@ -174,6 +174,34 @@ def test_render_report_distinguishes_estimated_and_actual_tokens() -> None:
     assert "<td>20</td><td>18</td>" in html
 
 
+def test_render_report_lists_cache_metrics_per_scenario() -> None:
+    """测试缓存命中 Token 与命中率按场景渲染，无数据时留空。"""
+
+    html = render_report(
+        [
+            EvaluationResult(
+                scenario="cached",
+                duration_ms=10,
+                actual_tokens=104,
+                cached_tokens=64,
+                cache_hit_rate=64 / 100,
+                assertions=(EvaluationAssertion("done", True),),
+            ),
+            EvaluationResult(
+                scenario="no-cache-data",
+                duration_ms=10,
+                assertions=(EvaluationAssertion("done", True),),
+            ),
+        ]
+    )
+
+    assert "缓存命中 Token" in html
+    assert "缓存命中率" in html
+    assert "<td>64</td><td>64.0%</td>" in html
+    assert "平均缓存命中率" in html
+    assert "缓存命中 Token 合计" in html
+
+
 def test_render_report_contains_baseline_regression() -> None:
     """测试报告包含 baseline 回归结果"""
 

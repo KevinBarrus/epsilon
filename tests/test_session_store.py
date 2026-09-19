@@ -432,3 +432,19 @@ def test_invalid_reasoning_record_raises_clear_error(tmp_path: Path) -> None:
 
     with pytest.raises(SessionStoreError, match="invalid reasoning"):
         store.load_messages(session_id)
+
+
+def test_jsonl_persists_cache_miss_tokens(tmp_path: Path) -> None:
+    """测试 usage 的缓存未命中字段可跨进程恢复，旧记录缺失时为 None。"""
+
+    store = SessionStore(tmp_path)
+    session_id = str(uuid.uuid4())
+    expected = Message(
+        role="assistant",
+        content="完成",
+        usage=UsageEvent(120, 8, 128, 20, 100),
+    )
+
+    store.append_message(session_id, expected)
+
+    assert store.load_messages(session_id) == [expected]

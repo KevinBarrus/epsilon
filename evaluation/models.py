@@ -61,6 +61,8 @@ class EvaluationResult:
     compactions: int = 0
     estimated_tokens: int = 0
     actual_tokens: int | None = None
+    cached_tokens: int | None = None
+    cache_hit_rate: float | None = None
     persistence_degraded: bool = False
     error_category: str | None = None
     error_stage: str | None = None

@@ -26,6 +26,8 @@ class EvaluationMetrics:
     average_model_request_duration_ms: float
     p50_model_request_duration_ms: float
     p95_model_request_duration_ms: float
+    average_cache_hit_rate: float | None
+    total_cached_tokens: int | None
 
 
 def calculate_metrics(results: list[EvaluationResult]) -> EvaluationMetrics:
@@ -97,6 +99,16 @@ def calculate_metrics(results: list[EvaluationResult]) -> EvaluationMetrics:
                 for duration in result.model_request_durations_ms
             ],
             0.95,
+        ),
+        average_cache_hit_rate=(
+            _average([result.cache_hit_rate for result in results if result.cache_hit_rate is not None])
+            if any(result.cache_hit_rate is not None for result in results)
+            else None
+        ),
+        total_cached_tokens=(
+            sum(result.cached_tokens for result in results if result.cached_tokens is not None)
+            if any(result.cached_tokens is not None for result in results)
+            else None
         ),
     )
 

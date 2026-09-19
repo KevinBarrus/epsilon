@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -71,6 +72,34 @@ def test_calculate_metrics_computes_percentiles_and_request_latency() -> None:
     assert metrics.p95_model_request_duration_ms == 240
 
 
+def test_calculate_metrics_aggregates_cache_metrics_only_from_data() -> None:
+    """测试缓存指标只统计有缓存数据的场景，全部缺失时为 None。"""
+
+    with_data = [
+        EvaluationResult(
+            scenario="cached-a",
+            duration_ms=10,
+            cached_tokens=64,
+            cache_hit_rate=0.8,
+        ),
+        EvaluationResult(
+            scenario="cached-b",
+            duration_ms=10,
+            cached_tokens=36,
+            cache_hit_rate=0.4,
+        ),
+    ]
+    metrics = calculate_metrics(
+        [*with_data, _result("no-data", True)]
+    )
+
+    assert metrics.total_cached_tokens == 100
+    assert metrics.average_cache_hit_rate == pytest.approx(0.6)
+
+    assert calculate_metrics([_result("plain", True)]).total_cached_tokens is None
+    assert calculate_metrics([_result("plain", True)]).average_cache_hit_rate is None
+
+
 @pytest.mark.asyncio
 async def test_memory_scenario_uses_cjk_aware_token_estimation(
     tmp_path: Path,
@@ -115,7 +144,8 @@ def test_results_can_round_trip_through_jsonl(tmp_path: Path) -> None:
         retries=expected.retries,
         compactions=expected.compactions,
         persistence_degraded=expected.persistence_degraded,
-        stop_reason="tool_limit",
+        cached_tokens=64,
+        cache_hit_rate=0.64,
         events=({"type": "tool_call", "name": "read_file"},),
         assertions=expected.assertions,
     )
@@ -123,3 +153,13 @@ def test_results_can_round_trip_through_jsonl(tmp_path: Path) -> None:
     append_result(path, expected)
 
     assert load_results(path) == [expected]
+
+    legacy = path.with_name("legacy.jsonl")
+    record = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+    record.pop("cached_tokens")
+    record.pop("cache_hit_rate")
+    legacy.write_text(json.dumps(record, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    restored = load_results(legacy)[0]
+    assert restored.cached_tokens is None
+    assert restored.cache_hit_rate is None
