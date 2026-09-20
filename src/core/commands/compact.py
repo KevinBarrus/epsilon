@@ -14,10 +14,13 @@ async def compact_command(context: CommandContext) -> None:
             context.session.get_messages(),
             context.session.get_compactions(),
             force_compaction=True,
+            evictions=context.session.get_evictions(),
         )
     except ContextSummaryError:
         context.screen.add_entry("tool", "Compaction failed")
         return
+    if result.eviction is not None:
+        context.session.add_eviction(result.eviction)
     if result.compaction is None:
         context.screen.add_entry("tool", "No compaction produced")
         return

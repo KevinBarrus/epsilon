@@ -8,6 +8,8 @@ from dataclasses import dataclass, replace
 from time import perf_counter
 from typing import Literal
 
+from .artifacts import ArtifactStore, apply_output_firewall
+
 from .context import ContextBuildResult, model_request_fingerprint
 from .end_policy import EndPolicySummary, TurnEndPolicy
 from .error_policy import AgentErrorPolicy
@@ -124,6 +126,9 @@ class AgentLoop:
         max_tool_rounds: int | None = None,
         thinking_level: str = "high",
         end_policy: TurnEndPolicy | None = None,
+        artifact_store: ArtifactStore | None = None,
+        session_id: str = "",
+        firewall_enabled: bool = True,
     ) -> None:
         """创建 Agent Loop，可选地限制单轮工具调用次数。"""
 
@@ -136,6 +141,15 @@ class AgentLoop:
         self._thinking_level = thinking_level
         self._show_thinking = True
         self._end_policy = end_policy
+        self._artifact_store = artifact_store
+        self._session_id = session_id
+        self._firewall_enabled = firewall_enabled
+
+    def set_artifact_session(self, session_id: str) -> None:
+        """绑定会话标识，Session 创建晚于 AgentLoop 时补充 artifact 归属。"""
+
+        self._session_id = session_id
+
 
     @property
     def thinking_level(self) -> str:
@@ -275,11 +289,20 @@ class AgentLoop:
                                 cancelled=(
                                     tool_call.call_id in exc.unknown_call_ids
                                 ),
+                                artifact_store=self._artifact_store,
+                                session_id=self._session_id,
+                                firewall_enabled=self._firewall_enabled,
                             )
                         )
                     raise
                 for tool_call, result in zip(completed_tool_calls, results):
-                    tool_message = _tool_result_message(tool_call, result)
+                    tool_message = _tool_result_message(
+                        tool_call,
+                        result,
+                        artifact_store=self._artifact_store,
+                        session_id=self._session_id,
+                        firewall_enabled=self._firewall_enabled,
+                    )
                     context.append(tool_message)
                     new_messages.append(tool_message)
                 if self._end_policy is not None:
@@ -490,15 +513,28 @@ def _tool_result_message(
     result: ToolResult,
     *,
     cancelled: bool = False,
+    artifact_store: ArtifactStore | None = None,
+    session_id: str = "",
+    firewall_enabled: bool = True,
 ) -> Message:
-    """将工具结果转换为保留执行状态的消息。"""
+    """将工具结果转换为保留执行状态的消息。
+
+    工具输出防火墙在此定型：超阈值输出原文落盘并注入有界占位符，
+    定型后的消息内容不再改写，保护 DeepSeek 前缀缓存。
+    """
 
     status = "cancelled" if cancelled else "completed"
     if result.is_error and not cancelled:
         status = "error"
+    content = apply_output_firewall(
+        result.content,
+        artifact_store if firewall_enabled else None,
+        session_id=session_id,
+        source_tool=tool_call.name,
+    )
     return Message(
         role="tool",
-        content=result.content,
+        content=content,
         tool_call_id=tool_call.call_id,
         status=status,
         error_category=result.error_category,

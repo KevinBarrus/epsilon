@@ -2,6 +2,7 @@
 
 import pytest
 
+from core.artifacts import ArtifactStore, is_artifact_placeholder
 from core.context import (
     ContextBudget,
     DEFAULT_CONTEXT_BUDGET,
@@ -12,6 +13,7 @@ from core.context import (
     UserInputTooLarge,
     CONTEXT_FALLBACK_NOTICE,
     SUMMARY_OMITTED_NOTICE,
+    KEEP_RECENT_TOOL_OUTPUTS,
     estimate_context_tokens,
     estimate_model_request_tokens,
     estimate_message_tokens,
@@ -21,6 +23,7 @@ from core.context import (
     select_recent_messages,
 )
 from core.context import (
+    _apply_evictions,
     _collect_file_operations,
     _fit_messages_to_budget,
     _has_valid_tool_chain,
@@ -28,7 +31,7 @@ from core.context import (
     _split_oversized_latest_turn,
 )
 from core.model import Message, ModelClientError, ToolCall, UsageEvent
-from core.session_store import CompactionRecord
+from core.session_store import CompactionRecord, EvictedToolOutput, EvictionRecord
 
 
 def test_context_budget_exposes_compaction_threshold() -> None:
@@ -835,3 +838,166 @@ def test_summary_source_text_includes_reasoning() -> None:
     )
 
     assert "[reasoning] 先分析任务" in text
+
+
+def _eviction_manager(tmp_path, *, enabled: bool = True) -> ContextManager:
+    """构造启用驱逐的上下文管理器，预算由测试后续按需覆盖。"""
+
+    return ContextManager(
+        ContextBudget(1_000, 0, 10),
+        artifact_store=ArtifactStore(tmp_path / "artifacts"),
+        session_id="s-1",
+        eviction_enabled=enabled,
+    )
+
+
+def _tool_messages(count: int, *, lines: int = 200) -> list[Message]:
+    """生成指定数量的同尺寸工具消息，便于按 Token 阈值观察驱逐。"""
+
+    content = "\n".join("x" * 40 for _ in range(lines))
+    return [
+        Message(role="tool", content=content, tool_call_id="c")
+        for _ in range(count)
+    ]
+
+
+def test_apply_evictions_replaces_recorded_tool_output(tmp_path) -> None:
+    """测试驱逐视图只替换被记录的 tool 消息，原始列表不被修改。"""
+
+    store = ArtifactStore(tmp_path / "artifacts")
+    original = "原始工具输出"
+    artifact_id = store.save(original, session_id="s-1", source_tool="run_command")
+    messages = [
+        Message(role="user", content="问题"),
+        Message(role="tool", content=original, tool_call_id="c1"),
+        Message(role="assistant", content="回答"),
+    ]
+    eviction = EvictionRecord(
+        before_message_index=2,
+        evicted=(EvictedToolOutput(1, artifact_id, len(original)),),
+        tokens_before=100,
+    )
+
+    result = _apply_evictions(messages, [eviction], store)
+
+    assert messages[1].content == original
+    assert result[0] is messages[0]
+    assert result[2] is messages[2]
+    assert is_artifact_placeholder(result[1].content)
+    assert original in result[1].content
+
+
+def test_apply_evictions_without_store_uses_short_placeholder(tmp_path) -> None:
+    """测试 store 缺失时降级为仅含取回指引的简短占位符。"""
+
+    messages = [
+        Message(role="tool", content="很长但已落盘的输出", tool_call_id="c1"),
+    ]
+    eviction = EvictionRecord(
+        before_message_index=1,
+        evicted=(EvictedToolOutput(0, "abcdef1234567890", 10),),
+        tokens_before=100,
+    )
+
+    result = _apply_evictions(messages, [eviction], None)
+
+    assert is_artifact_placeholder(result[0].content)
+    assert "Evicted tool output" in result[0].content
+
+
+def test_apply_evictions_without_records_returns_copy() -> None:
+    """测试没有驱逐记录时返回等值副本。"""
+
+    messages = [Message(role="user", content="问题")]
+
+    result = _apply_evictions(messages, [])
+
+    assert result == messages
+    assert result is not messages
+
+
+def test_maybe_evict_disabled_returns_none(tmp_path) -> None:
+    """测试关闭驱逐开关时不产生驱逐记录。"""
+
+    manager = _eviction_manager(tmp_path, enabled=False)
+    messages = _tool_messages(13)
+    manager.update_budget(ContextBudget(2_000, 0, 10))
+
+    assert manager._maybe_evict(messages, (), ()) is None
+
+
+def test_maybe_evict_within_threshold_returns_none(tmp_path) -> None:
+    """测试估算未越过阈值时不驱逐。"""
+
+    manager = _eviction_manager(tmp_path)
+    messages = _tool_messages(2, lines=1)
+    total = manager.estimate_tokens(messages)
+    manager.update_budget(ContextBudget(2 * (total + 10), 0, 10))
+
+    assert manager._maybe_evict(messages, (), ()) is None
+
+
+def test_maybe_evict_triggers_once_and_then_stabilizes(tmp_path) -> None:
+    """测试越过阈值时只驱逐到位一次，视图回到阈值后不再触发。"""
+
+    manager = _eviction_manager(tmp_path)
+    messages = _tool_messages(13)
+    total = manager.estimate_tokens(messages)
+    # 驱逐阈值设为 total - 1：必须触发，且降级最旧一条后即回到阈值内
+    manager.update_budget(ContextBudget(2 * (total - 1), 0, 10))
+
+    record = manager._maybe_evict(messages, (), ())
+
+    assert record is not None
+    assert [item.message_index for item in record.evicted] == [0]
+    assert manager._maybe_evict(messages, (), (record,)) is None
+
+
+def test_maybe_evict_never_touches_recent_outputs(tmp_path) -> None:
+    """测试最近 KEEP_RECENT_TOOL_OUTPUTS 条工具输出始终受保护。"""
+
+    manager = _eviction_manager(tmp_path)
+    messages = _tool_messages(15)
+    # 阈值远低于可达水平：所有非保护候选都会被降级
+    manager.update_budget(ContextBudget(1_000, 0, 10))
+
+    record = manager._maybe_evict(messages, (), ())
+
+    assert record is not None
+    evicted_indices = {item.message_index for item in record.evicted}
+    protected_start = 15 - KEEP_RECENT_TOOL_OUTPUTS
+    assert evicted_indices == set(range(protected_start))
+    assert all(index < protected_start for index in evicted_indices)
+
+
+def test_maybe_evict_skips_existing_placeholder(tmp_path) -> None:
+    """测试已降级为占位符的工具输出不会被重复驱逐。"""
+
+    manager = _eviction_manager(tmp_path)
+    messages = _tool_messages(15)
+    messages[0] = Message(
+        role="tool",
+        content="[artifact abc] already stored",
+        tool_call_id="c",
+    )
+    manager.update_budget(ContextBudget(1_000, 0, 10))
+
+    record = manager._maybe_evict(messages, (), ())
+
+    assert record is not None
+    assert 0 not in {item.message_index for item in record.evicted}
+
+
+@pytest.mark.asyncio
+async def test_build_for_model_result_returns_and_applies_eviction(tmp_path) -> None:
+    """测试构建上下文时驱逐记录会返回并作用于模型视图。"""
+
+    manager = _eviction_manager(tmp_path)
+    messages = _tool_messages(13)
+    total = manager.estimate_tokens(messages)
+    manager.update_budget(ContextBudget(2 * (total - 1), 0, 10))
+
+    result = await manager.build_for_model_result(object(), messages)
+
+    assert result.eviction is not None
+    assert any(is_artifact_placeholder(message.content) for message in result.messages)

@@ -7,9 +7,10 @@ from math import ceil
 from collections.abc import AsyncIterator, Mapping
 from typing import Sequence
 
+from .artifacts import ArtifactStore, artifact_placeholder, is_artifact_placeholder
 from .model import Message, ModelClient, ModelClientError
 from .prompts import load_prompt
-from .session_store import CompactionRecord
+from .session_store import CompactionRecord, EvictedToolOutput, EvictionRecord
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,9 @@ class ContextBudget:
 
 DEFAULT_CONTEXT_BUDGET = ContextBudget(100_000, 16_000, 20_000)
 
+# 驱逐时保护最近 N 条完整工具输出不被降级，避免破坏当前轮次依赖
+KEEP_RECENT_TOOL_OUTPUTS = 10
+
 
 class ContextCompactionRequired(RuntimeError):
     """表示当前消息超出预算，需要先执行上下文压缩。"""
@@ -65,6 +69,7 @@ class ContextBuildResult:
 
     messages: list[Message]
     compaction: CompactionRecord | None = None
+    eviction: EvictionRecord | None = None
     fallback_used: bool = False
 
 
@@ -89,7 +94,6 @@ SUMMARY_OMITTED_NOTICE = (
 REQUEST_PROTOCOL_TOKENS = 3
 MESSAGE_PROTOCOL_TOKENS = 4
 
-
 class ContextManager:
     """根据上下文预算生成模型请求消息。"""
 
@@ -99,8 +103,15 @@ class ContextManager:
         tool_capabilities: Mapping[str, str] | None = None,
         model_tools: Sequence[Mapping[str, object]] = (),
         system_prompt: str | None = None,
+        artifact_store: "ArtifactStore | None" = None,
+        session_id: str = "",
+        eviction_enabled: bool = False,
     ) -> None:
-        """创建上下文管理器。"""
+        """创建上下文管理器。
+
+        eviction_enabled 开启后，估算超过驱逐阈值时一次性批量把
+        陈旧工具输出降级为 artifact 占位符（视图变换，不改写历史）。
+        """
 
         self._budget = budget
         self._tool_capabilities = dict(tool_capabilities or {})
@@ -109,11 +120,19 @@ class ContextManager:
         self._model_name: str | None = None
         self._project_instructions: Message | None = None
         self._extra_system_messages: tuple[Message, ...] = ()
+        self._artifact_store = artifact_store
+        self._session_id = session_id
+        self._eviction_enabled = eviction_enabled
 
     def update_budget(self, budget: ContextBudget) -> None:
         """热切换模型时更新上下文预算，保留 skill 等额外系统消息。"""
 
         self._budget = budget
+
+    def set_session_id(self, session_id: str) -> None:
+        """绑定会话标识，Session 创建晚于上下文管理器时补充驱逐落盘归属。"""
+
+        self._session_id = session_id
 
     def set_model_name(self, model_name: str) -> None:
         """更新系统提示词中注入的模型名，切换模型时调用。"""
@@ -263,8 +282,9 @@ class ContextManager:
         messages: Sequence[Message],
         compactions: Sequence[CompactionRecord] = (),
         force_compaction: bool = False,
+        evictions: Sequence[EvictionRecord] = (),
     ) -> ContextBuildResult:
-        """构建模型上下文，并返回成功生成的压缩记录。"""
+        """构建模型上下文，并返回成功生成的压缩与驱逐记录。"""
 
         original_messages = list(messages)
         latest_user = next(
@@ -277,15 +297,29 @@ class ContextManager:
         )
         if latest_user is not None:
             self.validate_user_input(latest_user.content)
-        messages = _apply_latest_compaction(original_messages, compactions)
+        # 先应用既有驱逐（视图变换），再叠加压缩视图
+        messages = _apply_latest_compaction(
+            _apply_evictions(original_messages, evictions, self._artifact_store),
+            compactions,
+        )
         original_system_messages = [
             message for message in original_messages if message.role == "system"
         ]
         self._ensure_message_budget()
+        # 估算越过驱逐阈值时一次性批量驱逐，驱逐后前缀重新稳定
+        new_eviction = self._maybe_evict(
+            original_messages, compactions, evictions
+        )
+        if new_eviction is not None:
+            evictions = [*evictions, new_eviction]
+            messages = _apply_latest_compaction(
+                _apply_evictions(original_messages, evictions, self._artifact_store),
+                compactions,
+            )
         try:
             if force_compaction:
                 raise ContextCompactionRequired("server rejected the context, forced compaction")
-            return ContextBuildResult(self.build(messages))
+            return ContextBuildResult(self.build(messages), eviction=new_eviction)
         except ContextCompactionRequired:
             recent = select_recent_messages(messages, min(
                 self._budget.keep_recent_tokens,
@@ -348,7 +382,9 @@ class ContextManager:
                     ),
                     tokens_before=self._estimate(messages),
                 )
-                return ContextBuildResult(compacted_messages, compaction)
+                return ContextBuildResult(
+                    compacted_messages, compaction, eviction=new_eviction
+                )
 
             recent_conversation = [
                 message for message in recent if message.role != "system"
@@ -394,7 +430,77 @@ class ContextManager:
                 compacted_messages = self.build(compacted_messages)
             except ContextCompactionRequired:
                 return ContextBuildResult(self.build_fallback(messages), fallback_used=True)
-            return ContextBuildResult(compacted_messages, compaction)
+            return ContextBuildResult(
+                compacted_messages, compaction, eviction=new_eviction
+            )
+
+    def _maybe_evict(
+        self,
+        original_messages: list[Message],
+        compactions: Sequence[CompactionRecord],
+        evictions: Sequence[EvictionRecord],
+    ) -> EvictionRecord | None:
+        """估算越过驱逐阈值时，一次性批量降级陈旧工具输出。
+
+        只在阈值边界触发：从最旧的完整工具输出开始逐条落盘并降级，
+        直到估算回到阈值内；本次未触发则不产生新记录，既有视图
+        保持逐字节稳定，前缀缓存只在边界推进那一刻断一次。
+        """
+
+        if not self._eviction_enabled or self._artifact_store is None:
+            return None
+        threshold = self._budget.compaction_threshold // 2
+        current_view = _apply_latest_compaction(
+            _apply_evictions(original_messages, evictions, self._artifact_store),
+            compactions,
+        )
+        if self._estimate(current_view) <= threshold:
+            return None
+        # 以完整历史坐标定位视图中仍完整存在的工具输出
+        original_index = {id(message): index for index, message in enumerate(original_messages)}
+        tool_items = [
+            (original_index[id(message)], message)
+            for message in current_view
+            if message.role == "tool" and id(message) in original_index
+        ]
+        protected = tool_items[-KEEP_RECENT_TOOL_OUTPUTS:] if KEEP_RECENT_TOOL_OUTPUTS else []
+        protected_ids = {index for index, _ in protected}
+        candidates = [
+            (index, message)
+            for index, message in tool_items
+            if index not in protected_ids
+            and not is_artifact_placeholder(message.content)
+        ]
+        if not candidates:
+            return None
+        tokens_before = self._estimate(current_view)
+        evicted: list[EvictedToolOutput] = []
+        for index, message in candidates:
+            artifact_id = self._artifact_store.save(
+                message.content,
+                session_id=self._session_id,
+                source_tool="tool_output",
+            )
+            evicted.append(EvictedToolOutput(index, artifact_id, len(message.content)))
+            trial = EvictionRecord(
+                before_message_index=index + 1,
+                evicted=tuple(evicted),
+                tokens_before=tokens_before,
+            )
+            trial_view = _apply_latest_compaction(
+                _apply_evictions(
+                    original_messages, [*evictions, trial], self._artifact_store
+                ),
+                compactions,
+            )
+            if self._estimate(trial_view) <= threshold:
+                return trial
+        # 全部候选降级仍未达阈值：返回已降级部分，剩余交给压缩处理
+        return EvictionRecord(
+            before_message_index=candidates[-1][0] + 1,
+            evicted=tuple(evicted),
+            tokens_before=tokens_before,
+        )
 
 
 def _apply_latest_compaction(
@@ -416,6 +522,53 @@ def _apply_latest_compaction(
     return system_messages + [
         Message(role="system", content=f"Conversation summary:\n{latest.summary}")
     ] + kept_messages
+
+
+def _apply_evictions(
+    messages: Sequence[Message],
+    evictions: Sequence[EvictionRecord],
+    store: ArtifactStore | None = None,
+) -> list[Message]:
+    """按驱逐记录把完整历史中的旧工具输出替换为占位符。
+
+    确定性视图变换：JSONL 原文永不改写，每次从完整历史和驱逐
+    明细回放出相同的降级视图。store 可用时占位符携带原文预览，
+    否则退化为仅含取回指引的简短占位符。
+    """
+
+    if not evictions:
+        return list(messages)
+    replaced: dict[int, EvictedToolOutput] = {}
+    for eviction in evictions:
+        for item in eviction.evicted:
+            replaced[item.message_index] = item
+    result: list[Message] = []
+    for index, message in enumerate(messages):
+        item = replaced.get(index)
+        if item is not None and message.role == "tool":
+            content = _eviction_placeholder(item, store)
+            result.append(replace(message, content=content))
+        else:
+            result.append(message)
+    return result
+
+
+def _eviction_placeholder(
+    item: EvictedToolOutput,
+    store: ArtifactStore | None,
+) -> str:
+    """生成驱逐占位符，store 可用时携带原文头尾预览。"""
+
+    if store is not None:
+        artifact = store.load(item.artifact_id)
+        if artifact is not None:
+            return artifact_placeholder(
+                item.artifact_id, item.original_chars, artifact.content
+            )
+    return (
+        f"[artifact {item.artifact_id}] Evicted tool output "
+        f"({item.original_chars} chars). Use read_artifact to retrieve."
+    )
 
 
 def _summary_source(

@@ -226,7 +226,6 @@ def test_sessions_are_stored_in_separate_files(tmp_path: Path) -> None:
     ("content", "expected_message"),
     [
         ("not-json", "is not valid JSON"),
-        ('{"type":"other"}', "is not a message record"),
         ('{"type":"message","role":"system","content":"x"}', "has an invalid role"),
         ('{"type":"message","role":"user","content":1}', "has invalid content"),
     ],
@@ -236,7 +235,7 @@ def test_invalid_records_raise_clear_errors(
     content: str,
     expected_message: str,
 ) -> None:
-    """测试损坏或不支持的记录不会被静默忽略。"""
+    """测试损坏的消息记录不会被静默忽略。"""
 
     store = SessionStore(tmp_path)
     session_id = str(uuid.uuid4())
@@ -246,6 +245,26 @@ def test_invalid_records_raise_clear_errors(
 
     with pytest.raises(SessionStoreError, match=expected_message):
         store.load_messages(session_id)
+
+
+def test_unknown_record_types_are_skipped_on_restore(tmp_path: Path) -> None:
+    """测试未知记录类型跳过不报错，消息恢复不受影响。"""
+
+    store = SessionStore(tmp_path)
+    session_id = str(uuid.uuid4())
+    path = tmp_path / ".epsilon" / "sessions" / f"{session_id}.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        '{"type":"message","role":"user","content":"问题"}\n'
+        '{"type":"other","payload":{}}\n'
+        '{"type":"message","role":"assistant","content":"回答"}\n',
+        encoding="utf-8",
+    )
+
+    assert store.load_messages(session_id) == [
+        Message(role="user", content="问题"),
+        Message(role="assistant", content="回答"),
+    ]
 
 
 def test_invalid_session_id_is_rejected(tmp_path: Path) -> None:

@@ -54,7 +54,8 @@ def _context(**overrides) -> CommandContext:
         "session": SimpleNamespace(
             session_id=None,
             mark_deleted=lambda: None,
-            get_messages=lambda: [], get_compactions=lambda: [], add_compaction=lambda r: True
+            get_messages=lambda: [], get_compactions=lambda: [], add_compaction=lambda r: True,
+            get_evictions=lambda: [], add_eviction=lambda r: True,
         ),
         "skill_manager": SimpleNamespace(
             list_skills=lambda: [], active_keys=lambda: set()
@@ -145,7 +146,8 @@ async def test_compact_command_persists_compaction() -> None:
         screen=screen,
         context_manager=SimpleNamespace(build_for_model_result=build),
         session=SimpleNamespace(
-            get_messages=lambda: [], get_compactions=lambda: [], add_compaction=added.append
+            get_messages=lambda: [], get_compactions=lambda: [], add_compaction=added.append,
+            get_evictions=lambda: [], add_eviction=lambda r: True,
         ),
     )
 

@@ -7,7 +7,7 @@ from typing import TextIO
 from .memory import Memory
 from .model import Message
 from .session_persistence import SessionPersistenceQueue
-from .session_store import CompactionRecord, SessionStore
+from .session_store import CompactionRecord, EvictionRecord, SessionStore
 
 
 class Session:
@@ -26,6 +26,9 @@ class Session:
         self._compactions: list[CompactionRecord] = []
         self._transient_compactions: list[CompactionRecord] = []
         self._compaction_persistence_degraded = False
+        self._evictions: list[EvictionRecord] = []
+        self._transient_evictions: list[EvictionRecord] = []
+        self._eviction_persistence_degraded = False
         self._deleted = False
         self._persistence = SessionPersistenceQueue(
             lambda message: self._store.append_message(self.session_id, message),
@@ -56,6 +59,7 @@ class Session:
             for message in [*messages, *pending_messages]:
                 session._add_to_memory(message)
             session._compactions = session._store.load_compactions(session.session_id)
+            session._evictions = session._store.load_evictions(session.session_id)
             return session
         except BaseException:
             session.close()
@@ -98,6 +102,27 @@ class Session:
         self._compactions.append(compaction)
         return True
 
+    def get_evictions(self) -> list[EvictionRecord]:
+        """返回当前会话的驱逐记录副本"""
+
+        return [*self._evictions, *self._transient_evictions]
+
+    def add_eviction(self, eviction: EvictionRecord) -> bool:
+        """持久化驱逐记录，失败时仅保留当前进程内状态。"""
+
+        if not self._persistence.flush():
+            self._transient_evictions.append(eviction)
+            self._eviction_persistence_degraded = True
+            return False
+        try:
+            self._store.append_eviction(self.session_id, eviction)
+        except OSError:
+            self._transient_evictions.append(eviction)
+            self._eviction_persistence_degraded = True
+            return False
+        self._evictions.append(eviction)
+        return True
+
     def flush_persistence(self) -> bool:
         """等待当前消息队列写入完成并返回持久化状态"""
 
@@ -128,7 +153,11 @@ class Session:
     def persistence_degraded(self) -> bool:
         """返回当前会话是否出现持久化降级"""
 
-        return self._persistence.degraded or self._compaction_persistence_degraded
+        return (
+            self._persistence.degraded
+            or self._compaction_persistence_degraded
+            or self._eviction_persistence_degraded
+        )
 
     def _append_message(self, message: Message) -> None:
         """先更新运行时记忆，再交给后台队列持久化"""

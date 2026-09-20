@@ -163,8 +163,11 @@ async def test_run_chat_registers_and_closes_mcp_provider(
     class CapturingAgentLoop:
         """记录应用层注册后的模型工具定义。"""
 
-        def __init__(self, client, tool_manager, max_tool_rounds=None) -> None:
+        def __init__(self, client, tool_manager, max_tool_rounds=None, **kwargs) -> None:
             captured["tools"] = tool_manager.model_tools()
+
+        def set_artifact_session(self, session_id) -> None:
+            pass
 
     provider = FakeProvider()
     monkeypatch.setattr(ui, "ChatScreen", FakeScreen)

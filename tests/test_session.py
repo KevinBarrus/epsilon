@@ -3,10 +3,17 @@ from pathlib import Path
 
 import pytest
 
-from core.context import ContextBudget, ContextManager
+from core.artifacts import ArtifactStore, is_artifact_placeholder
+from core.context import ContextBudget, ContextManager, _apply_evictions
 from core.model import Message, ToolCall
 from core.session import Session
-from core.session_store import CompactionRecord, SessionStore, SessionStoreError
+from core.session_store import (
+    CompactionRecord,
+    EvictedToolOutput,
+    EvictionRecord,
+    SessionStore,
+    SessionStoreError,
+)
 
 
 def test_new_sessions_have_unique_ids(tmp_path: Path) -> None:
@@ -346,3 +353,48 @@ async def test_restore_keeps_file_operation_sections_in_context(tmp_path: Path) 
     summary = restored_result.messages[0].content
     assert "<read-files>\n- src/app.py\n</read-files>" in summary
     assert "<modified-files>\n- src/app.py\n</modified-files>" in summary
+
+
+def test_session_add_eviction_updates_runtime_and_store(tmp_path: Path) -> None:
+    """测试追加驱逐记录时同步更新运行时状态和 JSONL"""
+
+    session = Session(tmp_path)
+    eviction = EvictionRecord(
+        before_message_index=1,
+        evicted=(EvictedToolOutput(0, "abcdef1234567890", 500),),
+        tokens_before=800,
+    )
+
+    session.add_eviction(eviction)
+    assert session.flush_persistence()
+
+    assert session.get_evictions() == [eviction]
+    assert SessionStore(tmp_path).load_evictions(session.session_id) == [eviction]
+
+
+def test_restore_rebuilds_identical_eviction_view(tmp_path: Path) -> None:
+    """测试驱逐记录持久化后，恢复会话可以重建相同降级视图。"""
+
+    store = ArtifactStore(tmp_path / "artifacts")
+    content = "y" * 9_000
+    artifact_id = store.save(content, session_id="s-1", source_tool="run_command")
+    session = Session(tmp_path)
+    session.add_message(Message(role="tool", content=content, tool_call_id="c-1"))
+    session.add_eviction(
+        EvictionRecord(
+            before_message_index=1,
+            evicted=(EvictedToolOutput(0, artifact_id, len(content)),),
+            tokens_before=2_000,
+        )
+    )
+    assert session.flush_persistence()
+    before = _apply_evictions(session.get_messages(), session.get_evictions(), store)
+    session.close()
+
+    restored = Session.restore(tmp_path, session.session_id)
+    after = _apply_evictions(restored.get_messages(), restored.get_evictions(), store)
+
+    assert [message.content for message in after] == [
+        message.content for message in before
+    ]
+    assert is_artifact_placeholder(after[0].content)

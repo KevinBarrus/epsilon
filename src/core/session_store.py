@@ -36,6 +36,29 @@ class CompactionRecord:
     tokens_before: int
 
 
+
+@dataclass(frozen=True)
+class EvictedToolOutput:
+    """记录一条被降级为占位符的工具结果及其取回 id。"""
+
+    message_index: int
+    artifact_id: str
+    original_chars: int
+
+
+@dataclass(frozen=True)
+class EvictionRecord:
+    """记录一次陈旧工具输出批量驱逐的边界与降级明细。
+
+    驱逐是构建模型上下文时的视图变换：JSONL 原文永不改写，
+    每次按 before_message_index 与 evicted 明细确定性回放出降级视图。
+    """
+
+    before_message_index: int
+    evicted: tuple[EvictedToolOutput, ...]
+    tokens_before: int
+
+
 class SessionStore:
     """将一个工作区中的会话消息追加或读取为 JSONL。"""
 
@@ -136,12 +159,16 @@ class SessionStore:
         self._append_record(session_id, record)
 
     def load_messages(self, session_id: str) -> list[Message]:
-        """按文件顺序读取指定会话的全部消息。"""
+        """按文件顺序读取指定会话的全部消息。
+
+        非 message 记录类型（compaction、eviction 及未来新增或未知的
+        类型）一律跳过，保证旧版本会话文件可恢复。
+        """
 
         session_path = self._session_path(session_id)
         messages: list[Message] = []
         for line_number, record in self._read_records(session_path):
-            if isinstance(record, dict) and record.get("type") == "compaction":
+            if isinstance(record, dict) and record.get("type") != "message":
                 continue
             messages.append(self._message_from_record(record, line_number))
         return messages
@@ -155,6 +182,35 @@ class SessionStore:
             if isinstance(record, dict) and record.get("type") == "compaction":
                 compactions.append(self._compaction_from_record(record, line_number))
         return compactions
+
+    def append_eviction(self, session_id: str, eviction: EvictionRecord) -> None:
+        """将一次陈旧输出驱逐记录追加到指定会话的 JSONL 文件。"""
+
+        record = {
+            "type": "eviction",
+            "before_message_index": eviction.before_message_index,
+            "evicted": [
+                {
+                    "message_index": item.message_index,
+                    "artifact_id": item.artifact_id,
+                    "original_chars": item.original_chars,
+                }
+                for item in eviction.evicted
+            ],
+            "tokens_before": eviction.tokens_before,
+        }
+        self._append_record(session_id, record)
+
+    def load_evictions(self, session_id: str) -> list[EvictionRecord]:
+        """按文件顺序读取指定会话的驱逐记录。"""
+
+        session_path = self._session_path(session_id)
+        evictions: list[EvictionRecord] = []
+        for line_number, record in self._read_records(session_path):
+            if isinstance(record, dict) and record.get("type") == "eviction":
+                evictions.append(self._eviction_from_record(record, line_number))
+        return evictions
+
 
     def list_sessions(self) -> list[SessionSummary]:
         """读取工作区中的会话摘要并按更新时间倒序排列"""
@@ -208,7 +264,7 @@ class SessionStore:
                         "line {line_number} is not valid JSON"
                     ) from exc
 
-                if isinstance(record, dict) and record.get("type") == "compaction":
+                if isinstance(record, dict) and record.get("type") != "message":
                     continue
                 message = self._message_from_record(record, line_number)
                 if message.role == "user":
@@ -407,6 +463,49 @@ class SessionStore:
         return CompactionRecord(
             summary=summary,
             first_kept_message_index=first_kept_message_index,
+            tokens_before=tokens_before,
+        )
+
+    @staticmethod
+    def _eviction_from_record(
+        record: object,
+        line_number: int,
+    ) -> EvictionRecord:
+        """校验驱逐记录并转换为 EvictionRecord。"""
+
+        if not isinstance(record, dict) or record.get("type") != "eviction":
+            raise SessionStoreError(f"line {line_number} is not an eviction record")
+
+        before_message_index = record.get("before_message_index")
+        raw_evicted = record.get("evicted")
+        tokens_before = record.get("tokens_before")
+        if (
+            not isinstance(before_message_index, int)
+            or before_message_index < 0
+            or not isinstance(raw_evicted, list)
+            or not isinstance(tokens_before, int)
+            or tokens_before < 0
+        ):
+            raise SessionStoreError(f"line {line_number} has an invalid eviction record")
+        evicted: list[EvictedToolOutput] = []
+        for item in raw_evicted:
+            if not isinstance(item, dict):
+                raise SessionStoreError(f"line {line_number} has an invalid eviction record")
+            message_index = item.get("message_index")
+            artifact_id = item.get("artifact_id")
+            original_chars = item.get("original_chars")
+            if (
+                not isinstance(message_index, int)
+                or message_index < 0
+                or not isinstance(artifact_id, str)
+                or not isinstance(original_chars, int)
+                or original_chars < 0
+            ):
+                raise SessionStoreError(f"line {line_number} has an invalid eviction record")
+            evicted.append(EvictedToolOutput(message_index, artifact_id, original_chars))
+        return EvictionRecord(
+            before_message_index=before_message_index,
+            evicted=tuple(evicted),
             tokens_before=tokens_before,
         )
 

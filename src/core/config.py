@@ -47,6 +47,11 @@ class Settings:
     stream_usage: bool = True
     max_tool_rounds: int | None = None
     price: ModelPrice | None = None
+    # 工具输出防火墙：超阈值输出原文落盘并注入有界占位符（默认开）
+    firewall_enabled: bool = True
+    # 陈旧工具输出批量驱逐：估算越过阈值时一次性降级为 artifact 占位符
+    # （默认关，评测 B' 档与生产显式开启）
+    eviction_enabled: bool = False
 
     def __post_init__(self) -> None:
         """统一超时默认值并校验直接构造的配置。"""
@@ -188,6 +193,16 @@ def _settings_from_data(data: dict) -> Settings:
         True,
         "model.stream_usage",
     )
+    firewall_enabled = _optional_bool(
+        model.get("firewall_enabled"),
+        True,
+        "model.firewall_enabled",
+    )
+    eviction_enabled = _optional_bool(
+        model.get("eviction_enabled"),
+        False,
+        "model.eviction_enabled",
+    )
     max_tool_rounds = _optional_int(
         model.get("max_tool_rounds"),
         None,
@@ -218,6 +233,8 @@ def _settings_from_data(data: dict) -> Settings:
         stream_usage=stream_usage,
         max_tool_rounds=max_tool_rounds,
         price=price,
+        firewall_enabled=firewall_enabled,
+        eviction_enabled=eviction_enabled,
     )
 
 

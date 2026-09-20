@@ -11,10 +11,10 @@ from .agent_loop import (
     RetryEvent,
     ToolExecutionEvent,
 )
+from .artifacts import ArtifactStore, create_read_artifact_tool
 from .errors import AgentError
 from .screen import ChatScreen
 from .status import StatusInfo
-from .agent_loop import ToolExecutionEvent
 from .model import Message, ModelClient, TextDelta, ToolCallEvent, UsageEvent
 from .commands import (
     CommandContext,
@@ -186,6 +186,7 @@ async def run_chat(
         # 用户消息必须先进入会话，模型才能在本轮请求中看到它
         session.add_user_message(prompt)
         new_compactions = []
+        new_evictions = []
         fallback_used = False
 
         async def build_context(messages, force_compaction: bool):
@@ -196,10 +197,13 @@ async def run_chat(
                 client_holder.client,
                 messages,
                 [*session.get_compactions(), *new_compactions],
+                evictions=[*session.get_evictions(), *new_evictions],
                 force_compaction=force_compaction,
             )
             if result.compaction is not None:
                 new_compactions.append(result.compaction)
+            if result.eviction is not None:
+                new_evictions.append(result.eviction)
             fallback_used = fallback_used or result.fallback_used
             return result
 
@@ -297,6 +301,8 @@ async def run_chat(
             _persist_new_messages(session, cancelled_messages)
             if not _persist_compactions(session, new_compactions):
                 screen.set_status_message("Session persistence degraded")
+            if not _persist_evictions(session, new_evictions):
+                screen.set_status_message("Session persistence degraded")
             response = "".join(response_parts)
             if response and not any(
                 message.role == "assistant"
@@ -339,6 +345,8 @@ async def run_chat(
                 session.add_assistant_message(TOOL_LIMIT_NOTICE)
                 screen.add_entry("assistant", TOOL_LIMIT_NOTICE)
             if not _persist_compactions(session, new_compactions):
+                screen.set_status_message("Session persistence degraded")
+            if not _persist_evictions(session, new_evictions):
                 screen.set_status_message("Session persistence degraded")
             if fallback_used:
                 screen.add_entry(
@@ -408,6 +416,7 @@ async def run_chat(
     tool_manager = ToolManager(
         permission_manager=PermissionManager(screen.request_approval),
     )
+    artifact_store = ArtifactStore.for_workspace(session_workspace)
     for create_tool in (
         create_read_file_tool,
         create_list_files_tool,
@@ -417,6 +426,7 @@ async def run_chat(
         create_run_command_tool,
     ):
         tool_manager.register_local(*create_tool(session_workspace))
+    tool_manager.register_local(*create_read_artifact_tool(artifact_store))
     if mcp_provider is not None:
         try:
             await tool_manager.register_mcp_provider(mcp_provider)
@@ -432,12 +442,18 @@ async def run_chat(
         },
         model_tools=tool_manager.model_tools(),
         system_prompt=AGENT_SYSTEM_PROMPT,
+        artifact_store=artifact_store,
+        eviction_enabled=settings.eviction_enabled,
     )
     project_instructions = load_project_instructions(session_workspace)
     context_manager.set_project_instructions(project_instructions.content)
     context_manager.set_model_name(settings.model_name)
     agent_loop = agent_loop or AgentLoop(
-        client, tool_manager, max_tool_rounds=max_tool_rounds
+        client,
+        tool_manager,
+        max_tool_rounds=max_tool_rounds,
+        artifact_store=artifact_store,
+        firewall_enabled=settings.firewall_enabled,
     )
 
     try:
@@ -450,6 +466,9 @@ async def run_chat(
         if mcp_provider is not None:
             await mcp_provider.close()
         raise
+
+    agent_loop.set_artifact_session(session.session_id)
+    context_manager.set_session_id(session.session_id)
     try:
         history = session.get_messages()
         screen.add_history_entries(
@@ -505,6 +524,15 @@ def _persist_compactions(session: Session, compactions) -> bool:
     persisted = True
     for compaction in compactions:
         persisted = session.add_compaction(compaction) and persisted
+    return persisted
+
+
+def _persist_evictions(session: Session, evictions) -> bool:
+    """在本轮消息写入后追加对应驱逐记录并返回持久化状态。"""
+
+    persisted = True
+    for eviction in evictions:
+        persisted = session.add_eviction(eviction) and persisted
     return persisted
 
 

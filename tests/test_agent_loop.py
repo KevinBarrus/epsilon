@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 from collections.abc import AsyncIterator, Sequence
 
 import pytest
@@ -11,6 +12,7 @@ from core.agent_loop import (
     ToolBatchEvent,
     ToolExecutionEvent,
 )
+from core.artifacts import ArtifactStore, is_artifact_placeholder
 from core.end_policy import (
     FAILED_VERIFICATION_REMINDER,
     VERIFICATION_REMINDER,
@@ -38,6 +40,7 @@ from core.tools import (
     ToolManager,
     create_read_file_tool,
 )
+from core.tools.output_limits import limit_tool_output
 
 
 class FakeModelClient:
@@ -1296,3 +1299,42 @@ async def test_agent_loop_serialized_request_prefix_is_byte_stable(
     first_bytes = to_wire_bytes(client.requests[0])
     second_bytes = to_wire_bytes(client.requests[1])
     assert second_bytes.startswith(first_bytes)
+
+
+def test_tool_result_message_applies_output_firewall(tmp_path) -> None:
+    """测试超阈值工具输出落盘定型为 artifact 占位符。"""
+
+    store = ArtifactStore(tmp_path / "artifacts")
+    content = "a" * 9_000
+
+    message = agent_loop._tool_result_message(
+        ToolCall("c1", "run_command", {}),
+        ToolResult("c1", content),
+        artifact_store=store,
+        session_id="s-1",
+    )
+
+    assert is_artifact_placeholder(message.content)
+    match = re.search(r"\[artifact ([0-9a-f]+)\]", message.content)
+    assert match is not None
+    loaded = store.load(match.group(1))
+    assert loaded is not None
+    assert loaded.content == content
+
+
+def test_tool_result_message_skips_firewall_when_disabled(tmp_path) -> None:
+    """测试关闭 firewall 时走原有工具输出硬截断路径。"""
+
+    store = ArtifactStore(tmp_path / "artifacts")
+    content = "a" * 20_000
+
+    message = agent_loop._tool_result_message(
+        ToolCall("c1", "run_command", {}),
+        ToolResult("c1", content),
+        artifact_store=store,
+        session_id="s-1",
+        firewall_enabled=False,
+    )
+
+    assert message.content == limit_tool_output(content)
+    assert not is_artifact_placeholder(message.content)
