@@ -40,6 +40,10 @@ def _result_to_record(result: EvaluationResult) -> dict[str, object]:
         "source": result.source,
         "evaluation_group": result.evaluation_group,
         "base_commit": result.base_commit,
+        "model_name": result.model_name,
+        "thinking": result.thinking,
+        "firewall_enabled": result.firewall_enabled,
+        "eviction_enabled": result.eviction_enabled,
         "changed_files": list(result.changed_files),
         "passed": result.passed,
         "duration_ms": result.duration_ms,
@@ -94,6 +98,10 @@ def _result_from_record(record: object) -> EvaluationResult:
         source=_optional_string(record.get("source")),
         evaluation_group=_optional_string(record.get("evaluation_group")),
         base_commit=_optional_string(record.get("base_commit")),
+        model_name=_optional_string(record.get("model_name")),
+        thinking=_optional_string(record.get("thinking")),
+        firewall_enabled=_optional_bool(record.get("firewall_enabled")),
+        eviction_enabled=_optional_bool(record.get("eviction_enabled")),
         changed_files=_string_tuple(record.get("changed_files", [])),
         model_requests=_required_int(record, "model_requests"),
         tool_rounds=_required_int_or_default(record, "tool_rounds", 0),
@@ -174,6 +182,14 @@ def _optional_string(value: object) -> str | None:
     if value is None or isinstance(value, str):
         return value
     raise ValueError("评测结果可选字符串字段无效")
+
+
+def _optional_bool(value: object) -> bool | None:
+    """读取允许为空的布尔字段。"""
+
+    if value is None or isinstance(value, bool):
+        return value
+    raise ValueError("评测结果可选布尔字段无效")
 
 
 def _string_tuple(value: object) -> tuple[str, ...]:

@@ -91,3 +91,27 @@ def test_result_storage_preserves_verification_classification(tmp_path) -> None:
     assert restored.agent_execution_environment == "official-instance-container"
     assert restored.agent_verification_status == "failed"
     assert restored.official_harness_status == "environment-error"
+
+
+def test_result_storage_preserves_model_configuration(tmp_path) -> None:
+    """测试 JSONL 往返不会丢失模型与开关配置。"""
+
+    path = tmp_path / "results.jsonl"
+    append_result(
+        path,
+        EvaluationResult(
+            scenario="task",
+            duration_ms=1,
+            model_name="deepseek-v4-pro",
+            thinking="high",
+            firewall_enabled=True,
+            eviction_enabled=False,
+        ),
+    )
+
+    restored = load_results(path)[0]
+
+    assert restored.model_name == "deepseek-v4-pro"
+    assert restored.thinking == "high"
+    assert restored.firewall_enabled is True
+    assert restored.eviction_enabled is False

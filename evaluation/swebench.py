@@ -8,11 +8,12 @@ import subprocess
 import tempfile
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from time import perf_counter
 
 from core.agent_loop import AgentLoop, AgentRunResult
+from core.artifacts import ArtifactStore
 from core.config import load_settings
 from core.context import ContextBudget, ContextManager, DEFAULT_CONTEXT_BUDGET, estimate_context_tokens
 from core.model import Message, ModelClientError
@@ -154,6 +155,10 @@ async def run_task(
     harness_python: str,
     compact: bool = False,
     max_tool_rounds: int | None = None,
+    *,
+    thinking: str = "high",
+    firewall_enabled: bool = True,
+    eviction_enabled: bool = False,
 ) -> EvaluationResult:
     """在无 Git 历史工作区中执行 Agent，并使用官方 Harness 验证补丁。"""
 
@@ -162,6 +167,7 @@ async def run_task(
     client: TimedModelClient | None = None
     agent_result: AgentRunResult | None = None
     agent_execution_environment: str | None = None
+    model_name: str | None = None
     persistence_ok = False
     stage = "repository"
     changed_files: tuple[str, ...] = ()
@@ -178,12 +184,16 @@ async def run_task(
             agent_execution_environment = "official-instance-container"
             stage = "agent-loop"
             settings = load_settings()
+            model_name = settings.model_name
             client = TimedModelClient(OpenAICompatibleClient(settings))
+            artifact_store = ArtifactStore.for_workspace(prepared.session_root)
             manager = _tool_manager(
                 prepared.workspace,
                 SwebenchContainerExecutor(container),
+                artifact_store,
             )
             session = Session(prepared.session_root)
+            artifact_store.set_session_id(session.session_id)
             effective_tool_rounds = (
                 max_tool_rounds
                 if max_tool_rounds is not None
@@ -192,7 +202,15 @@ async def run_task(
             prompt = _agent_prompt(task, prepared.workspace)
             session.add_user_message(prompt)
             events.append(message_to_record(Message(role="user", content=prompt)))
-            events.append(_configuration_record(effective_tool_rounds))
+            events.append(
+                _configuration_record(
+                    effective_tool_rounds,
+                    model_name,
+                    thinking,
+                    firewall_enabled,
+                    eviction_enabled,
+                )
+            )
 
             async def collect_event(event: object) -> None:
                 """保存完整模型和工具轨迹，供结果报告复核。"""
@@ -203,6 +221,9 @@ async def run_task(
                 client,
                 manager,
                 max_tool_rounds=effective_tool_rounds,
+                thinking_level=thinking,
+                artifact_store=artifact_store,
+                firewall_enabled=firewall_enabled,
                 end_policy=WriteVerificationPolicy(),
             )
             context_builder = _context_builder(
@@ -210,8 +231,10 @@ async def run_task(
                 client,
                 compact,
                 events,
-                settings.model_name,
+                model_name,
                 manager,
+                artifact_store=artifact_store,
+                eviction_enabled=eviction_enabled,
             )
             agent_result = await agent.run(
                 session.get_messages(),
@@ -252,28 +275,34 @@ async def run_task(
                 "压缩专项没有实际触发上下文压缩",
             ),
         )
-        return _result(
-            task,
-            started_at,
-            client,
-            events,
-            assertions,
-            changed_files,
-            compact,
-            not persistence_ok,
-            verification.environment_error,
-            error_stage=(
-                "official-harness-environment"
-                if verification.environment_error is not None
-                else "official-harness"
-                if not verification.passed
-                else None
-            ),
-            agent_execution_environment=agent_execution_environment,
-            agent_verification_status=_local_verification_status(agent_result),
-            official_harness_status=_official_harness_status(verification),
-            tool_rounds=agent_result.tool_rounds,
-            stop_reason=agent_result.stop_reason,
+        return _mark_environment_failure_if_no_tool_rounds(
+            _result(
+                task,
+                started_at,
+                client,
+                events,
+                assertions,
+                changed_files,
+                compact,
+                not persistence_ok,
+                verification.environment_error,
+                error_stage=(
+                    "official-harness-environment"
+                    if verification.environment_error is not None
+                    else "official-harness"
+                    if not verification.passed
+                    else None
+                ),
+                agent_execution_environment=agent_execution_environment,
+                agent_verification_status=_local_verification_status(agent_result),
+                official_harness_status=_official_harness_status(verification),
+                tool_rounds=agent_result.tool_rounds,
+                stop_reason=agent_result.stop_reason,
+                model_name=model_name,
+                thinking=thinking,
+                firewall_enabled=firewall_enabled,
+                eviction_enabled=eviction_enabled,
+            )
         )
     except Exception as exc:
         if isinstance(exc, ModelClientError):
@@ -291,30 +320,36 @@ async def run_task(
             if agent_result is not None
             else None
         )
-        return _result(
-            task,
-            started_at,
-            client,
-            events,
-            (
-                EvaluationAssertion(
-                    "patch-generation"
-                    if stage == "patch-generation"
-                    else "evaluation-error",
-                    False,
-                    f"{type(exc).__name__}: {exc}",
+        return _mark_environment_failure_if_no_tool_rounds(
+            _result(
+                task,
+                started_at,
+                client,
+                events,
+                (
+                    EvaluationAssertion(
+                        "patch-generation"
+                        if stage == "patch-generation"
+                        else "evaluation-error",
+                        False,
+                        f"{type(exc).__name__}: {exc}",
+                    ),
                 ),
-            ),
-            changed_files,
-            compact,
-            agent_result is not None and not persistence_ok,
-            f"{stage}: {type(exc).__name__}: {exc}",
-            error_category,
-            error_stage=stage,
-            agent_execution_environment=agent_execution_environment,
-            agent_verification_status=agent_verification_status,
-            tool_rounds=agent_result.tool_rounds if agent_result is not None else 0,
-            stop_reason=agent_result.stop_reason if agent_result is not None else None,
+                changed_files,
+                compact,
+                agent_result is not None and not persistence_ok,
+                f"{stage}: {type(exc).__name__}: {exc}",
+                error_category,
+                error_stage=stage,
+                agent_execution_environment=agent_execution_environment,
+                agent_verification_status=agent_verification_status,
+                tool_rounds=agent_result.tool_rounds if agent_result is not None else 0,
+                stop_reason=agent_result.stop_reason if agent_result is not None else None,
+                model_name=model_name,
+                thinking=thinking,
+                firewall_enabled=firewall_enabled,
+                eviction_enabled=eviction_enabled,
+            )
         )
     finally:
         # 显式关闭 HTTP 客户端，避免事件循环关闭后 httpx 后台任务报错
@@ -322,6 +357,23 @@ async def run_task(
             close = getattr(client, "close", None)
             if close is not None:
                 await close()
+
+
+def _mark_environment_failure_if_no_tool_rounds(
+    result: EvaluationResult,
+) -> EvaluationResult:
+    """工具回合为 0 的运行视为环境失败，不混入模型能力统计。"""
+
+    if result.tool_rounds != 0:
+        return result
+    assertion = EvaluationAssertion(
+        "environment", False, "Agent 未产生任何工具回合，判定为环境失败"
+    )
+    return replace(
+        result,
+        error_category="environment",
+        assertions=(*result.assertions, assertion),
+    )
 
 
 async def precheck_task(
@@ -533,6 +585,7 @@ def _harness_diagnostic(result_root: Path, run_id: str, instance_id: str) -> str
 def _tool_manager(
     workspace: Path,
     command_executor: CommandExecutor | None = None,
+    artifact_store: ArtifactStore | None = None,
 ) -> ToolManager:
     """创建真实评测使用的全量本地工具集。"""
 
@@ -542,8 +595,8 @@ def _tool_manager(
         return ApprovalResult(ApprovalDecision.ALLOW_ONCE)
 
     manager = ToolManager(permission_manager=PermissionManager(approve_all))
+    manager.register_local(*create_read_file_tool(workspace, artifact_store))
     for factory in (
-        create_read_file_tool,
         create_list_files_tool,
         create_search_files_tool,
         create_write_file_tool,
@@ -567,8 +620,10 @@ def _context_builder(
     events: list[dict[str, object]],
     model_name: str,
     tool_manager: ToolManager,
+    artifact_store: ArtifactStore | None = None,
+    eviction_enabled: bool = False,
 ):
-    """复用生产上下文构建逻辑，并在专项中同步压缩记录。"""
+    """复用生产上下文构建逻辑，并在专项中同步压缩与驱逐记录。"""
 
     budget = ContextBudget(16_000, 4_000, 8_000) if compact else DEFAULT_CONTEXT_BUDGET
     manager = ContextManager(
@@ -580,18 +635,28 @@ def _context_builder(
         },
         model_tools=tool_manager.model_tools(),
         system_prompt=load_prompt("agent"),
+        artifact_store=artifact_store,
+        eviction_enabled=eviction_enabled,
     )
     manager.set_model_name(model_name)
+    manager.set_session_id(session.session_id)
 
     async def build_context(messages: Sequence[Message], force_compaction: bool):
-        """构建低预算模型上下文，并将新摘要写入评测 Session。"""
+        """构建低预算模型上下文，并将新摘要与驱逐写入评测 Session。"""
 
         result = await manager.build_for_model_result(
-            client, messages, session.get_compactions(), force_compaction
+            client,
+            messages,
+            session.get_compactions(),
+            force_compaction,
+            evictions=session.get_evictions(),
         )
         if result.compaction is not None:
             session.add_compaction(result.compaction)
             events.append({"type": "compaction"})
+        if result.eviction is not None:
+            session.add_eviction(result.eviction)
+            events.append({"type": "eviction"})
         return result
 
     return build_context
@@ -636,12 +701,22 @@ def _project_guide_paths(workspace: Path) -> tuple[str, ...]:
     return tuple(paths)
 
 
-def _configuration_record(max_tool_rounds: int) -> dict[str, object]:
+def _configuration_record(
+    max_tool_rounds: int,
+    model_name: str,
+    thinking: str,
+    firewall_enabled: bool,
+    eviction_enabled: bool,
+) -> dict[str, object]:
     """生成可用于复现实验条件的评测配置记录。"""
 
     return {
         "type": "configuration",
         "max_tool_rounds": max_tool_rounds,
+        "model_name": model_name,
+        "thinking": thinking,
+        "firewall_enabled": firewall_enabled,
+        "eviction_enabled": eviction_enabled,
         "swebench_environment_contract": SWEBENCH_ENVIRONMENT_CONTRACT_VERSION,
     }
 
@@ -709,6 +784,10 @@ def _result(
     official_harness_status: str | None = None,
     tool_rounds: int = 0,
     stop_reason: str | None = None,
+    model_name: str | None = None,
+    thinking: str | None = None,
+    firewall_enabled: bool | None = None,
+    eviction_enabled: bool | None = None,
 ):
     """将运行统计汇总成统一评测结果。"""
 
@@ -759,6 +838,10 @@ def _result(
         model_request_durations_ms=tuple(client.durations_ms) if client else (),
         events=tuple(events),
         assertions=assertions,
+        model_name=model_name,
+        thinking=thinking,
+        firewall_enabled=firewall_enabled,
+        eviction_enabled=eviction_enabled,
     )
 
 
@@ -819,6 +902,35 @@ def _dataset_name(source: str) -> str:
         raise ValueError(f"不支持的 SWE-bench 来源：{source}") from exc
 
 
+async def _run_task_with_environment_retry(
+    task: SwebenchTask,
+    result_root: Path,
+    harness_python: str,
+    *,
+    compact: bool,
+    max_tool_rounds: int,
+    thinking: str,
+    firewall_enabled: bool,
+    eviction_enabled: bool,
+) -> EvaluationResult:
+    """工具回合为 0 时原地重跑一次；仍失败则归入环境分组，不计入通过率分母。"""
+
+    options = {
+        "compact": compact,
+        "max_tool_rounds": max_tool_rounds,
+        "thinking": thinking,
+        "firewall_enabled": firewall_enabled,
+        "eviction_enabled": eviction_enabled,
+    }
+    result = await run_task(task, result_root, harness_python, **options)
+    if result.tool_rounds > 0:
+        return result
+    retry = await run_task(task, result_root, harness_python, **options)
+    if retry.tool_rounds > 0:
+        return retry
+    return replace(retry, evaluation_group="environment")
+
+
 def main() -> int:
     """处理真实 SWE-bench 评测的命令行参数。"""
 
@@ -836,6 +948,9 @@ def main() -> int:
         default=DEFAULT_SWEBENCH_MAX_TOOL_ROUNDS,
         help="本次评测的工具轮次上限，默认 40",
     )
+    parser.add_argument("--thinking", default="high", help="思考强度档位，默认 high")
+    parser.add_argument("--no-firewall", action="store_true", help="关闭工具输出防火墙")
+    parser.add_argument("--eviction", action="store_true", help="开启陈旧工具输出批量驱逐")
     args = parser.parse_args()
     if not args.confirm:
         print("真实评测会发起模型请求，请添加 --confirm 后运行")
@@ -848,18 +963,23 @@ def main() -> int:
     output.write_text("", encoding="utf-8")
     results = []
     for task in tasks:
-        runner = (
-            precheck_task(task, args.result_root, args.harness_python)
-            if args.precheck
-            else run_task(
-                task,
-                args.result_root,
-                args.harness_python,
-                args.compact,
-                args.max_tool_rounds,
+        if args.precheck:
+            result = asyncio.run(
+                precheck_task(task, args.result_root, args.harness_python)
             )
-        )
-        result = asyncio.run(runner)
+        else:
+            result = asyncio.run(
+                _run_task_with_environment_retry(
+                    task,
+                    args.result_root,
+                    args.harness_python,
+                    compact=args.compact,
+                    max_tool_rounds=args.max_tool_rounds,
+                    thinking=args.thinking,
+                    firewall_enabled=not args.no_firewall,
+                    eviction_enabled=args.eviction,
+                )
+            )
         results.append(result)
         append_result(output, result)
     generate_report(args.result_root / "report.html", results)

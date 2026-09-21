@@ -8,12 +8,13 @@ from pathlib import Path
 
 import pytest
 
+from core.artifacts import ArtifactStore
 from core.model import ModelClientError
 from core.agent_loop import AgentRunResult
-from core.model import ToolCall, ToolResult
+from core.model import Message, ToolCall, ToolResult
 from core.session import Session
 from core.tools import CommandExecution, ToolManager
-from evaluation.models import EvaluationAssertion
+from evaluation.models import EvaluationAssertion, EvaluationResult
 from evaluation.swebench_workspace import EvaluationWorkspace
 from evaluation.swebench import _agent_prompt, _changed_files, _normalise_patch_paths, _project_guide_paths, create_patch, load_task
 from evaluation.swebench import _context_builder
@@ -26,9 +27,11 @@ from evaluation.swebench import (
     _configuration_record,
     _agent_end_record,
     _local_verification_status,
+    _mark_environment_failure_if_no_tool_rounds,
     _model_error_record,
     _official_harness_status,
     _result,
+    _run_task_with_environment_retry,
     _tool_manager,
     prepare_repository,
     verify_patch,
@@ -95,11 +98,15 @@ def test_agent_prompt_lists_existing_repository_guides_without_reading_content(
 
 
 def test_configuration_record_keeps_environment_contract_version() -> None:
-    """测试评测轨迹记录环境引导版本，便于复跑归因。"""
+    """测试评测轨迹记录可复现的模型与开关组合。"""
 
-    assert _configuration_record(40) == {
+    assert _configuration_record(40, "test-model", "high", True, False) == {
         "type": "configuration",
         "max_tool_rounds": 40,
+        "model_name": "test-model",
+        "thinking": "high",
+        "firewall_enabled": True,
+        "eviction_enabled": False,
         "swebench_environment_contract": SWEBENCH_ENVIRONMENT_CONTRACT_VERSION,
     }
 
@@ -560,3 +567,148 @@ async def test_patch_generation_failure_keeps_completed_agent_trace(
     assert result.official_harness_status is None
     assert result.assertions[0].name == "patch-generation"
     assert any(event["type"] == "agent_end" for event in result.events)
+
+
+def _bare_result(*, tool_rounds: int, group: str = "normal") -> EvaluationResult:
+    """构造只关心工具回合数的评测结果，用于环境失败判定测试。"""
+
+    return EvaluationResult(
+        scenario="task",
+        duration_ms=1,
+        evaluation_group=group,
+        tool_rounds=tool_rounds,
+    )
+
+
+def _simple_task() -> SwebenchTask:
+    """构造不带官方镜像的最小任务元数据。"""
+
+    return SwebenchTask("example__1", "example/repo", "base", "issue", "swebench-lite")
+
+
+def test_result_without_tool_rounds_is_marked_environment() -> None:
+    """测试工具回合为 0 的结果被标记为环境失败。"""
+
+    marked = _mark_environment_failure_if_no_tool_rounds(_bare_result(tool_rounds=0))
+
+    assert marked.error_category == "environment"
+    assert any(assertion.name == "environment" for assertion in marked.assertions)
+    assert not marked.passed
+
+
+def test_result_with_tool_rounds_is_left_unchanged() -> None:
+    """测试有工具回合的结果不被环境失败标记覆盖。"""
+
+    result = _bare_result(tool_rounds=3)
+
+    assert _mark_environment_failure_if_no_tool_rounds(result) is result
+
+
+@pytest.mark.asyncio
+async def test_environment_retry_prefers_successful_rerun(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """测试工具回合为 0 时原地重跑，并采用重跑成功的结果。"""
+
+    calls: list[dict[str, object]] = []
+
+    async def fake_run_task(*args, **kwargs) -> EvaluationResult:
+        calls.append(kwargs)
+        return _bare_result(tool_rounds=0 if len(calls) == 1 else 5)
+
+    monkeypatch.setattr("evaluation.swebench.run_task", fake_run_task)
+    result = await _run_task_with_environment_retry(
+        _simple_task(),
+        tmp_path,
+        "python",
+        compact=False,
+        max_tool_rounds=40,
+        thinking="low",
+        firewall_enabled=False,
+        eviction_enabled=True,
+    )
+
+    assert result.tool_rounds == 5
+    assert len(calls) == 2
+    assert calls[0] == calls[1]
+    assert calls[0]["thinking"] == "low"
+    assert calls[0]["firewall_enabled"] is False
+    assert calls[0]["eviction_enabled"] is True
+
+
+@pytest.mark.asyncio
+async def test_environment_retry_groups_persistent_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """测试重跑后仍无工具回合时归入环境分组，不计入通过率分母。"""
+
+    async def fake_run_task(*args, **kwargs) -> EvaluationResult:
+        return _bare_result(tool_rounds=0)
+
+    monkeypatch.setattr("evaluation.swebench.run_task", fake_run_task)
+    result = await _run_task_with_environment_retry(
+        _simple_task(),
+        tmp_path,
+        "python",
+        compact=False,
+        max_tool_rounds=40,
+        thinking="high",
+        firewall_enabled=True,
+        eviction_enabled=False,
+    )
+
+    assert result.evaluation_group == "environment"
+
+
+@pytest.mark.asyncio
+async def test_evaluation_tool_manager_reads_artifact_reference(tmp_path: Path) -> None:
+    """测试评测工具集能通过 artifact:// 取回落盘工具输出。"""
+
+    store = ArtifactStore.for_workspace(tmp_path)
+    store.set_session_id("s-1")
+    artifact_id = store.save(
+        "stored body\n", session_id="s-1", source_tool="run_command"
+    )
+    manager = _tool_manager(tmp_path, artifact_store=store)
+
+    result = await manager.execute(
+        ToolCall("call-1", "read_file", {"path": f"artifact://{artifact_id}"})
+    )
+
+    assert "stored body" in result.content
+
+
+@pytest.mark.asyncio
+async def test_evaluation_context_persists_eviction(tmp_path: Path) -> None:
+    """测试驱逐触发时会写入评测 Session 并留下事件记录。"""
+
+    session = Session(tmp_path)
+    store = ArtifactStore.for_workspace(tmp_path)
+    store.set_session_id(session.session_id)
+    events: list[dict[str, object]] = []
+    build_context = _context_builder(
+        session,
+        object(),  # type: ignore[arg-type]
+        False,
+        events,
+        "test-model",
+        ToolManager(),
+        artifact_store=store,
+        eviction_enabled=True,
+    )
+    content = "\n".join("x" * 40 for _ in range(200))
+    messages = [Message(role="tool", content=content) for _ in range(30)]
+
+    result = await build_context(messages, False)
+
+    assert result.eviction is not None
+    assert session.get_evictions()
+    assert any(event.get("type") == "eviction" for event in events)
+    artifact_id = result.eviction.evicted[0].artifact_id
+    assert store.load(artifact_id) is not None
+    assert any(
+        f"artifact://{artifact_id}" in message.content for message in result.messages
+    )
+    session.close()

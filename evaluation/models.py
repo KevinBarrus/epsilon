@@ -50,6 +50,10 @@ class EvaluationResult:
     source: str | None = None
     evaluation_group: str | None = None
     base_commit: str | None = None
+    model_name: str | None = None
+    thinking: str | None = None
+    firewall_enabled: bool | None = None
+    eviction_enabled: bool | None = None
     changed_files: tuple[str, ...] = ()
     model_requests: int = 0
     tool_rounds: int = 0
