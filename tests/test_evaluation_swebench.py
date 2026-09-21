@@ -712,3 +712,91 @@ async def test_evaluation_context_persists_eviction(tmp_path: Path) -> None:
         f"artifact://{artifact_id}" in message.content for message in result.messages
     )
     session.close()
+
+
+@pytest.mark.asyncio
+async def test_run_task_binds_artifact_store_to_agent_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """测试评测 AgentLoop 与 Artifact Store 使用同一会话，产物可按 id 取回。"""
+
+    baseline = tmp_path / "baseline"
+    workspace = tmp_path / "workspace"
+    session_root = tmp_path / "session"
+    for path in (baseline, workspace, session_root):
+        path.mkdir()
+    workspaces = iter(
+        (
+            EvaluationWorkspace(baseline, session_root),
+            EvaluationWorkspace(workspace, session_root),
+        )
+    )
+    captured: dict[str, object] = {}
+
+    class FakeContainer:
+        def __init__(self, image: str, container_workspace: Path) -> None:
+            pass
+
+        @asynccontextmanager
+        async def running(self):
+            yield "container-1"
+
+    class FakeAgentLoop:
+        def __init__(self, *args, **kwargs) -> None:
+            captured.update(kwargs)
+
+        async def run(self, *args, **kwargs) -> AgentRunResult:
+            store = captured["artifact_store"]
+            captured["artifact_id"] = store.save(
+                "stored body",
+                session_id=captured["session_id"],
+                source_tool="run_command",
+            )
+            return AgentRunResult((), "完成", stop_reason="completed", tool_rounds=1)
+
+    class FakeTimedClient:
+        requests: list = []
+        durations_ms: list[float] = []
+        total_actual_tokens = None
+        total_cached_tokens = None
+        cache_hit_rate = None
+
+        def __init__(self, client) -> None:
+            pass
+
+        async def close(self) -> None:
+            pass
+
+    task = SwebenchTask(
+        "example__1",
+        "example/repo",
+        "base",
+        "issue",
+        "swebench-lite",
+        "sweb.eval.example__1",
+    )
+    monkeypatch.setattr("evaluation.swebench.prepare_repository", lambda *args: tmp_path)
+    monkeypatch.setattr(
+        "evaluation.swebench.prepare_evaluation_workspace", lambda *args: next(workspaces)
+    )
+    monkeypatch.setattr("evaluation.swebench.SwebenchTaskContainer", FakeContainer)
+    monkeypatch.setattr("evaluation.swebench.AgentLoop", FakeAgentLoop)
+    monkeypatch.setattr("evaluation.swebench.OpenAICompatibleClient", lambda settings: object())
+    monkeypatch.setattr("evaluation.swebench.TimedModelClient", FakeTimedClient)
+    monkeypatch.setattr(
+        "evaluation.swebench.load_settings", lambda: SimpleNamespace(model_name="test")
+    )
+    monkeypatch.setattr(
+        "evaluation.swebench.create_patch", lambda *args: (("file.py",), "patch")
+    )
+    monkeypatch.setattr(
+        "evaluation.swebench.verify_patch", lambda *args: HarnessResult(True)
+    )
+
+    result = await run_task(task, tmp_path / "result", "python")
+
+    assert captured["session_id"]
+    store = ArtifactStore.for_workspace(session_root)
+    store.set_session_id(captured["session_id"])
+    assert store.load(captured["artifact_id"]) is not None
+    assert result.passed

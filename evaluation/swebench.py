@@ -223,6 +223,7 @@ async def run_task(
                 max_tool_rounds=effective_tool_rounds,
                 thinking_level=thinking,
                 artifact_store=artifact_store,
+                session_id=session.session_id,
                 firewall_enabled=firewall_enabled,
                 end_policy=WriteVerificationPolicy(),
             )
