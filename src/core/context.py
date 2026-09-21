@@ -7,7 +7,12 @@ from math import ceil
 from collections.abc import AsyncIterator, Mapping
 from typing import Sequence
 
-from .artifacts import ArtifactStore, artifact_placeholder, is_artifact_placeholder
+from .artifacts import (
+    ARTIFACT_URL_PREFIX,
+    ArtifactStore,
+    artifact_placeholder,
+    is_artifact_placeholder,
+)
 from .model import Message, ModelClient, ModelClientError
 from .prompts import load_prompt
 from .session_store import CompactionRecord, EvictedToolOutput, EvictionRecord
@@ -562,12 +567,10 @@ def _eviction_placeholder(
     if store is not None:
         artifact = store.load(item.artifact_id)
         if artifact is not None:
-            return artifact_placeholder(
-                item.artifact_id, item.original_chars, artifact.content
-            )
+            return artifact_placeholder(item.artifact_id, artifact.content)
     return (
-        f"[artifact {item.artifact_id}] Evicted tool output "
-        f"({item.original_chars} chars). Use read_artifact to retrieve."
+        f"[artifact] Evicted tool output ({item.original_chars} chars). "
+        f"Full output: {ARTIFACT_URL_PREFIX}{item.artifact_id}"
     )
 
 

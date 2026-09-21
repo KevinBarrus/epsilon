@@ -1,21 +1,12 @@
-"""按项目保存工具输出原文，供上下文降级后按需取回。
+"""按会话保存工具输出原文，供上下文降级后按需取回。
 
 Artifact Store 与工具输出防火墙（Firewall）、陈旧输出驱逐（Eviction）配对：
-超阈值或被驱逐的工具输出原文完整落盘，模型上下文中只保留有界占位符，
-需要时通过 read_artifact 工具按行范围取回。JSONL 会话原文永不改写。
+超阈值或被驱逐的工具输出原文以纯文本落盘，模型上下文中只保留有界占位符，
+需要时通过 read_file 读取 artifact://<id> 按行范围取回。JSONL 会话原文永不改写。
 """
 
-import hashlib
-import json
-import os
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-
-from .model import ToolCall, ToolResult
-from .tools.args import optional_positive_integer, string_argument
-from .tools.output_limits import limit_tool_output
-from .tools.types import ToolDefinition, ToolHandler
 
 # 超过该字符数的工具输出原文落盘，上下文只注入有界占位符
 FIREWALL_THRESHOLD_CHARS = 8_000
@@ -23,8 +14,8 @@ FIREWALL_THRESHOLD_CHARS = 8_000
 PREVIEW_HEAD_LINES = 10
 PREVIEW_TAIL_LINES = 10
 PREVIEW_MAX_CHARS = 2_000
-ARTIFACT_MARKER = "[artifact "
-DEFAULT_ARTIFACT_READ_LINES = 400
+# 模型读取工具输出原文的引用前缀
+ARTIFACT_URL_PREFIX = "artifact://"
 
 
 @dataclass(frozen=True)
@@ -38,16 +29,17 @@ class Artifact:
 
 
 class ArtifactStore:
-    """在工作区 .epsilon/artifacts 下按项目保存输出原文。
+    """在工作区 .epsilon/artifacts 下按会话保存输出原文。
 
-    元数据携带 session_id，便于后续按会话审计归属；文件名使用
-    内容摘要，同一原文只落盘一份。
+    文件布局 artifacts/<session_id>/<id>.<tool_type>.txt，id 为会话内递增序号，
+    会话归属由子目录表达。set_session_id 绑定后，load/resolve 默认在该会话目录内查找。
     """
 
     def __init__(self, artifacts_root: Path) -> None:
-        """保存 artifacts 根目录，不提前创建。"""
+        """保存 artifacts 根目录与当前会话绑定。"""
 
         self._root = artifacts_root
+        self._session_id = ""
 
     @classmethod
     def for_workspace(cls, workspace: Path) -> "ArtifactStore":
@@ -55,81 +47,97 @@ class ArtifactStore:
 
         return cls(workspace / ".epsilon" / "artifacts")
 
+    def set_session_id(self, session_id: str) -> None:
+        """绑定当前会话，load/resolve 默认在其会话目录内查找。"""
+
+        self._session_id = session_id
+
     def save(self, content: str, *, session_id: str, source_tool: str) -> str:
-        """完整保存原文并返回 artifact id，内容不变时复用已有文件。"""
+        """以纯文本落盘原文并返回会话内递增序号 id。"""
 
-        artifact_id = hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
-        path = self._path(artifact_id)
-        if path.exists():
-            return artifact_id
-        record = {
-            "id": artifact_id,
-            "session_id": session_id,
-            "source_tool": source_tool,
-            "content": content,
-        }
-        self._root.mkdir(parents=True, exist_ok=True)
-        # 先写临时文件再原子重命名，避免读侧看到半截 JSON
-        with tempfile.NamedTemporaryFile(
-            "w", encoding="utf-8", dir=self._root, delete=False
-        ) as tmp:
-            json.dump(record, tmp, ensure_ascii=False)
-            tmp_path = Path(tmp.name)
-        os.replace(tmp_path, path)
-        return artifact_id
+        directory = self._root / session_id
+        directory.mkdir(parents=True, exist_ok=True)
+        artifact_id = _next_artifact_id(directory)
+        path = directory / f"{artifact_id}.{_safe_tool_type(source_tool)}.txt"
+        path.write_text(content, encoding="utf-8")
+        return str(artifact_id)
 
-    def load(self, artifact_id: str) -> Artifact | None:
-        """读取一份原文，id 不存在或内容损坏时返回 None。"""
+    def resolve(self, artifact_id: str, session_id: str | None = None) -> Path | None:
+        """把 artifact id 解析为落盘路径，未知或非法 id 返回 None。"""
 
-        path = self._path(artifact_id)
-        if not path.is_file():
+        target = session_id if session_id is not None else self._session_id
+        if not target or not str(artifact_id).isdigit():
+            return None
+        matches = sorted((self._root / target).glob(f"{artifact_id}.*.txt"))
+        return matches[0] if matches else None
+
+    def load(self, artifact_id: str, session_id: str | None = None) -> Artifact | None:
+        """读取一份原文，id 不存在或文件不可读时返回 None。"""
+
+        path = self.resolve(artifact_id, session_id)
+        if path is None:
             return None
         try:
-            record = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
+            content = path.read_text(encoding="utf-8")
+        except OSError:
             return None
-        if not isinstance(record, dict) or record.get("id") != artifact_id:
-            return None
-        content = record.get("content")
-        if not isinstance(content, str):
-            return None
+        target = session_id if session_id is not None else self._session_id
         return Artifact(
-            artifact_id=artifact_id,
-            session_id=str(record.get("session_id", "")),
-            source_tool=str(record.get("source_tool", "")),
+            artifact_id=str(artifact_id),
+            session_id=target,
+            source_tool=_tool_type_from_name(path.name),
             content=content,
         )
 
-    def _path(self, artifact_id: str) -> Path:
-        """生成 artifact 文件路径，id 只允许十六进制字符。"""
 
-        if not all(char in "0123456789abcdef" for char in artifact_id):
-            raise ValueError("invalid artifact id")
-        return self._root / f"{artifact_id}.json"
+def _next_artifact_id(directory: Path) -> int:
+    """扫描会话目录得到下一个递增序号。"""
+
+    highest = 0
+    for path in directory.glob("*.txt"):
+        stem = path.name.split(".", 1)[0]
+        if stem.isdigit():
+            highest = max(highest, int(stem))
+    return highest + 1
 
 
-def artifact_placeholder(artifact_id: str, original_chars: int, content: str) -> str:
-    """生成注入模型上下文的有界占位符，预览保留头尾行。"""
+def _safe_tool_type(source_tool: str) -> str:
+    """把工具名转换为只含文件安全字符的类型片段。"""
+
+    return "".join(
+        char if char.isalnum() or char in "_-" else "_" for char in source_tool
+    ) or "tool"
+
+
+def _tool_type_from_name(filename: str) -> str:
+    """从 <id>.<tool_type>.txt 文件名还原工具类型。"""
+
+    parts = filename.split(".", 2)
+    return parts[1] if len(parts) > 1 else ""
+
+
+def artifact_placeholder(artifact_id: str, content: str) -> str:
+    """生成注入模型上下文的有界占位符，预览保留头尾行并给出取回地址。"""
 
     lines = content.splitlines()
     head = lines[:PREVIEW_HEAD_LINES]
-    tail = lines[-PREVIEW_TAIL_LINES:] if len(lines) > PREVIEW_HEAD_LINES + PREVIEW_TAIL_LINES else []
+    tail = (
+        lines[-PREVIEW_TAIL_LINES:]
+        if len(lines) > PREVIEW_HEAD_LINES + PREVIEW_TAIL_LINES
+        else []
+    )
     preview = "\n".join(head)
     if tail:
         preview += "\n…\n" + "\n".join(tail)
     if len(preview) > PREVIEW_MAX_CHARS:
         preview = preview[:PREVIEW_MAX_CHARS].rstrip() + "…"
-    return (
-        f"{preview}\n{ARTIFACT_MARKER}{artifact_id}] Full output "
-        f"({original_chars} chars, {len(lines)} lines) stored. "
-        "Use read_artifact with this id to retrieve any line range."
-    )
+    return f"{preview}\nFull output: {ARTIFACT_URL_PREFIX}{artifact_id}"
 
 
 def is_artifact_placeholder(content: str) -> bool:
     """判断工具输出是否已是 artifact 占位符，避免重复落盘或重复驱逐。"""
 
-    return ARTIFACT_MARKER in content
+    return ARTIFACT_URL_PREFIX in content
 
 
 def apply_output_firewall(
@@ -148,62 +156,8 @@ def apply_output_firewall(
         artifact_id = store.save(
             content, session_id=session_id, source_tool=source_tool
         )
-        return artifact_placeholder(artifact_id, len(content), content)
+        return artifact_placeholder(artifact_id, content)
+    # 延迟导入，避免 artifacts 与 tools 包在模块加载期相互引用
+    from .tools.output_limits import limit_tool_output
+
     return limit_tool_output(content)
-
-
-def create_read_artifact_tool(store: ArtifactStore) -> tuple[ToolDefinition, ToolHandler]:
-    """创建按行范围取回落盘原文的只读工具。"""
-
-    async def read_artifact(tool_call: ToolCall) -> ToolResult:
-        artifact_id = string_argument(tool_call, "artifact_id")
-        offset = optional_positive_integer(tool_call, "offset", 1)
-        limit = optional_positive_integer(tool_call, "limit", DEFAULT_ARTIFACT_READ_LINES)
-        artifact = store.load(artifact_id)
-        if artifact is None:
-            raise ValueError(f"artifact {artifact_id} not found")
-        lines = artifact.content.splitlines(keepends=True)
-        if lines and offset > len(lines):
-            raise ValueError(f"offset {offset} exceeds artifact line count {len(lines)}")
-        selected = lines[offset - 1 : offset - 1 + limit]
-        content = "".join(selected)
-        last_line = offset + len(selected) - 1
-        if last_line < len(lines):
-            content = (
-                f"{content.rstrip()}\n\n"
-                f"[Showing lines {offset}-{last_line} of {len(lines)}. "
-                f"Use offset={last_line + 1} to continue.]"
-            )
-        return ToolResult(
-            call_id=tool_call.call_id,
-            content=limit_tool_output(content),
-        )
-
-    return (
-        ToolDefinition(
-            name="read_artifact",
-            description=(
-                "Retrieve stored tool output by artifact id. Large or evicted tool "
-                "outputs are stored as artifacts; use offset and limit to read "
-                "specific line ranges."
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "artifact_id": {"type": "string"},
-                    "offset": {"type": "integer", "minimum": 1, "default": 1},
-                    "limit": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "default": DEFAULT_ARTIFACT_READ_LINES,
-                    },
-                },
-                "required": ["artifact_id"],
-            },
-            source="local",
-            permission="read",
-            idempotent=True,
-            execution_mode="parallel",
-        ),
-        read_artifact,
-    )

@@ -11,7 +11,7 @@ from .agent_loop import (
     RetryEvent,
     ToolExecutionEvent,
 )
-from .artifacts import ArtifactStore, create_read_artifact_tool
+from .artifacts import ArtifactStore
 from .errors import AgentError
 from .screen import ChatScreen
 from .status import StatusInfo
@@ -417,8 +417,10 @@ async def run_chat(
         permission_manager=PermissionManager(screen.request_approval),
     )
     artifact_store = ArtifactStore.for_workspace(session_workspace)
+    tool_manager.register_local(
+        *create_read_file_tool(session_workspace, artifact_store)
+    )
     for create_tool in (
-        create_read_file_tool,
         create_list_files_tool,
         create_search_files_tool,
         create_write_file_tool,
@@ -426,7 +428,6 @@ async def run_chat(
         create_run_command_tool,
     ):
         tool_manager.register_local(*create_tool(session_workspace))
-    tool_manager.register_local(*create_read_artifact_tool(artifact_store))
     if mcp_provider is not None:
         try:
             await tool_manager.register_mcp_provider(mcp_provider)
@@ -469,6 +470,7 @@ async def run_chat(
 
     agent_loop.set_artifact_session(session.session_id)
     context_manager.set_session_id(session.session_id)
+    artifact_store.set_session_id(session.session_id)
     try:
         history = session.get_messages()
         screen.add_history_entries(

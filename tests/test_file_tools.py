@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from core.artifacts import ArtifactStore
 from core.model import ToolCall
 from core.tools import (
     MAX_TOOL_OUTPUT_BYTES,
@@ -223,3 +224,81 @@ def test_workspace_path_resolver_rejects_absolute_escape(tmp_path: Path) -> None
 
     with pytest.raises(WorkspacePathError):
         resolve_workspace_path(tmp_path, "/tmp/secret.txt")
+
+
+def _artifact_store(tmp_path: Path) -> tuple[ArtifactStore, str]:
+    """创建已绑定会话并放入一段原文的 store。"""
+
+    store = ArtifactStore(tmp_path / ".epsilon" / "artifacts")
+    store.set_session_id("s-1")
+    content = "\n".join(f"l{index}" for index in range(1, 6)) + "\n"
+    artifact_id = store.save(content, session_id="s-1", source_tool="run_command")
+    return store, artifact_id
+
+
+@pytest.mark.asyncio
+async def test_read_file_reads_artifact_reference(tmp_path: Path) -> None:
+    """测试 read_file 可以通过 artifact://<id> 取回落盘原文。"""
+
+    store, artifact_id = _artifact_store(tmp_path)
+    _, handler = create_read_file_tool(tmp_path, store)
+
+    result = await handler(
+        _call("read_file", {"path": f"artifact://{artifact_id}"})
+    )
+
+    assert "l1" in result.content
+    assert "l5" in result.content
+
+
+@pytest.mark.asyncio
+async def test_read_file_artifact_reference_supports_line_range(tmp_path: Path) -> None:
+    """测试 artifact 引用同样支持 offset/limit 与续读提示。"""
+
+    store, artifact_id = _artifact_store(tmp_path)
+    _, handler = create_read_file_tool(tmp_path, store)
+
+    result = await handler(
+        _call(
+            "read_file",
+            {"path": f"artifact://{artifact_id}", "offset": 2, "limit": 1},
+        )
+    )
+
+    assert "l2" in result.content
+    assert "l1" not in result.content
+    assert "offset=3" in result.content
+
+
+@pytest.mark.asyncio
+async def test_read_file_rejects_unknown_artifact_reference(tmp_path: Path) -> None:
+    """测试未知 artifact id 明确报错。"""
+
+    store, _ = _artifact_store(tmp_path)
+    _, handler = create_read_file_tool(tmp_path, store)
+
+    with pytest.raises(ValueError):
+        await handler(_call("read_file", {"path": "artifact://99"}))
+
+
+@pytest.mark.asyncio
+async def test_read_file_rejects_out_of_range_artifact_offset(tmp_path: Path) -> None:
+    """测试 artifact 引用的越界 offset 明确报错。"""
+
+    store, artifact_id = _artifact_store(tmp_path)
+    _, handler = create_read_file_tool(tmp_path, store)
+
+    with pytest.raises(ValueError):
+        await handler(
+            _call("read_file", {"path": f"artifact://{artifact_id}", "offset": 99})
+        )
+
+
+@pytest.mark.asyncio
+async def test_read_file_rejects_artifact_reference_without_store(tmp_path: Path) -> None:
+    """测试未注入 store 时 artifact 引用不可用并明确报错。"""
+
+    _, handler = create_read_file_tool(tmp_path)
+
+    with pytest.raises(ValueError):
+        await handler(_call("read_file", {"path": "artifact://1"}))

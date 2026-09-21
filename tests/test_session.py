@@ -375,10 +375,13 @@ def test_session_add_eviction_updates_runtime_and_store(tmp_path: Path) -> None:
 def test_restore_rebuilds_identical_eviction_view(tmp_path: Path) -> None:
     """测试驱逐记录持久化后，恢复会话可以重建相同降级视图。"""
 
-    store = ArtifactStore(tmp_path / "artifacts")
-    content = "y" * 9_000
-    artifact_id = store.save(content, session_id="s-1", source_tool="run_command")
     session = Session(tmp_path)
+    store = ArtifactStore(tmp_path / "artifacts")
+    store.set_session_id(session.session_id)
+    content = "y" * 9_000
+    artifact_id = store.save(
+        content, session_id=session.session_id, source_tool="run_command"
+    )
     session.add_message(Message(role="tool", content=content, tool_call_id="c-1"))
     session.add_eviction(
         EvictionRecord(

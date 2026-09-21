@@ -1,32 +1,24 @@
-"""测试工具输出原文落盘、占位符与按需取回工具。"""
+"""测试工具输出纯文本落盘、占位符与 artifact:// 引用。"""
 
-import re
 from pathlib import Path
 
-import pytest
-
 from core.artifacts import (
+    ARTIFACT_URL_PREFIX,
     FIREWALL_THRESHOLD_CHARS,
     ArtifactStore,
     apply_output_firewall,
     artifact_placeholder,
-    create_read_artifact_tool,
     is_artifact_placeholder,
 )
-from core.model import ToolCall
 from core.tools.output_limits import TRUNCATION_NOTICE
 
-ARTIFACT_ID_PATTERN = re.compile(r"\[artifact ([0-9a-f]+)\]")
 
+def _store(tmp_path: Path, session_id: str = "s-1") -> ArtifactStore:
+    """创建已绑定会话的 store，便于 load/resolve 默认定位。"""
 
-def _store(tmp_path: Path) -> ArtifactStore:
-    return ArtifactStore(tmp_path / "artifacts")
-
-
-def _artifact_id(text: str) -> str:
-    match = ARTIFACT_ID_PATTERN.search(text)
-    assert match is not None
-    return match.group(1)
+    store = ArtifactStore(tmp_path / "artifacts")
+    store.set_session_id(session_id)
+    return store
 
 
 def test_artifact_store_round_trip(tmp_path: Path) -> None:
@@ -44,56 +36,75 @@ def test_artifact_store_round_trip(tmp_path: Path) -> None:
     assert loaded.source_tool == "run_command"
 
 
-def test_artifact_store_reuses_id_for_identical_content(tmp_path: Path) -> None:
-    """测试相同原文复用同一 id 且只落盘一份。"""
+def test_artifact_store_saves_plain_text_in_session_directory(tmp_path: Path) -> None:
+    """测试落盘为会话子目录下的纯文本文件。"""
 
     store = _store(tmp_path)
-    content = "相同内容"
+    content = "line-1\nline-2\n"
 
-    first = store.save(content, session_id="s-1", source_tool="run_command")
-    second = store.save(content, session_id="s-2", source_tool="read_file")
+    artifact_id = store.save(content, session_id="s-1", source_tool="run_command")
 
-    assert first == second
-    assert len(list((tmp_path / "artifacts").glob("*.json"))) == 1
+    path = tmp_path / "artifacts" / "s-1" / f"{artifact_id}.run_command.txt"
+    assert path.is_file()
+    assert path.read_text(encoding="utf-8") == content
 
 
-def test_artifact_store_returns_none_for_corrupted_file(tmp_path: Path) -> None:
-    """测试原文文件损坏时返回 None 而不是抛异常。"""
+def test_artifact_store_uses_incrementing_ids(tmp_path: Path) -> None:
+    """测试同一会话内 id 按落盘顺序递增。"""
 
     store = _store(tmp_path)
-    artifact_id = store.save("原文", session_id="s-1", source_tool="run_command")
-    (tmp_path / "artifacts" / f"{artifact_id}.json").write_text(
-        "{不是合法 JSON", encoding="utf-8"
-    )
 
-    assert store.load(artifact_id) is None
-    assert store.load("0" * 16) is None
+    first = store.save("a", session_id="s-1", source_tool="run_command")
+    second = store.save("b", session_id="s-1", source_tool="run_command")
+
+    assert first == "1"
+    assert second == "2"
 
 
-def test_artifact_placeholder_keeps_head_tail_and_hint(tmp_path: Path) -> None:
-    """测试占位符保留头尾预览并给出取回指引。"""
+def test_artifact_store_isolates_sessions(tmp_path: Path) -> None:
+    """测试不同会话目录互不干扰。"""
+
+    store = _store(tmp_path)
+    store.save("a", session_id="s-1", source_tool="run_command")
+    store.save("b", session_id="s-2", source_tool="run_command")
+
+    assert store.load("1", session_id="s-1").content == "a"
+    assert store.load("1", session_id="s-2").content == "b"
+
+
+def test_artifact_store_returns_none_for_unknown_or_invalid_id(tmp_path: Path) -> None:
+    """测试未知或非法 id 解析为 None。"""
+
+    store = _store(tmp_path)
+
+    assert store.load("99") is None
+    assert store.resolve("99") is None
+    assert store.resolve("not-a-number") is None
+
+
+def test_artifact_placeholder_keeps_head_tail_and_url() -> None:
+    """测试占位符保留头尾预览并给出 artifact:// 取回地址。"""
 
     content = "\n".join(f"line-{index}" for index in range(30))
 
-    placeholder = artifact_placeholder("abc123", len(content), content)
+    placeholder = artifact_placeholder("7", content)
 
-    assert "[artifact abc123]" in placeholder
     assert "line-0" in placeholder
     assert "line-29" in placeholder
     assert "line-15" not in placeholder
-    assert "Use read_artifact" in placeholder
+    assert f"Full output: {ARTIFACT_URL_PREFIX}7" in placeholder
     assert is_artifact_placeholder(placeholder)
 
 
-def test_is_artifact_placeholder_detects_marker() -> None:
-    """测试占位符识别只认 artifact 标记。"""
+def test_is_artifact_placeholder_recognizes_url() -> None:
+    """测试占位符识别只认 artifact:// 引用。"""
 
-    assert is_artifact_placeholder("prefix [artifact abc] tail") is True
+    assert is_artifact_placeholder(f"prefix {ARTIFACT_URL_PREFIX}3 tail") is True
     assert is_artifact_placeholder("普通工具输出") is False
 
 
-def test_apply_output_firewall_stores_and_returns_placeholder(tmp_path: Path) -> None:
-    """测试超阈值输出落盘并定型为有界占位符。"""
+def test_apply_output_firewall_stores_plain_text_and_returns_url(tmp_path: Path) -> None:
+    """测试超阈值输出落盘为纯文本并注入 artifact:// 占位符。"""
 
     store = _store(tmp_path)
     content = "a" * (FIREWALL_THRESHOLD_CHARS + 1)
@@ -103,10 +114,11 @@ def test_apply_output_firewall_stores_and_returns_placeholder(tmp_path: Path) ->
     )
 
     assert is_artifact_placeholder(result)
-    artifact_id = _artifact_id(result)
-    loaded = store.load(artifact_id)
-    assert loaded is not None
-    assert loaded.content == content
+    assert f"{ARTIFACT_URL_PREFIX}1" in result
+    assert store.load("1").content == content
+    assert (
+        tmp_path / "artifacts" / "s-1" / "1.run_command.txt"
+    ).read_text(encoding="utf-8") == content
 
 
 def test_apply_output_firewall_without_store_uses_hard_truncation() -> None:
@@ -120,47 +132,3 @@ def test_apply_output_firewall_without_store_uses_hard_truncation() -> None:
 
     assert result.endswith(TRUNCATION_NOTICE)
     assert is_artifact_placeholder(result) is False
-
-
-@pytest.mark.asyncio
-async def test_read_artifact_returns_requested_line_range(tmp_path: Path) -> None:
-    """测试 read_artifact 按行范围取回并提示后续偏移。"""
-
-    store = _store(tmp_path)
-    artifact_id = store.save(
-        "l1\nl2\nl3\n", session_id="s-1", source_tool="run_command"
-    )
-    _, handler = create_read_artifact_tool(store)
-
-    result = await handler(
-        ToolCall("c1", "read_artifact", {"artifact_id": artifact_id, "offset": 2, "limit": 1})
-    )
-
-    assert "l2" in result.content
-    assert "l1" not in result.content
-    assert "offset=3" in result.content
-
-
-@pytest.mark.asyncio
-async def test_read_artifact_rejects_out_of_range_offset(tmp_path: Path) -> None:
-    """测试越界 offset 明确报错。"""
-
-    store = _store(tmp_path)
-    artifact_id = store.save("l1\nl2\n", session_id="s-1", source_tool="run_command")
-    _, handler = create_read_artifact_tool(store)
-
-    with pytest.raises(ValueError):
-        await handler(
-            ToolCall("c1", "read_artifact", {"artifact_id": artifact_id, "offset": 10})
-        )
-
-
-@pytest.mark.asyncio
-async def test_read_artifact_rejects_unknown_id(tmp_path: Path) -> None:
-    """测试不存在的 artifact id 明确报错。"""
-
-    store = _store(tmp_path)
-    _, handler = create_read_artifact_tool(store)
-
-    with pytest.raises(ValueError):
-        await handler(ToolCall("c1", "read_artifact", {"artifact_id": "0" * 16}))

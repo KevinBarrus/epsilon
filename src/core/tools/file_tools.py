@@ -3,6 +3,7 @@
 import os
 from pathlib import Path
 
+from ..artifacts import ARTIFACT_URL_PREFIX, ArtifactStore
 from ..model import ToolCall, ToolResult
 from .args import optional_path, optional_positive_integer, string_argument
 from .output_limits import limit_tool_output
@@ -15,11 +16,16 @@ DEFAULT_FILE_READ_LINES = 400
 IGNORED_SEARCH_DIRECTORIES = {".git", ".epsilon", ".venv", "node_modules"}
 
 
-def create_read_file_tool(workspace: Path) -> tuple[ToolDefinition, ToolHandler]:
-    """创建读取单个文件的工具。"""
+def create_read_file_tool(
+    workspace: Path,
+    artifact_store: ArtifactStore | None = None,
+) -> tuple[ToolDefinition, ToolHandler]:
+    """创建读取单个文件的工具，支持 artifact://<id> 引用取回落盘输出。"""
 
     async def read_file(tool_call: ToolCall) -> ToolResult:
-        path = resolve_workspace_path(workspace, string_argument(tool_call, "path"))
+        path = _resolve_read_path(
+            workspace, string_argument(tool_call, "path"), artifact_store
+        )
         offset = optional_positive_integer(tool_call, "offset", 1)
         limit = optional_positive_integer(tool_call, "limit", DEFAULT_FILE_READ_LINES)
         if not path.is_file():
@@ -48,7 +54,8 @@ def create_read_file_tool(workspace: Path) -> tuple[ToolDefinition, ToolHandler]
             name="read_file",
             description=(
                 "Read text lines from a file in the workspace. Use offset and limit "
-                "to read large files in parts."
+                "to read large files in parts. Tool outputs stored as artifacts can "
+                "be read by passing the artifact://<id> reference as path."
             ),
             parameters={
                 "type": "object",
@@ -71,6 +78,26 @@ def create_read_file_tool(workspace: Path) -> tuple[ToolDefinition, ToolHandler]
         ),
         read_file,
     )
+
+
+def _resolve_read_path(
+    workspace: Path,
+    value: str,
+    artifact_store: ArtifactStore | None,
+) -> Path:
+    """把读取目标解析为工作区路径或 artifact 落盘路径。"""
+
+    if not value.startswith(ARTIFACT_URL_PREFIX):
+        return resolve_workspace_path(workspace, value)
+    if artifact_store is None:
+        raise ValueError("artifact references are not available")
+    artifact_id = value[len(ARTIFACT_URL_PREFIX) :].strip().split(" ", 1)[0]
+    if not artifact_id:
+        raise ValueError("artifact reference is missing an id")
+    path = artifact_store.resolve(artifact_id)
+    if path is None:
+        raise ValueError(f"artifact {artifact_id} not found")
+    return path
 
 
 def create_list_files_tool(workspace: Path) -> tuple[ToolDefinition, ToolHandler]:

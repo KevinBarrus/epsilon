@@ -1305,6 +1305,7 @@ def test_tool_result_message_applies_output_firewall(tmp_path) -> None:
     """测试超阈值工具输出落盘定型为 artifact 占位符。"""
 
     store = ArtifactStore(tmp_path / "artifacts")
+    store.set_session_id("s-1")
     content = "a" * 9_000
 
     message = agent_loop._tool_result_message(
@@ -1315,7 +1316,7 @@ def test_tool_result_message_applies_output_firewall(tmp_path) -> None:
     )
 
     assert is_artifact_placeholder(message.content)
-    match = re.search(r"\[artifact ([0-9a-f]+)\]", message.content)
+    match = re.search(r"artifact://(\d+)", message.content)
     assert match is not None
     loaded = store.load(match.group(1))
     assert loaded is not None

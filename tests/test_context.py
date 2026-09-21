@@ -843,9 +843,11 @@ def test_summary_source_text_includes_reasoning() -> None:
 def _eviction_manager(tmp_path, *, enabled: bool = True) -> ContextManager:
     """构造启用驱逐的上下文管理器，预算由测试后续按需覆盖。"""
 
+    store = ArtifactStore(tmp_path / "artifacts")
+    store.set_session_id("s-1")
     return ContextManager(
         ContextBudget(1_000, 0, 10),
-        artifact_store=ArtifactStore(tmp_path / "artifacts"),
+        artifact_store=store,
         session_id="s-1",
         eviction_enabled=enabled,
     )
@@ -865,6 +867,7 @@ def test_apply_evictions_replaces_recorded_tool_output(tmp_path) -> None:
     """测试驱逐视图只替换被记录的 tool 消息，原始列表不被修改。"""
 
     store = ArtifactStore(tmp_path / "artifacts")
+    store.set_session_id("s-1")
     original = "原始工具输出"
     artifact_id = store.save(original, session_id="s-1", source_tool="run_command")
     messages = [
@@ -977,7 +980,7 @@ def test_maybe_evict_skips_existing_placeholder(tmp_path) -> None:
     messages = _tool_messages(15)
     messages[0] = Message(
         role="tool",
-        content="[artifact abc] already stored",
+        content="already stored. Full output: artifact://1",
         tool_call_id="c",
     )
     manager.update_budget(ContextBudget(1_000, 0, 10))
