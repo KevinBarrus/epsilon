@@ -957,6 +957,11 @@ def main() -> int:
         return 2
     if args.max_tool_rounds is not None and args.max_tool_rounds <= 0:
         parser.error("--max-tool-rounds 必须大于 0")
+    # Harness 以 result_root 为工作目录运行，相对解释器路径必须先变为绝对路径；
+    # 不能用 resolve()，否则会跟随 venv 的 python 符号链接回基础解释器
+    harness_python = Path(args.harness_python)
+    if harness_python.exists():
+        args.harness_python = str(harness_python.absolute())
     tasks = [load_task(instance_id, args.source) for instance_id in args.instance_id]
     output = args.result_root / "results.jsonl"
     output.parent.mkdir(parents=True, exist_ok=True)

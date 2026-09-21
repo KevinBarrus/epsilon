@@ -2,6 +2,7 @@
 /pic
 .env
 .venv
+.venv-swebench/
 __pycache__/
 *.py[cod]
 .pytest_cache/
