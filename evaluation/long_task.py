@@ -3,6 +3,8 @@
 import argparse
 import asyncio
 import json
+import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
@@ -252,7 +254,7 @@ async def run_long_task(
             )
             inputs = _StageInputs(
                 task=task,
-                baseline=baseline,
+                baseline=baseline.workspace,
                 prepared=prepared,
                 result_root=result_root,
                 harness_python=harness_python,
@@ -263,9 +265,17 @@ async def run_long_task(
                 events=events,
                 context_builder=context_builder,
             )
-            stage_results = [
-                await _run_stage(stage, inputs) for stage in spec.stages
-            ]
+            stage_results = []
+            reference = baseline.workspace
+            for index, stage in enumerate(spec.stages):
+                stage_results.append(await _run_stage(stage, inputs, reference))
+                if index + 1 < len(spec.stages):
+                    reference = await asyncio.to_thread(
+                        _snapshot_workspace,
+                        prepared.workspace,
+                        result_root,
+                        stage.name,
+                    )
             session.flush_persistence()
             session.close()
     finally:
@@ -294,6 +304,7 @@ async def run_long_task(
 async def _run_stage(
     stage: LongTaskStage,
     inputs: _StageInputs,
+    reference: Path,
 ) -> LongTaskStageResult:
     """执行一个阶段：下发指令、跑 Agent、验证并计算用量差分。"""
 
@@ -322,8 +333,9 @@ async def _run_stage(
         inputs.session.add_message(message)
 
     validation, harness = await _validate_stage(stage, inputs)
+    # 改动范围用“阶段起点 → 阶段终点”的差分判断，避免把前序阶段的改动算到本阶段
     changelog, _ = await asyncio.to_thread(
-        create_patch, inputs.baseline, inputs.prepared.workspace
+        create_patch, reference, inputs.prepared.workspace
     )
     allowed_ok = _allowed_changes_ok(changelog, stage.allowed_changes)
     stage_events = inputs.events[events_before:]
@@ -413,11 +425,23 @@ def _is_artifact_read(event: dict[str, object]) -> bool:
 
 
 def _delta(before: int | None, after: int | None) -> int:
-    """计算前后快照差值，任一侧缺失时按 0 处理。"""
+    """计算前后快照差值；before 缺失按 0 处理，after 缺失无法归因按 0。"""
 
-    if before is None or after is None:
+    if after is None:
         return 0
-    return max(0, after - before)
+    return max(0, after - (before or 0))
+
+
+def _snapshot_workspace(workspace: Path, result_root: Path, label: str) -> Path:
+    """复制当前工作区，作为下一阶段改动范围的比较基准。"""
+
+    snapshots_root = result_root / "workspace-snapshots"
+    snapshots_root.mkdir(parents=True, exist_ok=True)
+    target = Path(tempfile.mkdtemp(prefix=f"{label}-", dir=snapshots_root))
+    # symlinks=True 必须保留：评测工作区里的部分文件是符号链接，
+    # 解引用成普通文件会让阶段差分出现幻影改动
+    shutil.copytree(workspace, target, dirs_exist_ok=True, symlinks=True)
+    return target
 
 
 def _stage_record(
