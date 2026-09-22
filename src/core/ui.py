@@ -445,6 +445,7 @@ async def run_chat(
         system_prompt=AGENT_SYSTEM_PROMPT,
         artifact_store=artifact_store,
         eviction_enabled=settings.eviction_enabled,
+        eviction_threshold_tokens=settings.eviction_threshold_tokens,
     )
     project_instructions = load_project_instructions(session_workspace)
     context_manager.set_project_instructions(project_instructions.content)

@@ -111,11 +111,13 @@ class ContextManager:
         artifact_store: "ArtifactStore | None" = None,
         session_id: str = "",
         eviction_enabled: bool = False,
+        eviction_threshold_tokens: int | None = None,
     ) -> None:
         """创建上下文管理器。
 
         eviction_enabled 开启后，估算超过驱逐阈值时一次性批量把
         陈旧工具输出降级为 artifact 占位符（视图变换，不改写历史）。
+        eviction_threshold_tokens 缺省时使用压缩阈值的一半。
         """
 
         self._budget = budget
@@ -128,6 +130,7 @@ class ContextManager:
         self._artifact_store = artifact_store
         self._session_id = session_id
         self._eviction_enabled = eviction_enabled
+        self._eviction_threshold_tokens = eviction_threshold_tokens
 
     def update_budget(self, budget: ContextBudget) -> None:
         """热切换模型时更新上下文预算，保留 skill 等额外系统消息。"""
@@ -454,7 +457,11 @@ class ContextManager:
 
         if not self._eviction_enabled or self._artifact_store is None:
             return None
-        threshold = self._budget.compaction_threshold // 2
+        threshold = (
+            self._eviction_threshold_tokens
+            if self._eviction_threshold_tokens is not None
+            else self._budget.compaction_threshold // 2
+        )
         current_view = _apply_latest_compaction(
             _apply_evictions(original_messages, evictions, self._artifact_store),
             compactions,

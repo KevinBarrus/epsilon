@@ -623,6 +623,7 @@ def _context_builder(
     tool_manager: ToolManager,
     artifact_store: ArtifactStore | None = None,
     eviction_enabled: bool = False,
+    eviction_threshold_tokens: int | None = None,
 ):
     """复用生产上下文构建逻辑，并在专项中同步压缩与驱逐记录。"""
 
@@ -638,6 +639,7 @@ def _context_builder(
         system_prompt=load_prompt("agent"),
         artifact_store=artifact_store,
         eviction_enabled=eviction_enabled,
+        eviction_threshold_tokens=eviction_threshold_tokens,
     )
     manager.set_model_name(model_name)
     manager.set_session_id(session.session_id)

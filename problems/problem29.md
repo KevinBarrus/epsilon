@@ -105,7 +105,7 @@ SWE-bench 官方 Harness 在验证时会应用实例自带的 test patch。若�
 | 压缩次数 | `{"type": "compaction"}` 事件计数 | 观察驱逐是否替代了压缩 |
 | 每任务完成度 | T1 `hard-pass`；T2/T3 `soft-pass` | 保证不是"省 token 但做不完" |
 | 总工具轮次 | `AgentRunResult.tool_rounds` 累加 | 观察取回开销是否增加轮次 |
-| `read_artifact` / `artifact://` 取回次数 | 工具调用事件中 `path` 含 `artifact://` 的数量 | 直接量化"取回开销" |
+| `artifact://` 取回次数 | `read_file` 工具调用中 `path` 含 `artifact://` 的次数 | 直接量化“取回开销” |
 
 ### go/no-go 判据（本实验专用）
 
@@ -249,7 +249,7 @@ async def run_harness_check(spec, baseline, workspace, result_root, harness_pyth
   "cache_hit_rate": 0.891,
   "eviction_events": 6,
   "compactions": 0,
-  "read_artifact_calls": 2,
+  "artifact_read_calls": 2,
   "duration_ms": 123456
 }
 ```
@@ -268,7 +268,7 @@ arm 级汇总行：
   "total_eviction_events": 14,
   "total_compactions": 0,
   "total_tool_rounds": 120,
-  "total_read_artifact_calls": 5
+  "total_artifact_read_calls": 5
 }
 ```
 

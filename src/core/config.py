@@ -52,6 +52,8 @@ class Settings:
     # 陈旧工具输出批量驱逐：估算越过阈值时一次性降级为 artifact 占位符
     # （默认关，评测 B' 档与生产显式开启）
     eviction_enabled: bool = False
+    # 驱逐阈值，缺省使用压缩阈值的一半；长任务评测可调低以强制触发
+    eviction_threshold_tokens: int | None = None
 
     def __post_init__(self) -> None:
         """统一超时默认值并校验直接构造的配置。"""
@@ -75,6 +77,11 @@ class Settings:
                 raise ConfigError(f"{name} must be > 0")
         if self.max_tool_rounds is not None and self.max_tool_rounds <= 0:
             raise ConfigError("max_tool_rounds must be > 0")
+        if (
+            self.eviction_threshold_tokens is not None
+            and self.eviction_threshold_tokens <= 0
+        ):
+            raise ConfigError("eviction_threshold_tokens must be > 0")
         object.__setattr__(self, "first_byte_timeout_seconds", first_byte_timeout)
         object.__setattr__(self, "stream_idle_timeout_seconds", stream_idle_timeout)
 
@@ -203,6 +210,11 @@ def _settings_from_data(data: dict) -> Settings:
         False,
         "model.eviction_enabled",
     )
+    eviction_threshold_tokens = _optional_int(
+        model.get("eviction_threshold_tokens"),
+        None,
+        "model.eviction_threshold_tokens",
+    )
     max_tool_rounds = _optional_int(
         model.get("max_tool_rounds"),
         None,
@@ -235,6 +247,7 @@ def _settings_from_data(data: dict) -> Settings:
         price=price,
         firewall_enabled=firewall_enabled,
         eviction_enabled=eviction_enabled,
+        eviction_threshold_tokens=eviction_threshold_tokens,
     )
 
 

@@ -436,3 +436,34 @@ def test_settings_rejects_invalid_direct_timeout() -> None:
             api_key="test-key",
             stream_idle_timeout_seconds=0,
         )
+
+
+def test_load_settings_defaults_eviction_threshold(tmp_path: Path) -> None:
+    """测试默认不设置驱逐阈值，使用压缩阈值的一半。"""
+
+    user_path = _write_user_settings(tmp_path, _valid_model())
+
+    assert load_settings(user_config_path=user_path).eviction_threshold_tokens is None
+
+
+def test_load_settings_reads_eviction_threshold(tmp_path: Path) -> None:
+    """测试 eviction_threshold_tokens 会被正确读取。"""
+
+    user_path = _write_user_settings(
+        tmp_path,
+        {"model": {**_valid_model()["model"], "eviction_threshold_tokens": 20_000}},
+    )
+
+    assert load_settings(user_config_path=user_path).eviction_threshold_tokens == 20_000
+
+
+def test_load_settings_rejects_invalid_eviction_threshold(tmp_path: Path) -> None:
+    """测试驱逐阈值不是正整数时抛出配置异常。"""
+
+    user_path = _write_user_settings(
+        tmp_path,
+        {"model": {**_valid_model()["model"], "eviction_threshold_tokens": 0}},
+    )
+
+    with pytest.raises(ConfigError, match="eviction_threshold_tokens"):
+        load_settings(user_config_path=user_path)

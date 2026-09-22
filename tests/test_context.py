@@ -840,7 +840,9 @@ def test_summary_source_text_includes_reasoning() -> None:
     assert "[reasoning] 先分析任务" in text
 
 
-def _eviction_manager(tmp_path, *, enabled: bool = True) -> ContextManager:
+def _eviction_manager(
+    tmp_path, *, enabled: bool = True, threshold: int | None = None
+) -> ContextManager:
     """构造启用驱逐的上下文管理器，预算由测试后续按需覆盖。"""
 
     store = ArtifactStore(tmp_path / "artifacts")
@@ -850,6 +852,7 @@ def _eviction_manager(tmp_path, *, enabled: bool = True) -> ContextManager:
         artifact_store=store,
         session_id="s-1",
         eviction_enabled=enabled,
+        eviction_threshold_tokens=threshold,
     )
 
 
@@ -1004,3 +1007,30 @@ async def test_build_for_model_result_returns_and_applies_eviction(tmp_path) -> 
 
     assert result.eviction is not None
     assert any(is_artifact_placeholder(message.content) for message in result.messages)
+
+
+def test_maybe_evict_without_custom_threshold_uses_half_budget(tmp_path) -> None:
+    """测试未传阈值时按压缩阈值的一半判断，不触发。"""
+
+    manager = _eviction_manager(tmp_path)
+    messages = _tool_messages(20, lines=1)
+    total = manager.estimate_tokens(messages)
+    # 默认阈值 = total + 1000 > total，不应触发
+    manager.update_budget(ContextBudget(2 * (total + 1_000), 0, 10))
+
+    assert manager._maybe_evict(messages, (), ()) is None
+
+
+def test_maybe_evict_uses_custom_threshold(tmp_path) -> None:
+    """测试自定义阈值优先于压缩阈值的一半。"""
+
+    manager = _eviction_manager(tmp_path, threshold=100)
+    messages = _tool_messages(20, lines=1)
+    total = manager.estimate_tokens(messages)
+    # 同一预算下默认阈值不会触发，自定义 100 会触发
+    manager.update_budget(ContextBudget(2 * (total + 1_000), 0, 10))
+
+    record = manager._maybe_evict(messages, (), ())
+
+    assert record is not None
+    assert record.evicted
