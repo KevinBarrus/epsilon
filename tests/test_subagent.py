@@ -4,9 +4,12 @@ from collections.abc import Sequence
 import pytest
 
 import core.subagent as subagent
+from core.agent_loop import AgentLoop
 from core.context import ContextBudget
 from core.model import Message, TextDelta, ToolCall, ToolCallEvent, UsageEvent
+from core.session import Session
 from core.subagent import SCOUT_SUMMARY_MAX_CHARS, create_spawn_agent_tool
+from core.tools import ToolManager
 
 
 class ScoutClient:
@@ -191,3 +194,57 @@ async def test_spawn_agent_caps_parallel_runs_at_three(tmp_path) -> None:
     )
 
     assert peak == 3
+
+
+@pytest.mark.asyncio
+async def test_parent_session_persists_scout_task_and_summary(tmp_path) -> None:
+    """测试父会话只落盘 Scout 任务与最终摘要，恢复后调用链完整。"""
+
+    class ParentAndScoutClient:
+        async def stream_response(self, messages, tools=(), thinking_level=None):
+            if any(
+                message.role == "system" and "你是 Scout" in message.content
+                for message in messages
+            ):
+                yield TextDelta("结论：入口位于 src/core/ui.py")
+                return
+            if not any(message.role == "tool" for message in messages):
+                yield ToolCallEvent(
+                    ToolCall("spawn-1", "spawn_agent", {"task": "定位程序入口"})
+                )
+                return
+            yield TextDelta("已根据 Scout 摘要完成定位")
+
+    client = ParentAndScoutClient()
+    manager = ToolManager()
+    manager.register_local(
+        *create_spawn_agent_tool(
+            tmp_path,
+            lambda: client,
+            lambda: "high",
+            ContextBudget(10_000, 1_000, 2_000),
+        )
+    )
+    result = await AgentLoop(client, manager).run(
+        [Message("user", "入口在哪里？")]
+    )
+    session = Session(tmp_path)
+    session.add_user_message("入口在哪里？")
+    for message in result.new_messages:
+        session.add_message(message)
+    assert session.flush_persistence()
+    session_id = session.session_id
+    session.close()
+
+    restored = Session.restore(tmp_path, session_id)
+
+    assert restored.get_messages()[1].tool_calls == (
+        ToolCall("spawn-1", "spawn_agent", {"task": "定位程序入口"}),
+    )
+    assert restored.get_messages()[2] == Message(
+        "tool",
+        "结论：入口位于 src/core/ui.py",
+        tool_call_id="spawn-1",
+    )
+    assert all("read_file" not in message.content for message in restored.get_messages())
+    restored.close()
