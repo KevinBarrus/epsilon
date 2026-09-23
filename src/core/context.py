@@ -45,8 +45,16 @@ class ContextBudget:
 
 DEFAULT_CONTEXT_BUDGET = ContextBudget(100_000, 16_000, 20_000)
 
-# 驱逐时保护最近 N 条完整工具输出不被降级，避免破坏当前轮次依赖
-KEEP_RECENT_TOOL_OUTPUTS = 10
+# 驱逐迟滞区：触发后不停在阈值边缘，一次降级到阈值的 65% 以内，
+# 避免贴着阈值反复触发反复断缓存（前缀缓存约束：仍是一次触发生成
+# 一条原子 EvictionRecord，禁止逐轮漂移）
+EVICTION_TARGET_RATIO = 0.65
+# 收益门槛：完整驱逐计划的预计节省不足该 token 数时放弃本轮驱逐，
+# 不为微小收益打断前缀缓存（参考 oh-my-pi 的 minSavings: 4000）
+EVICTION_MIN_SAVINGS_TOKENS = 4_000
+# 最近内容保护：从最新工具输出往回累计约该 token 数内的输出不参与
+# 驱逐，按 token 预算而非条数保护，长输出下同样有效
+KEEP_RECENT_TOOL_OUTPUT_TOKENS = 16_000
 
 
 class ContextCompactionRequired(RuntimeError):
@@ -70,12 +78,26 @@ class UserInputTooLarge(ValueError):
 
 @dataclass(frozen=True)
 class ContextBuildResult:
-    """保存模型上下文及本次新生成的压缩记录。"""
+    """保存模型上下文及本次新生成的压缩与驱逐记录。"""
 
     messages: list[Message]
     compaction: CompactionRecord | None = None
     eviction: EvictionRecord | None = None
     fallback_used: bool = False
+    # 驱逐诊断：被收益门槛拦下 / 驱逐后估算，供评测事件记录归因
+    eviction_gate_rejected: bool = False
+    eviction_tokens_before: int | None = None
+    eviction_tokens_after: int | None = None
+
+
+@dataclass(frozen=True)
+class _EvictionOutcome:
+    """一次驱逐判定的结果与诊断信息。"""
+
+    record: EvictionRecord | None
+    gate_rejected: bool = False
+    tokens_before: int | None = None
+    tokens_after: int | None = None
 
 
 SUMMARY_SECTIONS = (
@@ -323,19 +345,29 @@ class ContextManager:
         ]
         self._ensure_message_budget()
         # 估算越过驱逐阈值时一次性批量驱逐，驱逐后前缀重新稳定
-        new_eviction = self._maybe_evict(
+        eviction_outcome = self._maybe_evict(
             original_messages, compactions, evictions
         )
+        new_eviction = eviction_outcome.record
         if new_eviction is not None:
             evictions = [*evictions, new_eviction]
             messages = _apply_latest_compaction(
                 _apply_evictions(original_messages, evictions, self._artifact_store),
                 compactions,
             )
+        eviction_diagnostics = {
+            "eviction_gate_rejected": eviction_outcome.gate_rejected,
+            "eviction_tokens_before": eviction_outcome.tokens_before,
+            "eviction_tokens_after": eviction_outcome.tokens_after,
+        }
         try:
             if force_compaction:
                 raise ContextCompactionRequired("server rejected the context, forced compaction")
-            return ContextBuildResult(self.build(messages), eviction=new_eviction)
+            return ContextBuildResult(
+                self.build(messages),
+                eviction=new_eviction,
+                **eviction_diagnostics,
+            )
         except ContextCompactionRequired:
             recent = select_recent_messages(messages, min(
                 self._budget.keep_recent_tokens,
@@ -373,7 +405,11 @@ class ContextManager:
                         )
                     )
                 except ContextSummaryError:
-                    return ContextBuildResult(self.build_fallback(messages), fallback_used=True)
+                    return ContextBuildResult(
+                        self.build_fallback(messages),
+                        fallback_used=True,
+                        **eviction_diagnostics,
+                    )
 
                 summary = _add_file_operation_sections(
                     "\n\n".join(summaries),
@@ -389,7 +425,11 @@ class ContextManager:
                 try:
                     compacted_messages = self.build(compacted_messages)
                 except ContextCompactionRequired:
-                    return ContextBuildResult(self.build_fallback(messages), fallback_used=True)
+                    return ContextBuildResult(
+                        self.build_fallback(messages),
+                        fallback_used=True,
+                        **eviction_diagnostics,
+                    )
                 compaction = CompactionRecord(
                     summary=summary,
                     first_kept_message_index=_first_message_index(
@@ -399,7 +439,10 @@ class ContextManager:
                     tokens_before=self._estimate(messages),
                 )
                 return ContextBuildResult(
-                    compacted_messages, compaction, eviction=new_eviction
+                    compacted_messages,
+                    compaction,
+                    eviction=new_eviction,
+                    **eviction_diagnostics,
                 )
 
             recent_conversation = [
@@ -410,7 +453,11 @@ class ContextManager:
             ]
             omitted_count = len(all_conversation) - len(recent_conversation)
             if omitted_count <= 0:
-                return ContextBuildResult(self.build_fallback(messages), fallback_used=True)
+                return ContextBuildResult(
+                    self.build_fallback(messages),
+                    fallback_used=True,
+                    **eviction_diagnostics,
+                )
 
             omitted = all_conversation[:omitted_count]
             try:
@@ -424,7 +471,11 @@ class ContextManager:
                     _collect_file_operations(original_messages, self._tool_capabilities),
                 )
             except ContextSummaryError:
-                return ContextBuildResult(self.build_fallback(messages), fallback_used=True)
+                return ContextBuildResult(
+                    self.build_fallback(messages),
+                    fallback_used=True,
+                    **eviction_diagnostics,
+                )
 
             summary_message = Message(
                 role="system",
@@ -445,9 +496,16 @@ class ContextManager:
             try:
                 compacted_messages = self.build(compacted_messages)
             except ContextCompactionRequired:
-                return ContextBuildResult(self.build_fallback(messages), fallback_used=True)
+                return ContextBuildResult(
+                    self.build_fallback(messages),
+                    fallback_used=True,
+                    **eviction_diagnostics,
+                )
             return ContextBuildResult(
-                compacted_messages, compaction, eviction=new_eviction
+                compacted_messages,
+                compaction,
+                eviction=new_eviction,
+                **eviction_diagnostics,
             )
 
     def _maybe_evict(
@@ -455,27 +513,33 @@ class ContextManager:
         original_messages: list[Message],
         compactions: Sequence[CompactionRecord],
         evictions: Sequence[EvictionRecord],
-    ) -> EvictionRecord | None:
+    ) -> _EvictionOutcome:
         """估算越过驱逐阈值时，一次性批量降级陈旧工具输出。
 
-        只在阈值边界触发：从最旧的完整工具输出开始逐条落盘并降级，
-        直到估算回到阈值内；本次未触发则不产生新记录，既有视图
-        保持逐字节稳定，前缀缓存只在边界推进那一刻断一次。
+        三段式判定（前缀缓存约束：一次触发只生成一条原子
+        EvictionRecord，禁止逐轮漂移）：
+        1. 越过阈值才考虑，未越过直接返回；
+        2. 先按完整驱逐计划核算预计节省，不足收益门槛则放弃本轮
+           （上下文继续增长，候选攒够后自然会过门槛）；
+        3. 执行时不停在阈值边缘，持续降级到迟滞目标
+           （阈值 × EVICTION_TARGET_RATIO）或候选用尽。
         """
 
         if not self._eviction_enabled or self._artifact_store is None:
-            return None
+            return _EvictionOutcome(None)
         threshold = (
             self._eviction_threshold_tokens
             if self._eviction_threshold_tokens is not None
             else self._budget.compaction_threshold // 2
         )
+        target = int(threshold * EVICTION_TARGET_RATIO)
         current_view = _apply_latest_compaction(
             _apply_evictions(original_messages, evictions, self._artifact_store),
             compactions,
         )
-        if self._estimate(current_view) <= threshold:
-            return None
+        tokens_before = self._estimate(current_view)
+        if tokens_before <= threshold:
+            return _EvictionOutcome(None)
         # 以完整历史坐标定位视图中仍完整存在的工具输出
         original_index = {id(message): index for index, message in enumerate(original_messages)}
         tool_items = [
@@ -483,8 +547,14 @@ class ContextManager:
             for message in current_view
             if message.role == "tool" and id(message) in original_index
         ]
-        protected = tool_items[-KEEP_RECENT_TOOL_OUTPUTS:] if KEEP_RECENT_TOOL_OUTPUTS else []
-        protected_ids = {index for index, _ in protected}
+        # 从最新工具输出往回累计 token 预算，预算内的一律不进候选
+        protected_ids: set[int] = set()
+        protected_budget = 0
+        for index, message in reversed(tool_items):
+            if protected_budget >= KEEP_RECENT_TOOL_OUTPUT_TOKENS:
+                break
+            protected_ids.add(index)
+            protected_budget += estimate_message_tokens(message)
         candidates = [
             (index, message)
             for index, message in tool_items
@@ -492,35 +562,80 @@ class ContextManager:
             and not is_artifact_placeholder(message.content)
         ]
         if not candidates:
-            return None
-        tokens_before = self._estimate(current_view)
-        evicted: list[EvictedToolOutput] = []
-        for index, message in candidates:
-            artifact_id = self._artifact_store.save(
-                message.content,
-                session_id=self._session_id,
-                source_tool="tool_output",
+            return _EvictionOutcome(None)
+
+        def planned_tokens(count: int) -> int:
+            """纯内存估算前 N 个候选降级后的请求大小，不提前写 artifact。"""
+
+            planned_indices = {index for index, _ in candidates[:count]}
+            planned_view = [
+                replace(
+                    message,
+                    content=artifact_placeholder("0", message.content),
+                )
+                if (
+                    message.role == "tool"
+                    and id(message) in original_index
+                    and original_index[id(message)] in planned_indices
+                )
+                else message
+                for message in current_view
+            ]
+            return self._estimate(planned_view)
+
+        full_tokens = planned_tokens(len(candidates))
+        if tokens_before - full_tokens < EVICTION_MIN_SAVINGS_TOKENS:
+            return _EvictionOutcome(
+                None,
+                gate_rejected=True,
+                tokens_before=tokens_before,
+                tokens_after=full_tokens,
             )
-            evicted.append(EvictedToolOutput(index, artifact_id, len(message.content)))
-            trial = EvictionRecord(
-                before_message_index=index + 1,
+        # 迟滞降级：先纯估算选中数量，再落盘；若占位符实际开销略有
+        # 偏差，则继续补充候选，确保真实视图进入迟滞区或候选用尽。
+        selected_count = next(
+            (
+                count
+                for count in range(1, len(candidates) + 1)
+                if planned_tokens(count) <= target
+            ),
+            len(candidates),
+        )
+        evicted: list[EvictedToolOutput] = []
+        while True:
+            for index, message in candidates[len(evicted) : selected_count]:
+                evicted.append(
+                    EvictedToolOutput(
+                        index,
+                        self._artifact_store.save(
+                            message.content,
+                            session_id=self._session_id,
+                            source_tool="tool_output",
+                        ),
+                        len(message.content),
+                    )
+                )
+            record = EvictionRecord(
+                before_message_index=evicted[-1].message_index + 1,
                 evicted=tuple(evicted),
                 tokens_before=tokens_before,
             )
-            trial_view = _apply_latest_compaction(
+            actual_view = _apply_latest_compaction(
                 _apply_evictions(
-                    original_messages, [*evictions, trial], self._artifact_store
+                    original_messages,
+                    [*evictions, record],
+                    self._artifact_store,
                 ),
                 compactions,
             )
-            if self._estimate(trial_view) <= threshold:
-                return trial
-        # 全部候选降级仍未达阈值：返回已降级部分，剩余交给压缩处理
-        return EvictionRecord(
-            before_message_index=candidates[-1][0] + 1,
-            evicted=tuple(evicted),
-            tokens_before=tokens_before,
-        )
+            tokens_after = self._estimate(actual_view)
+            if tokens_after <= target or selected_count == len(candidates):
+                return _EvictionOutcome(
+                    record,
+                    tokens_before=tokens_before,
+                    tokens_after=tokens_after,
+                )
+            selected_count += 1
 
 
 def _apply_latest_compaction(

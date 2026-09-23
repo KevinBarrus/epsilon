@@ -659,7 +659,22 @@ def _context_builder(
             events.append({"type": "compaction"})
         if result.eviction is not None:
             session.add_eviction(result.eviction)
-            events.append({"type": "eviction"})
+            events.append(
+                {
+                    "type": "eviction",
+                    "tokens_before": result.eviction.tokens_before,
+                    "tokens_after": result.eviction_tokens_after,
+                    "evicted_outputs": len(result.eviction.evicted),
+                }
+            )
+        if result.eviction_gate_rejected:
+            events.append(
+                {
+                    "type": "eviction_gate_rejected",
+                    "tokens_before": result.eviction_tokens_before,
+                    "tokens_after": result.eviction_tokens_after,
+                }
+            )
         return result
 
     return build_context

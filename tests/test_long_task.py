@@ -237,6 +237,7 @@ async def test_run_long_task_runs_stages_and_writes_records(
     assert records[1]["validation_kind"] == "ordering-tests"
     assert records[1]["harness_passed"] is True
     assert records[3]["total_actual_tokens"] == 3_000
+    assert records[3]["total_eviction_gate_rejections"] == 0
 
 
 @pytest.mark.asyncio

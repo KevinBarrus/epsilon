@@ -13,7 +13,7 @@ from core.context import (
     UserInputTooLarge,
     CONTEXT_FALLBACK_NOTICE,
     SUMMARY_OMITTED_NOTICE,
-    KEEP_RECENT_TOOL_OUTPUTS,
+    KEEP_RECENT_TOOL_OUTPUT_TOKENS,
     estimate_context_tokens,
     estimate_model_request_tokens,
     estimate_message_tokens,
@@ -941,8 +941,7 @@ def test_maybe_evict_disabled_returns_none(tmp_path) -> None:
     manager = _eviction_manager(tmp_path, enabled=False)
     messages = _tool_messages(13)
     manager.update_budget(ContextBudget(2_000, 0, 10))
-
-    assert manager._maybe_evict(messages, (), ()) is None
+    assert manager._maybe_evict(messages, (), ()).record is None
 
 
 def test_maybe_evict_within_threshold_returns_none(tmp_path) -> None:
@@ -953,40 +952,41 @@ def test_maybe_evict_within_threshold_returns_none(tmp_path) -> None:
     total = manager.estimate_tokens(messages)
     manager.update_budget(ContextBudget(2 * (total + 10), 0, 10))
 
-    assert manager._maybe_evict(messages, (), ()) is None
+    assert manager._maybe_evict(messages, (), ()).record is None
 
 
 def test_maybe_evict_triggers_once_and_then_stabilizes(tmp_path) -> None:
-    """测试越过阈值时只驱逐到位一次，视图回到阈值后不再触发。"""
+    """测试越过阈值时一次原子批量降到位，之后视图稳定不再触发。"""
 
     manager = _eviction_manager(tmp_path)
-    messages = _tool_messages(13)
+    messages = _tool_messages(6, lines=1_000)
     total = manager.estimate_tokens(messages)
-    # 驱逐阈值设为 total - 1：必须触发，且降级最旧一条后即回到阈值内
-    manager.update_budget(ContextBudget(2 * (total - 1), 0, 10))
+    threshold = int(total / 1.5)
+    manager = _eviction_manager(tmp_path, threshold=threshold)
+    manager.update_budget(ContextBudget(total + 10_000, 0, 10))
 
-    record = manager._maybe_evict(messages, (), ())
+    outcome = manager._maybe_evict(messages, (), ())
 
-    assert record is not None
-    assert [item.message_index for item in record.evicted] == [0]
-    assert manager._maybe_evict(messages, (), (record,)) is None
+    assert outcome.record is not None
+    assert outcome.tokens_after <= int(threshold * 0.65)
+    assert manager._maybe_evict(messages, (), (outcome.record,)).record is None
 
 
 def test_maybe_evict_never_touches_recent_outputs(tmp_path) -> None:
-    """测试最近 KEEP_RECENT_TOOL_OUTPUTS 条工具输出始终受保护。"""
+    """测试最近约 16000 token 内的工具输出受保护，更旧的才会被驱逐。"""
 
     manager = _eviction_manager(tmp_path)
     messages = _tool_messages(15)
     # 阈值远低于可达水平：所有非保护候选都会被降级
     manager.update_budget(ContextBudget(1_000, 0, 10))
 
-    record = manager._maybe_evict(messages, (), ())
+    outcome = manager._maybe_evict(messages, (), ())
 
-    assert record is not None
-    evicted_indices = {item.message_index for item in record.evicted}
-    protected_start = 15 - KEEP_RECENT_TOOL_OUTPUTS
-    assert evicted_indices == set(range(protected_start))
-    assert all(index < protected_start for index in evicted_indices)
+    assert outcome.record is not None
+    evicted_indices = {item.message_index for item in outcome.record.evicted}
+    # 每条约 2000 token，从最新往回累计 16000 token 保护 8 条（index 7..14）
+    assert evicted_indices == set(range(7))
+    assert all(index >= 7 for index in set(range(15)) - evicted_indices)
 
 
 def test_maybe_evict_skips_existing_placeholder(tmp_path) -> None:
@@ -1001,10 +1001,11 @@ def test_maybe_evict_skips_existing_placeholder(tmp_path) -> None:
     )
     manager.update_budget(ContextBudget(1_000, 0, 10))
 
-    record = manager._maybe_evict(messages, (), ())
+    outcome = manager._maybe_evict(messages, (), ())
 
-    assert record is not None
-    assert 0 not in {item.message_index for item in record.evicted}
+    assert outcome.record is not None
+    assert 0 not in {item.message_index for item in outcome.record.evicted}
+
 
 
 @pytest.mark.asyncio
@@ -1031,19 +1032,67 @@ def test_maybe_evict_without_custom_threshold_uses_half_budget(tmp_path) -> None
     # 默认阈值 = total + 1000 > total，不应触发
     manager.update_budget(ContextBudget(2 * (total + 1_000), 0, 10))
 
-    assert manager._maybe_evict(messages, (), ()) is None
+    assert manager._maybe_evict(messages, (), ()).record is None
 
 
 def test_maybe_evict_uses_custom_threshold(tmp_path) -> None:
     """测试自定义阈值优先于压缩阈值的一半。"""
 
     manager = _eviction_manager(tmp_path, threshold=100)
-    messages = _tool_messages(20, lines=1)
+    messages = _tool_messages(20)
     total = manager.estimate_tokens(messages)
     # 同一预算下默认阈值不会触发，自定义 100 会触发
     manager.update_budget(ContextBudget(2 * (total + 1_000), 0, 10))
 
-    record = manager._maybe_evict(messages, (), ())
+    outcome = manager._maybe_evict(messages, (), ())
 
-    assert record is not None
-    assert record.evicted
+    assert outcome.record is not None
+    assert outcome.record.evicted
+
+
+def test_maybe_evict_rejected_below_min_savings(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """测试完整驱逐计划节省不足门槛时放弃驱逐并标记拦截。"""
+
+    monkeypatch.setattr(
+        "core.context.KEEP_RECENT_TOOL_OUTPUT_TOKENS", 100
+    )
+    manager = _eviction_manager(tmp_path)
+    # 两条约 2000 token 的输出 + 用户消息：刚越过 4000 阈值，
+    # 但全部降级也只省约 3500 token，低于 4000 门槛
+    messages = [*_tool_messages(2), Message(role="user", content="继续")]
+    manager.update_budget(ContextBudget(8_000, 0, 10))
+
+    outcome = manager._maybe_evict(messages, (), ())
+
+    assert outcome.record is None
+    assert outcome.gate_rejected
+    assert not list((tmp_path / "artifacts").rglob("*.txt"))
+
+
+def test_maybe_evict_hysteresis_requires_regrowth_past_threshold(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """测试触发降到位后，需显著增长回阈值上方才会再次触发。"""
+
+    monkeypatch.setattr(
+        "core.context.KEEP_RECENT_TOOL_OUTPUT_TOKENS", 100
+    )
+    manager = _eviction_manager(tmp_path, threshold=20_000)
+    manager.update_budget(ContextBudget(50_000, 0, 10))
+    messages = _tool_messages(3, lines=1_000)
+
+    first = manager._maybe_evict(messages, (), ())
+
+    assert first.record is not None
+    assert first.tokens_after <= int(20_000 * 0.65)
+    # 小幅增长后仍在阈值内，不得再次触发
+    grown = [*messages, Message(role="user", content="u" * 4_000)]
+    assert manager._maybe_evict(grown, (), (first.record,)).record is None
+    # 显著增长并重新越过阈值后才允许再次触发
+    grown_more = [*grown, _tool_messages(1, lines=1_000)[0]]
+    second = manager._maybe_evict(grown_more, (), (first.record,))
+    assert second.record is not None

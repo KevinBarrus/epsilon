@@ -705,12 +705,62 @@ async def test_evaluation_context_persists_eviction(tmp_path: Path) -> None:
 
     assert result.eviction is not None
     assert session.get_evictions()
-    assert any(event.get("type") == "eviction" for event in events)
+    eviction_event = next(
+        event for event in events if event.get("type") == "eviction"
+    )
+    assert eviction_event["tokens_before"] == result.eviction.tokens_before
+    assert eviction_event["tokens_after"] == result.eviction_tokens_after
+    assert eviction_event["evicted_outputs"] == len(result.eviction.evicted)
     artifact_id = result.eviction.evicted[0].artifact_id
     assert store.load(artifact_id) is not None
     assert any(
         f"artifact://{artifact_id}" in message.content for message in result.messages
     )
+    session.close()
+
+
+@pytest.mark.asyncio
+async def test_evaluation_context_records_eviction_gate_rejection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """测试节省不足时记录 gate 拦截事件且不写驱逐记录。"""
+
+    monkeypatch.setattr("core.context.KEEP_RECENT_TOOL_OUTPUT_TOKENS", 100)
+    session = Session(tmp_path)
+    store = ArtifactStore.for_workspace(tmp_path)
+    store.set_session_id(session.session_id)
+    events: list[dict[str, object]] = []
+    build_context = _context_builder(
+        session,
+        object(),  # type: ignore[arg-type]
+        False,
+        events,
+        "test-model",
+        ToolManager(),
+        artifact_store=store,
+        eviction_enabled=True,
+        eviction_threshold_tokens=4_000,
+    )
+    content = "\n".join("x" * 40 for _ in range(200))
+    messages = [
+        Message(role="tool", content=content),
+        Message(role="tool", content=content),
+        Message(role="user", content="继续"),
+    ]
+
+    result = await build_context(messages, False)
+
+    assert result.eviction is None
+    assert result.eviction_gate_rejected is True
+    gate_event = next(
+        event
+        for event in events
+        if event.get("type") == "eviction_gate_rejected"
+    )
+    assert gate_event["tokens_before"] == result.eviction_tokens_before
+    assert gate_event["tokens_after"] == result.eviction_tokens_after
+    assert session.get_evictions() == []
     session.close()
 
 

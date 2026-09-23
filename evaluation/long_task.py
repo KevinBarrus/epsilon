@@ -107,6 +107,8 @@ class LongTaskStageResult:
     cached_tokens: int
     cache_hit_rate: float | None
     eviction_events: int
+    eviction_gate_rejections: int
+    eviction_diagnostics: tuple[dict[str, object], ...]
     compactions: int
     artifact_read_calls: int
     duration_ms: float
@@ -138,6 +140,12 @@ class LongTaskResult:
         """累计驱逐触发次数。"""
 
         return sum(stage.eviction_events for stage in self.stages)
+
+    @property
+    def total_eviction_gate_rejections(self) -> int:
+        """累计被最小收益门槛拦下的驱逐次数。"""
+
+        return sum(stage.eviction_gate_rejections for stage in self.stages)
 
     @property
     def total_compactions(self) -> int:
@@ -339,6 +347,11 @@ async def _run_stage(
     )
     allowed_ok = _allowed_changes_ok(changelog, stage.allowed_changes)
     stage_events = inputs.events[events_before:]
+    eviction_diagnostics = tuple(
+        event
+        for event in stage_events
+        if event.get("type") in {"eviction", "eviction_gate_rejected"}
+    )
 
     requests_after = len(inputs.client.requests)
     actual_after = inputs.client.total_actual_tokens
@@ -363,6 +376,11 @@ async def _run_stage(
         eviction_events=sum(
             event.get("type") == "eviction" for event in stage_events
         ),
+        eviction_gate_rejections=sum(
+            event.get("type") == "eviction_gate_rejected"
+            for event in stage_events
+        ),
+        eviction_diagnostics=eviction_diagnostics,
         compactions=sum(
             event.get("type") == "compaction" for event in stage_events
         ),
@@ -473,6 +491,8 @@ def _stage_record(
         "cached_tokens": result.cached_tokens,
         "cache_hit_rate": result.cache_hit_rate,
         "eviction_events": result.eviction_events,
+        "eviction_gate_rejections": result.eviction_gate_rejections,
+        "eviction_diagnostics": list(result.eviction_diagnostics),
         "compactions": result.compactions,
         "artifact_read_calls": result.artifact_read_calls,
         "duration_ms": result.duration_ms,
@@ -495,6 +515,9 @@ def _arm_record(
         "total_actual_tokens": sum(stage.actual_tokens for stage in stages),
         "total_cached_tokens": sum(stage.cached_tokens for stage in stages),
         "total_eviction_events": sum(stage.eviction_events for stage in stages),
+        "total_eviction_gate_rejections": sum(
+            stage.eviction_gate_rejections for stage in stages
+        ),
         "total_compactions": sum(stage.compactions for stage in stages),
         "total_tool_rounds": sum(stage.tool_rounds for stage in stages),
         "total_artifact_read_calls": sum(
