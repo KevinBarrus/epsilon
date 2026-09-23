@@ -236,6 +236,7 @@ async def _run_scout(
         max_tool_rounds=SCOUT_MAX_TOOL_ROUNDS,
         thinking_level=thinking_level,
         firewall_enabled=False,
+        agent_role="scout",
     ).run(
         [
             Message(

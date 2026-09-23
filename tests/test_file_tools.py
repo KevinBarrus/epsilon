@@ -206,6 +206,21 @@ async def test_search_files_skips_ignored_binary_and_oversized_files(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_search_files_respects_gitignore(tmp_path: Path) -> None:
+    """测试搜索默认遵守工作区的 .gitignore。"""
+
+    (tmp_path / ".gitignore").write_text("generated/\n", encoding="utf-8")
+    (tmp_path / "main.py").write_text("needle\n", encoding="utf-8")
+    (tmp_path / "generated").mkdir()
+    (tmp_path / "generated" / "output.txt").write_text("needle\n", encoding="utf-8")
+    manager = _manager(tmp_path, create_search_files_tool(tmp_path))
+
+    result = await manager.execute(_call("search_files", {"pattern": "needle"}))
+
+    assert result.content == "main.py:1: needle"
+
+
+@pytest.mark.asyncio
 async def test_file_tools_reject_workspace_escape(tmp_path: Path) -> None:
     """测试文件工具拒绝访问工作区之外的路径。"""
 

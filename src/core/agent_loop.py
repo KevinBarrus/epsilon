@@ -33,6 +33,23 @@ class ToolExecutionEvent:
 
     tool_call: ToolCall
     result: ToolResult
+    agent_role: str = "parent"
+
+
+@dataclass(frozen=True)
+class ToolCallStartedEvent:
+    """表示工具已经通过预检并开始执行。"""
+
+    tool_call: ToolCall
+    agent_role: str = "parent"
+
+
+@dataclass(frozen=True)
+class ToolCallCancelledEvent:
+    """表示工具尚未完成便随当前 Agent 运行一起取消。"""
+
+    tool_call: ToolCall
+    agent_role: str = "parent"
 
 
 @dataclass(frozen=True)
@@ -53,7 +70,14 @@ class RetryEvent:
     delay_seconds: float
 
 
-AgentEvent = ModelEvent | ToolExecutionEvent | ToolBatchEvent | RetryEvent
+AgentEvent = (
+    ModelEvent
+    | ToolExecutionEvent
+    | ToolCallStartedEvent
+    | ToolCallCancelledEvent
+    | ToolBatchEvent
+    | RetryEvent
+)
 EventHandler = Callable[[AgentEvent], Awaitable[None]]
 ContextBuilder = Callable[[Sequence[Message], bool], Awaitable[ContextBuildResult]]
 RETRY_BASE_DELAY_SECONDS = 0.5
@@ -129,6 +153,7 @@ class AgentLoop:
         artifact_store: ArtifactStore | None = None,
         session_id: str = "",
         firewall_enabled: bool = True,
+        agent_role: str = "parent",
     ) -> None:
         """创建 Agent Loop，可选地限制单轮工具调用次数。"""
 
@@ -144,6 +169,7 @@ class AgentLoop:
         self._artifact_store = artifact_store
         self._session_id = session_id
         self._firewall_enabled = firewall_enabled
+        self._agent_role = agent_role
 
     def set_artifact_session(self, session_id: str) -> None:
         """绑定会话标识，Session 创建晚于 AgentLoop 时补充 artifact 归属。"""
@@ -384,9 +410,15 @@ class AgentLoop:
                 if isinstance(prepared, ToolResult):
                     results[index] = prepared
                     if on_event is not None:
-                        await on_event(ToolExecutionEvent(tool_call, prepared))
+                        await on_event(ToolExecutionEvent(tool_call, prepared, self._agent_role))
                 else:
                     prepared_calls.append((index, prepared))
+
+            if on_event is not None:
+                for _, prepared in prepared_calls:
+                    await on_event(
+                        ToolCallStartedEvent(prepared.tool_call, self._agent_role)
+                    )
 
             execution_mode: Literal["parallel", "sequential"] = (
                 "parallel"
@@ -409,11 +441,21 @@ class AgentLoop:
                     result = await self._tool_manager.execute_prepared(prepared)
                     results[index] = result
                     if on_event is not None:
-                        await on_event(ToolExecutionEvent(prepared.tool_call, result))
+                        await on_event(
+                            ToolExecutionEvent(
+                                prepared.tool_call, result, self._agent_role
+                            )
+                        )
             batch_duration_ms = (perf_counter() - batch_started_at) * 1000
             assert all(result is not None for result in results)
             return [result for result in results if result is not None], execution_mode, batch_duration_ms
         except asyncio.CancelledError as exc:
+            if on_event is not None:
+                for index, tool_call in enumerate(tool_calls):
+                    if results[index] is None:
+                        await on_event(
+                            ToolCallCancelledEvent(tool_call, self._agent_role)
+                        )
             unknown_call_ids = frozenset(
                 tool_call.call_id
                 for index, tool_call in enumerate(tool_calls)
@@ -452,7 +494,9 @@ class AgentLoop:
                 index, tool_call, result = await completed
                 results[index] = result
                 if on_event is not None:
-                    await on_event(ToolExecutionEvent(tool_call, result))
+                    await on_event(
+                        ToolExecutionEvent(tool_call, result, self._agent_role)
+                    )
         except BaseException:
             for task in tasks:
                 task.cancel()

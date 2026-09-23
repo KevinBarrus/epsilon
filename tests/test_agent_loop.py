@@ -9,6 +9,7 @@ from core.agent_loop import (
     AgentLoop,
     AgentLoopCancelled,
     AgentLoopFailed,
+    ToolCallStartedEvent,
     ToolBatchEvent,
     ToolExecutionEvent,
 )
@@ -1339,3 +1340,34 @@ def test_tool_result_message_skips_firewall_when_disabled(tmp_path) -> None:
 
     assert message.content == limit_tool_output(content)
     assert not is_artifact_placeholder(message.content)
+
+
+@pytest.mark.asyncio
+async def test_tool_events_include_agent_role_and_start(monkeypatch) -> None:
+    """测试工具事件能区分父 Agent，并在完成前记录开始事件。"""
+
+    class Client:
+        async def stream_response(self, messages, tools=(), thinking_level=None):
+            if messages[-1].role == "user":
+                yield ToolCallEvent(ToolCall("c1", "read", {}))
+            else:
+                yield TextDelta("done")
+
+    manager = ToolManager()
+    manager.register_local(
+        ToolDefinition("read", "read", {"type": "object"}, "local", "read", True),
+        lambda call: _tool_result(call, "ok"),
+    )
+    events = []
+
+    async def collect(event):
+        events.append(event)
+
+    await AgentLoop(Client(), manager, agent_role="parent").run(
+        [Message("user", "inspect")], on_event=collect
+    )
+
+    started = next(event for event in events if isinstance(event, ToolCallStartedEvent))
+    finished = next(event for event in events if isinstance(event, ToolExecutionEvent))
+    assert started.agent_role == "parent"
+    assert finished.agent_role == "parent"
