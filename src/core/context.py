@@ -137,6 +137,14 @@ class ContextManager:
 
         self._budget = budget
 
+    def update_model_tools(
+        self,
+        model_tools: Sequence[Mapping[str, object]],
+    ) -> None:
+        """更新当前模型可见工具，使运行时开关同步影响预算估算。"""
+
+        self._model_tools = tuple(model_tools)
+
     def set_session_id(self, session_id: str) -> None:
         """绑定会话标识，Session 创建晚于上下文管理器时补充驱逐落盘归属。"""
 

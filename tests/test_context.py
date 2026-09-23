@@ -128,6 +128,19 @@ def test_context_manager_counts_tool_schema_and_message_protocol() -> None:
         manager.build(messages)
 
 
+def test_context_manager_updates_runtime_model_tools() -> None:
+    """测试运行时工具开关会同步改变上下文预算估算。"""
+
+    tools = [{"type": "function", "function": {"name": "spawn_agent", "parameters": {}}}]
+    manager = ContextManager(ContextBudget(100, 10, 50), model_tools=tools)
+    messages = [Message(role="user", content="你好")]
+    enabled_tokens = manager.estimate_tokens(messages)
+
+    manager.update_model_tools([])
+
+    assert manager.estimate_tokens(messages) < enabled_tokens
+
+
 @pytest.mark.asyncio
 async def test_oversized_user_input_is_never_summarized_or_truncated() -> None:
     """测试单条超大用户指令会在摘要请求前被明确拒绝。"""

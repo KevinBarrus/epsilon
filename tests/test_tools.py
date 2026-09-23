@@ -77,6 +77,22 @@ async def test_tool_manager_executes_registered_tool() -> None:
     assert result == ToolResult(call_id="call-1", content="文件内容")
 
 
+def test_tool_manager_can_hide_registered_tool_from_model() -> None:
+    """测试运行时开关只改变模型可见工具，不删除注册项。"""
+
+    manager = ToolManager()
+    manager.register_local(_definition(), _handler())
+
+    manager.set_model_tool_enabled("read_file", False)
+
+    assert manager.model_tools() == []
+    assert manager.list_definitions() == [_definition()]
+
+    manager.set_model_tool_enabled("read_file", True)
+
+    assert manager.model_tools()[0]["function"]["name"] == "read_file"  # type: ignore[index]
+
+
 @pytest.mark.asyncio
 async def test_tool_manager_prepares_before_executing_handler() -> None:
     """测试预检完成前不会执行工具处理函数。"""

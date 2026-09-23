@@ -39,6 +39,7 @@ class ToolManager:
 
         self._registry = registry or ToolRegistry()
         self._permission_manager = permission_manager or PermissionManager()
+        self._hidden_model_tools: set[str] = set()
 
     def register_local(
         self,
@@ -53,6 +54,14 @@ class ToolManager:
         """返回当前已注册的工具定义。"""
 
         return self._registry.definitions()
+
+    def set_model_tool_enabled(self, name: str, enabled: bool) -> None:
+        """切换工具是否对模型可见，不改变工具注册和执行能力。"""
+
+        if enabled:
+            self._hidden_model_tools.discard(name)
+        else:
+            self._hidden_model_tools.add(name)
 
     async def register_mcp_provider(self, provider: McpToolProvider) -> None:
         """发现 MCP 工具并注册到统一工具注册表。"""
@@ -89,6 +98,7 @@ class ToolManager:
                 },
             }
             for definition in self.list_definitions()
+            if definition.name not in self._hidden_model_tools
         ]
 
     async def execute(self, tool_call: ToolCall) -> ToolResult:
