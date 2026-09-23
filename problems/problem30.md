@@ -13,7 +13,7 @@ Epsilon 目前是单 Agent：一次会话里一个模型负责"读代码 → 改
 ### 目标
 
 - **第一版**：只实现只读 Scout，验证上下文隔离是否能减少主 Agent 的探索噪声，并分别观察父 Agent token、全部 Agent token、耗时和任务结果；
-- **第二版**：并行加速、异步交付、自定义 subagent 等进阶能力。
+- **第二版**：增加 Worker 和 Reviewer，形成“定位 → 修改 → 验证”的同步委派闭环。
 
 ### 定位
 
@@ -28,6 +28,8 @@ Epsilon 目前是单 Agent：一次会话里一个模型负责"读代码 → 改
 1. **工具注册**：`spawn_agent` 进入 ToolManager，description 写明"把只读探索任务委派给 Scout，Scout 独立工作、只返回有界摘要"；
 2. **系统提示词注入说明**：说明 Scout 的职责、只读边界和适用场景，供主模型判断何时委派；
 3. **参数 schema**：第一版只有 `task`（任务描述），不为尚不存在的角色保留字段。
+
+第二版不修改第一版工具语义，而是增加角色专用工具，避免为了动态角色改造现有工具调度协议。
 
 主模型调不调、何时调，由它自己判断——这正是工具机制的天然属性，与"on 只是允许、不是强制"的语义一致。
 
@@ -127,28 +129,53 @@ DeepSeek 思考模式 + 工具循环要求回传 reasoning_content，但这条�
 
 ## 四、第二版方案
 
-### 4.1 worktree 文件隔离（并行写）
+### 4.1 目标与角色
 
-目标场景：多个 Worker 并行写文件不冲突。采用 oh-my-pi 模式：
+第二版只解决一个问题：让主 Agent 能把修改和验证工作交给子 Agent，同时继续使用现有审批、串行写入和共享工作区机制。
 
-- 每个写子 Agent 在 copy-on-write worktree 里跑，跑完 `mergeIsolatedChanges` 合回主工作区；
-- **前提**：工作区必须是 git 仓库。评测工作区是无 git 快照，需要先解决"给快照 git init"的矛盾；
-- **冲突策略**：merge 失败保留分支、报 conflict（oh-my-pi 的 rescueTaskBranch 模式），不让冲突静默丢改动。
+| 角色 | 职责 | 工具权限 | 调度 |
+|---|---|---|---|
+| Scout（侦察） | 找文件、读代码、定位问题 | 只读工具 | 可并行 |
+| Worker（干活） | 修改代码并运行必要验证 | 全部本地工具 | 串行 |
+| Reviewer（审查） | 独立阅读改动并运行检查 | 只读工具 + `run_command` | 串行 |
 
-### 4.2 异步交付
+三个角色都继承主模型和思考强度，使用独立上下文，只向父 Agent 返回有界摘要，也都不能创建孙 Agent。
 
-主 Agent 不必阻塞等子 Agent。采用 oh-my-pi 的 `agent://<id>` 交付模式：
+### 4.2 角色专用工具
 
-- 子 Agent 后台跑，结果落到 `agent://<jobId>`；
-- 主 Agent 先回复用户"正在等待子 Agent"，子 Agent 返回后结果在主 Agent 下一次工具调用前注入。
+保留第一版的 `spawn_agent(task)` 作为 Scout 工具，并新增：
 
-### 4.3 分角色配模型（省钱场景）
+```text
+spawn_worker(task)
+spawn_reviewer(task)
+```
 
-配置文件的 `model` 字段启用：Scout 用便宜模型、Worker / 主 Agent 用贵模型，或跨服务商分摊额度。**第一版不做，留字段占位。**
+采用不同工具而不是给 `spawn_agent` 增加 `role` 参数，原因是现有 `execution_mode` 固定在工具定义上：Scout 可以保持并行，Worker 和 Reviewer 可以固定串行，不需要增加动态调度协议。
 
-### 4.4 自定义 subagent
+### 4.3 写入、命令与审批
 
-允许用户定义自己的 subagent（name / description / system prompt / 工具权限 / 模型）。形式（UI 还是配置文件）届时再权衡"对懒用户是否友好"，不在第一版决定。
+- Worker 和 Reviewer 与父 Agent 共享当前工作区；
+- Worker 的写文件和命令工具继续使用现有 TUI 审批，不因委派而绕过权限；
+- Reviewer 的系统提示词要求它只运行与验证相关的命令，但这不是安全沙箱；每次 Shell 命令仍需用户审批；
+- Worker 和 Reviewer 串行执行，同一时间最多运行一个写任务，避免共享工作区发生写入冲突；
+- 父 Agent 负责检查子 Agent 的结果并向用户交付，不能把 Worker 的摘要直接视为任务完成证明。
+
+### 4.4 通信、失败与持久化
+
+- 第二版继续同步等待，不引入后台任务和消息队列；
+- 父请求取消时取消正在运行的子 Agent；
+- 子 Agent 失败、超时或达到工具轮次上限时返回结构化错误，父 Agent 可以继续处理；
+- 父会话仍只保存角色工具调用的 task 和最终摘要，不保存子 Agent 的完整内部轨迹；
+- Worker 的修改直接存在于共享工作区，摘要必须列出修改文件、验证命令和验证结果；
+- Reviewer 的摘要必须给出通过项、发现的问题和证据。
+
+### 4.5 第二版明确不做
+
+- **不做 worktree**：串行 Worker 已经避免并行写冲突；等真实数据证明并行写有价值后再增加 Git 隔离；
+- **不做异步交付**：后台生命周期、结果注入、TUI 通知和 Turn/Step 恢复应单独设计；
+- **不做分角色模型**：先验证角色本身有价值，再承担多客户端、上下文窗口和计费配置复杂度；
+- **不做自定义 subagent**：内置角色稳定后再设计提示词来源、工具授权和配置校验；
+- **不做跨 Agent Artifact 共享**：各角色继续通过有界摘要向父 Agent 交付结果。
 
 ## 五、验收标准
 
@@ -165,9 +192,15 @@ DeepSeek 思考模式 + 工具循环要求回传 reasoning_content，但这条�
 
 ### 第二版
 
-- worktree 隔离下多个 Worker 并行改文件、合并结果正确、冲突有明确处理；
-- 异步交付下主 Agent 不阻塞，结果能正确注入；
-- 分角色配模型生效。
+- Worker 能在用户审批后修改文件并运行验证；
+- Reviewer 能独立读取修改、运行经用户批准的检查并返回审查摘要；
+- Scout 可并行，Worker 和 Reviewer 串行；
+- 三个角色只能看到各自允许的工具，且都无法创建孙 Agent；
+- 子 Agent 失败、取消或超时后，父 Agent 能继续运行；
+- 父会话保存角色、task 与最终摘要，恢复后工具调用链完整；
+- 父 Agent 会检查子 Agent 的修改和验证结果，再向用户交付；
+- 至少完成一个“Scout 定位 → Worker 修改 → Reviewer 验证”的演示任务；
+- 全量单元测试通过。
 
 ## 六、与三家的对照（取舍依据）
 
@@ -176,4 +209,4 @@ DeepSeek 思考模式 + 工具循环要求回传 reasoning_content，但这条�
 | oh-my-pi | task 工具显式调用 | 独立 session + 结构化输出 | 默认 worktree（依赖 git，可关） |
 | codex | spawn_agent 工具显式调用 | 独立 Thread | 无（共享 cwd + 并发槽位） |
 | ClaudeCode | 自动委派 + 显式 | 独立 context window，只回 summary | 可选（--worktree flag） |
-| **Epsilon（本方案）** | spawn_agent 工具显式调用 | 独立 context，只回有界摘要 | 第一版只读共享，第二版待对齐 |
+| **Epsilon（本方案）** | 角色专用工具显式调用 | 独立 context，只回有界摘要 | 共享工作区，写子 Agent 串行 |
