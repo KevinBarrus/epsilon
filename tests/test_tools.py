@@ -86,10 +86,12 @@ def test_tool_manager_can_hide_registered_tool_from_model() -> None:
     manager.set_model_tool_enabled("read_file", False)
 
     assert manager.model_tools() == []
+    assert manager.is_model_tool_enabled("read_file") is False
     assert manager.list_definitions() == [_definition()]
 
     manager.set_model_tool_enabled("read_file", True)
 
+    assert manager.is_model_tool_enabled("read_file") is True
     assert manager.model_tools()[0]["function"]["name"] == "read_file"  # type: ignore[index]
 
 

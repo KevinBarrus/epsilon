@@ -14,9 +14,11 @@ class RecordingClient:
 
     def __init__(self) -> None:
         self.requests: list[list[object]] = []
+        self.tools: list[list[dict[str, object]]] = []
 
     async def stream_response(self, messages, tools=(), thinking_level=None):
         self.requests.append(list(messages))
+        self.tools.append(list(tools))
         yield ui.TextDelta("完成")
 
     async def stream_chat(self, messages):
@@ -93,6 +95,74 @@ async def test_run_chat_start_skill_injects_active_skill(
     assert len(client.requests) == 1
     assert any(
         message.role == "system" and "规范提交正文" in message.content
+        for message in client.requests[0]
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_chat_subagent_command_enables_scout_for_next_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """测试 /subagent 开启后下一轮可见 Scout 工具与父级说明。"""
+
+    class FakeScreen:
+        def __init__(self, status, on_submit, command_names=None, **kwargs) -> None:
+            self._on_submit = on_submit
+            self.application = self
+            self.entries: list[tuple[str, str]] = []
+
+        def add_entry(self, role: str, content: str, style: str = "") -> int:
+            self.entries.append((role, content))
+            return len(self.entries) - 1
+
+        def add_active_entry(self, role: str, content: str, style: str = "") -> int:
+            return self.add_entry(role, content, style)
+
+        def add_history_entries(self, entries) -> None:
+            pass
+
+        def append_to_entry(self, index: int, content: str) -> None:
+            pass
+
+        def commit_entry(self, index: int) -> bool:
+            return True
+
+        def set_tool_result(self, index: int, content: str) -> None:
+            pass
+
+        def set_status_message(self, message: str) -> None:
+            pass
+
+        def set_working(self, message: str | None, show_elapsed: bool = True) -> None:
+            pass
+
+        async def request_choice_picker(self, items, title, extra_options=None):
+            return "on"
+
+        async def request_approval(self, definition, tool_call, allow_session=True):
+            raise AssertionError("不应请求工具审批")
+
+        async def run_async(self) -> None:
+            await self._on_submit("/subagent")
+            await self._on_submit("探索项目")
+
+    client = RecordingClient()
+    monkeypatch.setattr(ui, "ChatScreen", FakeScreen)
+
+    await ui.run_chat(
+        client,
+        create_status_info("test-model", "暂不可查询", tmp_path),
+        workspace=tmp_path,
+        settings=Settings("https://example.com", "test-model", "key"),
+    )
+
+    assert any(
+        tool["function"]["name"] == "spawn_agent"
+        for tool in client.tools[0]
+    )
+    assert any(
+        message.role == "system" and "Scout delegation is enabled" in message.content
         for message in client.requests[0]
     )
 

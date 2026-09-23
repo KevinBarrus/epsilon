@@ -22,6 +22,7 @@ from .diff import diff_command_slash
 from .background_image import background_image_command_slash
 from .delete import delete_command_slash
 from .thinking_toggle import thinking_toggle_command_slash
+from .subagent import subagent_command_slash
 
 __all__ = [
     "CommandContext",
@@ -44,4 +45,5 @@ __all__ = [
     "background_image_command_slash",
     "delete_command_slash",
     "thinking_toggle_command_slash",
+    "subagent_command_slash",
 ]

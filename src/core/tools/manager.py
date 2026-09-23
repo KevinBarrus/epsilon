@@ -63,6 +63,14 @@ class ToolManager:
         else:
             self._hidden_model_tools.add(name)
 
+    def is_model_tool_enabled(self, name: str) -> bool:
+        """返回已注册工具当前是否对模型可见。"""
+
+        return (
+            self._registry.get(name) is not None
+            and name not in self._hidden_model_tools
+        )
+
     async def register_mcp_provider(self, provider: McpToolProvider) -> None:
         """发现 MCP 工具并注册到统一工具注册表。"""
 

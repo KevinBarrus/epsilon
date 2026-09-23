@@ -1,6 +1,7 @@
 """实现 /start-skill 命令。"""
 
 from .registry import CommandContext, SlashCommand
+from .subagent import _refresh_runtime_messages
 
 
 async def start_skill(context: CommandContext) -> None:
@@ -27,9 +28,7 @@ def _apply_active_skills(context: CommandContext, selected: set[str]) -> None:
     """把用户勾选的集合写回 skill 管理器并刷新上下文注入。"""
 
     context.skill_manager.set_active(selected)
-    context.context_manager.set_extra_system_messages(
-        context.skill_manager.active_system_messages()
-    )
+    _refresh_runtime_messages(context)
 
 
 start_skill_command = SlashCommand(

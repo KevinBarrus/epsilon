@@ -185,4 +185,8 @@ async def test_run_chat_registers_and_closes_mcp_provider(
         tool["function"]["name"] == "mcp_demo_remote_echo"
         for tool in captured["tools"]
     )
+    assert all(
+        tool["function"]["name"] != "spawn_agent"
+        for tool in captured["tools"]
+    )
     assert provider.closed

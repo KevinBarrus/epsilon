@@ -35,6 +35,7 @@ from .commands import (
     background_image_command_slash,
     delete_command_slash,
     thinking_toggle_command_slash,
+    subagent_command_slash,
 )
 from .balance import UNAVAILABLE_BALANCE, BalanceProvider
 from .config import Settings
@@ -50,6 +51,7 @@ from .prompts import load_prompt
 from .project_instructions import load_project_instructions
 from .session import Session
 from .skills import SkillManager
+from .subagent import create_spawn_agent_tool
 from .model import ClientHolder
 from .tools import (
     PermissionManager,
@@ -98,6 +100,7 @@ def _default_command_registry() -> CommandRegistry:
     registry.register(background_image_command_slash)
     registry.register(delete_command_slash)
     registry.register(thinking_toggle_command_slash)
+    registry.register(subagent_command_slash)
     return registry
 
 
@@ -428,6 +431,16 @@ async def run_chat(
         create_run_command_tool,
     ):
         tool_manager.register_local(*create_tool(session_workspace))
+    resolved_context_budget = context_budget or DEFAULT_CONTEXT_BUDGET
+    tool_manager.register_local(
+        *create_spawn_agent_tool(
+            session_workspace,
+            lambda: client_holder.client,
+            lambda: agent_loop.thinking_level,
+            resolved_context_budget,
+        )
+    )
+    tool_manager.set_model_tool_enabled("spawn_agent", False)
     if mcp_provider is not None:
         try:
             await tool_manager.register_mcp_provider(mcp_provider)
@@ -435,7 +448,7 @@ async def run_chat(
             await mcp_provider.close()
             raise
     context_manager = ContextManager(
-        context_budget or DEFAULT_CONTEXT_BUDGET,
+        resolved_context_budget,
         {
             definition.name: definition.capability
             for definition in tool_manager.list_definitions()

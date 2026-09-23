@@ -30,6 +30,12 @@ SCOUT_MAX_TOOL_ROUNDS = 8
 SCOUT_TIMEOUT_SECONDS = 120.0
 SCOUT_SUMMARY_MAX_CHARS = 6_000
 SCOUT_SYSTEM_PROMPT = load_prompt("scout")
+SCOUT_PARENT_PROMPT = (
+    "Scout delegation is enabled. Use spawn_agent for independent read-only "
+    "codebase exploration that would otherwise add noisy search and file output "
+    "to the main context. Give each Scout a precise task and use its returned "
+    "summary as evidence, not as unverified fact."
+)
 
 
 @dataclass(frozen=True)
@@ -41,6 +47,12 @@ class ScoutRunMetrics:
     total_tokens: int
     duration_ms: float
     summary_chars: int
+
+
+def scout_parent_message() -> Message:
+    """返回只在 Scout 开启时注入父 Agent 的运行时说明。"""
+
+    return Message(role="system", content=SCOUT_PARENT_PROMPT)
 
 
 def create_spawn_agent_tool(

@@ -17,6 +17,7 @@ from core.commands import (
     quit_command_slash,
     skills_command_slash,
     status_command_slash,
+    subagent_command_slash,
 )
 from core.context import ContextBuildResult, ContextManager, ContextSummaryError
 from core.model import Message
@@ -74,7 +75,10 @@ def _context(**overrides) -> CommandContext:
         ),
         "agent_loop": SimpleNamespace(thinking_level="high"),
         "project_dir": Path("."),
-        "tool_manager": SimpleNamespace(list_definitions=lambda: []),
+        "tool_manager": SimpleNamespace(
+            list_definitions=lambda: [],
+            is_model_tool_enabled=lambda name: False,
+        ),
     }
     defaults.update(overrides)
     return CommandContext(**defaults)
@@ -127,6 +131,45 @@ async def test_mcp_command_lists_only_mcp_tools() -> None:
     content = screen.entries[0][1]
     assert "mcp_tool" in content
     assert "local_tool" not in content
+
+
+@pytest.mark.asyncio
+async def test_subagent_command_enables_scout_and_refreshes_context() -> None:
+    """测试 /subagent 开启 Scout 后同步工具定义与系统说明。"""
+
+    screen = _Screen()
+    screen.choices = ["on"]
+    enabled = False
+
+    def set_enabled(name: str, value: bool) -> None:
+        nonlocal enabled
+        assert name == "spawn_agent"
+        enabled = value
+
+    tool_manager = SimpleNamespace(
+        is_model_tool_enabled=lambda name: enabled,
+        set_model_tool_enabled=set_enabled,
+        model_tools=lambda: [{"function": {"name": "spawn_agent"}}] if enabled else [],
+    )
+    updates: list[object] = []
+    messages: list[object] = []
+    context = _context(
+        screen=screen,
+        tool_manager=tool_manager,
+        context_manager=SimpleNamespace(
+            update_model_tools=updates.append,
+            set_extra_system_messages=messages.extend,
+        ),
+        skill_manager=SimpleNamespace(active_system_messages=lambda: []),
+    )
+
+    await subagent_command_slash.handler(context)
+
+    assert enabled is True
+    assert updates == [[{"function": {"name": "spawn_agent"}}]]
+    assert len(messages) == 1
+    assert "Scout: on" in screen.entries[-1][1]
+    assert "deepseek-v4-pro" in screen.entries[-1][1]
 
 
 @pytest.mark.asyncio
