@@ -256,7 +256,7 @@ async def run_chat(
                     style="class:tool-pending",
                 )
                 awaiting_response_after_tool = True
-                screen.set_working(f"running {event.tool_call.name}")
+                screen.set_working(_tool_working_summary(event.tool_call))
             elif isinstance(event, RetryEvent):
                 screen.set_working(
                     f"Retrying ({event.attempt}/{event.max_attempts}) "
@@ -523,8 +523,20 @@ def _history_display(message: Message, show_thinking: bool) -> str:
 def _tool_call_summary(tool_call) -> str:
     """生成工具调用开始时的单行摘要。"""
 
+    # Scout 只展示任务本身，避免把参数字典和无关字段塞进界面。
+    if tool_call.name == "spawn_agent":
+        task = _single_line(str(tool_call.arguments.get("task", "")), 120)
+        return f"▸ Scout: {task}"
     arguments = _single_line(str(tool_call.arguments), 60)
     return f"▸ {tool_call.name}  {arguments}"
+
+
+def _tool_working_summary(tool_call) -> str:
+    """生成工具执行期间的状态文案。"""
+
+    if tool_call.name == "spawn_agent":
+        return "Scout 侦察中…"
+    return f"running {tool_call.name}"
 
 
 def _persist_new_messages(session: Session, messages: tuple[Message, ...]) -> None:
@@ -561,7 +573,11 @@ def _update_tool_result(
     """展示工具结果：保留状态和名称，并由界面层统一折叠。"""
 
     marker = "✓" if success else "✗"
-    display_content = f"{marker} {event.tool_call.name}\n{event.result.content}"
+    # Scout 成功时只保留摘要长度，完整结果仍会进入父 Agent 上下文。
+    if success and event.tool_call.name == "spawn_agent":
+        display_content = f"✓ Scout 完成（{len(event.result.content)} 字摘要）"
+    else:
+        display_content = f"{marker} {event.tool_call.name}\n{event.result.content}"
     screen.set_tool_result(index, display_content)
 
 

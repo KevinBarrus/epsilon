@@ -7,13 +7,46 @@ import pytest
 import core.ui as ui
 from core.context import CONTEXT_FALLBACK_NOTICE
 from core.errors import AgentError
-from core.model import Message
+from core.model import Message, ToolCall, ToolResult
 from core.model import ModelClientError
 from core.screen import ChatScreen
 from core.session import Session
 from core.session_store import SessionStore
 from core.status import create_status_info
 from core.config import McpStdioSettings, Settings
+
+
+def test_spawn_agent_uses_clean_scout_summaries() -> None:
+    """测试 Scout 调用、运行状态和完成结果使用专属简洁文案。"""
+
+    task = "调查配置加载中的环境变量覆盖顺序与异常处理" * 10
+    call = ToolCall("scout-1", "spawn_agent", {"task": task, "extra": "不应展示"})
+    screen_results: list[str] = []
+    screen = type(
+        "ResultScreen",
+        (),
+        {"set_tool_result": lambda self, index, content: screen_results.append(content)},
+    )()
+    result = "Scout 调查摘要" * 30
+
+    assert ui._tool_call_summary(call) == f"▸ Scout: {ui._single_line(task, 120)}"
+    assert ui._tool_working_summary(call) == "Scout 侦察中…"
+    ui._update_tool_result(
+        screen,
+        0,
+        ui.ToolExecutionEvent(call, ToolResult(call.call_id, result)),
+    )
+    assert screen_results == [f"✓ Scout 完成（{len(result)} 字摘要）"]
+    assert result not in screen_results[0]
+
+
+def test_regular_tool_display_is_unchanged() -> None:
+    """测试 Scout 专属展示不影响普通工具。"""
+
+    call = ToolCall("read-1", "read_file", {"path": "README.md"})
+
+    assert ui._tool_call_summary(call) == "▸ read_file  {'path': 'README.md'}"
+    assert ui._tool_working_summary(call) == "running read_file"
 
 
 class FakeClient:
