@@ -244,7 +244,11 @@ class TimedModelClient:
         usage_index = len(self.usages) - 1
         started_at = perf_counter()
         try:
-            async for event in self._client.stream_response(messages, tools):
+            async for event in self._client.stream_response(
+                messages,
+                tools,
+                thinking_level,
+            ):
                 if isinstance(event, UsageEvent):
                     self.usages[usage_index] = event
                 yield event

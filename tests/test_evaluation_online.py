@@ -31,6 +31,27 @@ async def test_timed_model_client_records_request_duration() -> None:
 
 
 @pytest.mark.asyncio
+async def test_timed_model_client_forwards_thinking_level() -> None:
+    """测试评测包装器不会丢失父 Agent 的思考强度。"""
+
+    received: list[str | None] = []
+
+    class RecordingThinkingClient:
+        async def stream_response(self, messages, tools=(), thinking_level=None):
+            received.append(thinking_level)
+            yield TextDelta("完成")
+
+    client = TimedModelClient(RecordingThinkingClient())
+
+    _ = [
+        event
+        async for event in client.stream_response([], thinking_level="high")
+    ]
+
+    assert received == ["high"]
+
+
+@pytest.mark.asyncio
 async def test_timed_model_client_closes_wrapped_client() -> None:
     """测试评测包装器会关闭底层网络客户端。"""
 

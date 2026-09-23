@@ -111,6 +111,7 @@ class ModelClient(Protocol):
         self,
         messages: Sequence[Message],
         tools: Sequence[Mapping[str, object]] = (),
+        thinking_level: str | None = None,
     ) -> AsyncIterator[ModelEvent]:
         """根据消息列表生成文本和工具调用事件。"""
 
