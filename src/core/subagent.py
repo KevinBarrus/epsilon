@@ -34,7 +34,8 @@ SCOUT_PARENT_PROMPT = (
     "Scout delegation is enabled. Use spawn_agent for independent read-only "
     "codebase exploration that would otherwise add noisy search and file output "
     "to the main context. Give each Scout a precise task and use its returned "
-    "summary as evidence, not as unverified fact."
+    "summary as evidence, not as unverified fact. "
+    "委派时主动在 context 里写下你已定位的关键路径，避免 Scout 从零探索。"
 )
 
 
@@ -47,6 +48,7 @@ class ScoutRunMetrics:
     total_tokens: int
     duration_ms: float
     summary_chars: int
+    context_chars: int
 
 
 def scout_parent_message() -> Message:
@@ -69,6 +71,9 @@ def create_spawn_agent_tool(
 
     async def spawn_agent(tool_call: ToolCall) -> ToolResult:
         task = string_argument(tool_call, "task")
+        context = tool_call.arguments.get("context", "")
+        if not isinstance(context, str):
+            raise ValueError("context must be a string")
         async with semaphore:
             started_at = perf_counter()
             usages: list[UsageEvent] = []
@@ -83,6 +88,7 @@ def create_spawn_agent_tool(
                         thinking_level_provider(),
                         context_budget,
                         project_instructions,
+                        context,
                         usages,
                     )
                 )
@@ -135,6 +141,7 @@ def create_spawn_agent_tool(
                             sum(usage.total_tokens for usage in usages),
                             (perf_counter() - started_at) * 1000,
                             len(content),
+                            len(context),
                         )
                     )
 
@@ -144,11 +151,15 @@ def create_spawn_agent_tool(
             description=(
                 "Delegate a read-only codebase exploration task to an independent "
                 "Scout. The Scout can read, list, and search files, then returns a "
-                "bounded summary. Use multiple calls together for independent searches."
+                "bounded summary. Use multiple calls together for independent searches. "
+                "在 context 参数里提供你已知的项目结构、关键文件路径和约束，减少 Scout 重复探索。"
             ),
             parameters={
                 "type": "object",
-                "properties": {"task": {"type": "string"}},
+                "properties": {
+                    "task": {"type": "string"},
+                    "context": {"type": "string"},
+                },
                 "required": ["task"],
             },
             source="local",
@@ -168,6 +179,7 @@ async def _run_scout(
     thinking_level: str,
     context_budget: ContextBudget,
     project_instructions: str,
+    context: str,
     usages: list[UsageEvent],
 ) -> AgentRunResult:
     """用独立上下文和只读工具运行一次 Scout。"""
@@ -225,16 +237,57 @@ async def _run_scout(
         thinking_level=thinking_level,
         firewall_enabled=False,
     ).run(
-        [Message(role="user", content=task)],
+        [
+            Message(
+                role="user",
+                content=(
+                    f"任务：{task}\n\n已知背景：\n{context}"
+                    if context
+                    else task
+                ),
+            )
+        ],
         on_event=collect_usage,
         build_context=build_context,
     )
 
 
 def _limit_summary(content: str) -> str:
-    """限制写入父上下文的 Scout 摘要长度。"""
+    """限制摘要长度，超限时优先保留关键证据和结论分节。"""
 
     if len(content) <= SCOUT_SUMMARY_MAX_CHARS:
         return content
-    notice = "\n\n[Scout summary truncated]"
-    return f"{content[: SCOUT_SUMMARY_MAX_CHARS - len(notice)]}{notice}"
+    headings = ("## Files Read", "## Key Evidence", "## Conclusion")
+    sections: dict[str, str] = {}
+    current: str | None = None
+    for line in content.splitlines():
+        if line in headings:
+            current = line
+            sections[current] = line
+        elif current is not None:
+            sections[current] += f"\n{line}"
+    if not all(heading in sections for heading in headings):
+        notice = "\n\n[Scout summary truncated]"
+        return f"{content[: SCOUT_SUMMARY_MAX_CHARS - len(notice)]}{notice}"
+
+    notice = "\n[truncated]"
+    evidence = sections["## Key Evidence"].rstrip()
+    conclusion = sections["## Conclusion"].rstrip()
+    files = sections["## Files Read"].rstrip()
+    separator = "\n\n"
+    capacity = SCOUT_SUMMARY_MAX_CHARS - len(evidence) - len(conclusion) - 2 * len(separator)
+    if len(files) > capacity:
+        if capacity >= len("## Files Read") + len(notice):
+            files = files[: capacity - len(notice)].rsplit("\n", 1)[0].rstrip() + notice
+        else:
+            # 文件清单让位于证据与结论；若二者本身超限，再优先保留结论。
+            priority_capacity = SCOUT_SUMMARY_MAX_CHARS - len("## Files Read\n[truncated]") - 2 * len(separator)
+            conclusion_capacity = min(len(conclusion), priority_capacity)
+            evidence_capacity = max(0, priority_capacity - conclusion_capacity)
+            if len(evidence) > evidence_capacity:
+                evidence = evidence[: max(0, evidence_capacity - len(notice))].rstrip() + notice
+            if len(conclusion) > conclusion_capacity:
+                conclusion = conclusion[: max(0, conclusion_capacity - len(notice))].rstrip() + notice
+            files = "## Files Read\n[truncated]"
+    result = separator.join((files, evidence, conclusion))
+    return result[:SCOUT_SUMMARY_MAX_CHARS]

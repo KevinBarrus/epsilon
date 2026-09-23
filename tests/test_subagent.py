@@ -8,7 +8,11 @@ from core.agent_loop import AgentLoop
 from core.context import ContextBudget
 from core.model import Message, TextDelta, ToolCall, ToolCallEvent, UsageEvent
 from core.session import Session
-from core.subagent import SCOUT_SUMMARY_MAX_CHARS, create_spawn_agent_tool
+from core.subagent import (
+    SCOUT_SUMMARY_MAX_CHARS,
+    SCOUT_SYSTEM_PROMPT,
+    create_spawn_agent_tool,
+)
 from core.tools import ToolManager
 
 
@@ -62,6 +66,66 @@ async def test_spawn_agent_uses_independent_read_only_loop(tmp_path) -> None:
     assert client.requests[0][-1] == Message("user", "定位目标")
     assert metrics[0].total_tokens == 12
     assert metrics[0].outcome == "completed"
+    assert metrics[0].context_chars == 0
+
+
+@pytest.mark.asyncio
+async def test_spawn_agent_passes_optional_context_to_scout(tmp_path) -> None:
+    """测试可选 context 会进入 Scout 首条用户消息。"""
+
+    client = ScoutClient()
+    metrics = []
+    definition, handler = create_spawn_agent_tool(
+        tmp_path,
+        lambda: client,
+        lambda: "high",
+        ContextBudget(10_000, 1_000, 2_000),
+        metrics.append,
+    )
+
+    assert "context" in definition.parameters["properties"]
+    assert "context" not in definition.parameters["required"]
+    assert "已知的项目结构" in definition.description
+
+    await handler(
+        ToolCall(
+            "spawn-context",
+            "spawn_agent",
+            {"task": "检查配置", "context": "配置入口在 src/core/config.py"},
+        )
+    )
+
+    assert client.requests[0][-1] == Message(
+        "user",
+        "任务：检查配置\n\n已知背景：\n配置入口在 src/core/config.py",
+    )
+    assert client.requests[0][-1].content.count("src/core/config.py") == 1
+    assert metrics[0].context_chars == len("配置入口在 src/core/config.py")
+
+
+@pytest.mark.asyncio
+async def test_spawn_agent_rejects_non_string_context(tmp_path) -> None:
+    """测试可选 context 存在时必须是字符串。"""
+
+    _, handler = create_spawn_agent_tool(
+        tmp_path,
+        ScoutClient,
+        lambda: "high",
+        ContextBudget(10_000, 1_000, 2_000),
+    )
+
+    with pytest.raises(ValueError, match="context must be a string"):
+        await handler(
+            ToolCall("spawn-invalid", "spawn_agent", {"task": "检查", "context": 3})
+        )
+
+
+def test_scout_prompt_requires_structured_sections() -> None:
+    """测试 Scout 提示词要求固定的结构化分节。"""
+
+    assert "## Files Read" in SCOUT_SYSTEM_PROMPT
+    assert "## Key Evidence" in SCOUT_SYSTEM_PROMPT
+    assert "## Conclusion" in SCOUT_SYSTEM_PROMPT
 
 
 @pytest.mark.asyncio
@@ -83,6 +147,39 @@ async def test_spawn_agent_limits_summary(tmp_path) -> None:
 
     assert len(result.content) == SCOUT_SUMMARY_MAX_CHARS
     assert result.content.endswith("[Scout summary truncated]")
+
+
+@pytest.mark.asyncio
+async def test_spawn_agent_truncates_files_before_evidence_and_conclusion(
+    tmp_path,
+) -> None:
+    """测试超长结构化摘要先裁 Files Read 并保留证据与结论。"""
+
+    summary = (
+        "## Files Read\n" + "- path.py\n" * 900
+        + "## Key Evidence\n- key-evidence-needle\n"
+        + "## Conclusion\n- conclusion-needle"
+    )
+
+    class LongStructuredSummaryClient:
+        async def stream_response(self, messages, tools=(), thinking_level=None):
+            yield TextDelta(summary)
+
+    _, handler = create_spawn_agent_tool(
+        tmp_path,
+        LongStructuredSummaryClient,
+        lambda: "high",
+        ContextBudget(10_000, 1_000, 2_000),
+    )
+
+    result = await handler(ToolCall("spawn-1", "spawn_agent", {"task": "读取"}))
+
+    assert len(result.content) <= SCOUT_SUMMARY_MAX_CHARS
+    assert "## Key Evidence" in result.content
+    assert "key-evidence-needle" in result.content
+    assert "## Conclusion" in result.content
+    assert "conclusion-needle" in result.content
+    assert "[truncated]" in result.content
 
 
 @pytest.mark.asyncio

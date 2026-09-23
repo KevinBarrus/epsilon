@@ -24,6 +24,7 @@ def test_subagent_smoke_prompt_contains_independent_parallel_investigations() ->
 
     assert "四个相互独立的模块" in SUBAGENT_SMOKE_PROMPT
     assert "可并行委派" in SUBAGENT_SMOKE_PROMPT
+    assert "context 参数" in SUBAGENT_SMOKE_PROMPT
     for evidence in REQUIRED_EVIDENCE:
         assert evidence in SUBAGENT_SMOKE_PROMPT
 
@@ -49,7 +50,10 @@ class SmokeClient:
                     ToolCall(
                         f"spawn-{index}",
                         "spawn_agent",
-                        {"task": f"调查模块 {index}"},
+                        {
+                            "task": f"调查模块 {index}",
+                            "context": f"已知路径 module_{index}.py",
+                        },
                     )
                 )
             yield UsageEvent(80, 20, 100)
@@ -102,6 +106,10 @@ async def test_subagent_smoke_reports_off_and_on_metrics(tmp_path) -> None:
     assert on.scout_batches == (ScoutBatchRecord("parallel", 4),)
     assert on.scout_parallel is True
     assert on.scout_parallel_summary == "是（同一批次 4 个）"
+    assert on.scout_context_calls == 4
+    assert on.scout_context_chars == sum(
+        len(f"已知路径 module_{index}.py") for index in range(4)
+    )
 
 
 @pytest.mark.asyncio
@@ -117,7 +125,7 @@ async def test_subagent_smoke_keeps_partial_usage_when_requests_are_missing(
                 for message in messages
             ):
                 yield TextDelta("Scout evidence")
-                if messages[-1].content.endswith("0"):
+                if "module_0.py" in messages[-1].content:
                     yield UsageEvent(40, 10, 50)
                 return
             async for event in super().stream_response(messages, tools, thinking_level):
@@ -179,6 +187,8 @@ def test_subagent_smoke_writes_jsonl(tmp_path) -> None:
                 scout_batches=(),
                 scout_parallel=False,
                 scout_parallel_summary="否（未调用 Scout）",
+                scout_context_calls=0,
+                scout_context_chars=0,
                 parent_scout_result_chars=0,
                 parent_model_requests=1,
                 final_content=FINAL_ANSWER,

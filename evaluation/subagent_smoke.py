@@ -39,7 +39,8 @@ SUBAGENT_SMOKE_PROMPT = """分别调查以下四个相互独立的模块，各�
 4. session_store.py 的 JSONL 读写。
 
 这是只读调查，不要修改文件或运行命令。这四项可并行委派；如果 spawn_agent 可用，
-请并行委派给多个 Scout，最后汇总成简洁但完整的回答，并给出具体文件路径与实现依据。
+请并行委派给多个 Scout。委派 Scout 时，在 context 参数里写下你已知道的模块位置和文件路径。
+最后汇总成简洁但完整的回答，并给出具体文件路径与实现依据。
 """
 REQUIRED_EVIDENCE = (
     "config.py",
@@ -75,6 +76,8 @@ class SubagentSmokeResult:
     scout_batches: tuple[ScoutBatchRecord, ...]
     scout_parallel: bool
     scout_parallel_summary: str
+    scout_context_calls: int
+    scout_context_chars: int
     parent_scout_result_chars: int
     parent_model_requests: int
     final_content: str
@@ -158,16 +161,22 @@ async def run_subagent_smoke_arm(
 
     parent_scout_result_chars = 0
     scout_batches: list[ScoutBatchRecord] = []
+    scout_context_calls = 0
+    scout_context_chars = 0
 
     async def collect_event(event: object) -> None:
         """累计 Scout 结果字符数与父级工具批次。"""
 
-        nonlocal parent_scout_result_chars
+        nonlocal parent_scout_result_chars, scout_context_calls, scout_context_chars
         if (
             isinstance(event, ToolExecutionEvent)
             and event.tool_call.name == "spawn_agent"
         ):
             parent_scout_result_chars += len(event.result.content)
+            context = event.tool_call.arguments.get("context", "")
+            if isinstance(context, str) and context:
+                scout_context_calls += 1
+                scout_context_chars += len(context)
         elif isinstance(event, ToolBatchEvent):
             spawn_calls = sum(
                 tool_call.name == "spawn_agent"
@@ -222,6 +231,8 @@ async def run_subagent_smoke_arm(
         scout_batches=tuple(scout_batches),
         scout_parallel=scout_parallel,
         scout_parallel_summary=scout_parallel_summary,
+        scout_context_calls=scout_context_calls,
+        scout_context_chars=scout_context_chars,
         parent_scout_result_chars=parent_scout_result_chars,
         parent_model_requests=len(parent_client.requests),
         final_content=result.final_content,
@@ -344,6 +355,8 @@ def main() -> int:
             f"scout_missing_usage={result.scout_requests_missing_usage} "
             f"missing_reasons={result.scout_missing_usage_reasons} "
             f"summary_chars={result.parent_scout_result_chars} "
+            f"Scout context={result.scout_context_calls} calls/"
+            f"{result.scout_context_chars} chars "
             f"Scout 并行：{result.scout_parallel_summary}"
         )
     print(f"results: {args.output}")
