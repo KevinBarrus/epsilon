@@ -6,6 +6,7 @@ from core.config import Settings
 from core.model import TextDelta, ToolCall, ToolCallEvent, UsageEvent
 from evaluation.subagent_smoke import (
     REQUIRED_EVIDENCE,
+    SUBAGENT_SMOKE_PROMPT,
     SubagentSmokeResult,
     _write_results,
     main,
@@ -14,6 +15,15 @@ from evaluation.subagent_smoke import (
 
 
 FINAL_ANSWER = " ".join(REQUIRED_EVIDENCE)
+
+
+def test_subagent_smoke_prompt_contains_independent_parallel_investigations() -> None:
+    """测试冒烟任务明确要求并行调查四个独立模块。"""
+
+    assert "四个相互独立的模块" in SUBAGENT_SMOKE_PROMPT
+    assert "可并行委派" in SUBAGENT_SMOKE_PROMPT
+    for evidence in REQUIRED_EVIDENCE:
+        assert evidence in SUBAGENT_SMOKE_PROMPT
 
 
 class SmokeClient:

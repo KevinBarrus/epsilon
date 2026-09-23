@@ -31,21 +31,19 @@ from core.tools import (
 from .online import TimedModelClient
 
 
-SUBAGENT_SMOKE_PROMPT = """Read this repository and explain its runtime architecture.
+SUBAGENT_SMOKE_PROMPT = """分别调查以下四个相互独立的模块，各自给出核心函数、关键逻辑与潜在问题：
+1. config.py 的配置加载流程；
+2. tools/permissions.py 的权限判断；
+3. context.py 的 token 估算；
+4. session_store.py 的 JSONL 读写。
 
-Answer all four items with concrete file paths and implementation evidence:
-1. where the main model-tool loop runs;
-2. how model context is built and bounded;
-3. how tools become visible and are executed;
-4. how session messages are persisted and restored.
-
-This is a read-only investigation. Do not modify files or run commands. If spawn_agent is
-available, delegate independent parts to Scouts. Keep the final answer concise but complete.
+这是只读调查，不要修改文件或运行命令。这四项可并行委派；如果 spawn_agent 可用，
+请并行委派给多个 Scout，最后汇总成简洁但完整的回答，并给出具体文件路径与实现依据。
 """
 REQUIRED_EVIDENCE = (
-    "agent_loop.py",
+    "config.py",
+    "tools/permissions.py",
     "context.py",
-    "tools/manager.py",
     "session_store.py",
 )
 
