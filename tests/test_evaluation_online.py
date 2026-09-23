@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from core.config import ConfigError, Settings
@@ -96,6 +98,7 @@ async def test_timed_model_client_collects_usage() -> None:
 
     assert events == [TextDelta("完成"), UsageEvent(10, 2, 12)]
     assert client.total_actual_tokens == 12
+    assert client.request_outcomes == ["completed"]
 
 
 @pytest.mark.asyncio
@@ -107,6 +110,49 @@ async def test_timed_model_client_returns_none_when_usage_missing() -> None:
     _ = [event async for event in client.stream_response([])]
 
     assert client.total_actual_tokens is None
+    assert client.request_outcomes == ["completed_missing_usage"]
+
+
+@pytest.mark.asyncio
+async def test_timed_model_client_records_error_before_usage() -> None:
+    """测试请求在 usage 前失败时保留缺失原因。"""
+
+    class FailingClient:
+        async def stream_response(self, messages, tools=(), thinking_level=None):
+            raise RuntimeError("network failed")
+            yield
+
+    client = TimedModelClient(FailingClient())
+
+    with pytest.raises(RuntimeError, match="network failed"):
+        _ = [event async for event in client.stream_response([])]
+
+    assert client.usages == [None]
+    assert client.request_outcomes == ["error"]
+
+
+@pytest.mark.asyncio
+async def test_timed_model_client_records_cancellation_before_usage() -> None:
+    """测试 Scout 整体超时取消请求时保留缺失原因。"""
+
+    class BlockingClient:
+        async def stream_response(self, messages, tools=(), thinking_level=None):
+            await asyncio.Event().wait()
+            yield
+
+    client = TimedModelClient(BlockingClient())
+
+    async def consume() -> None:
+        _ = [event async for event in client.stream_response([])]
+
+    task = asyncio.create_task(consume())
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert client.usages == [None]
+    assert client.request_outcomes == ["cancelled"]
 
 
 @pytest.mark.asyncio

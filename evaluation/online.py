@@ -185,6 +185,7 @@ class TimedModelClient:
         self.requests: list[list[Message]] = []
         self.durations_ms: list[float] = []
         self.usages: list[UsageEvent | None] = []
+        self.request_outcomes: list[str] = []
 
     async def close(self) -> None:
         """关闭被包装客户端持有的网络连接"""
@@ -242,6 +243,7 @@ class TimedModelClient:
         self.requests.append(list(messages))
         self.usages.append(None)
         usage_index = len(self.usages) - 1
+        self.request_outcomes.append("running")
         started_at = perf_counter()
         try:
             async for event in self._client.stream_response(
@@ -252,6 +254,18 @@ class TimedModelClient:
                 if isinstance(event, UsageEvent):
                     self.usages[usage_index] = event
                 yield event
+        except asyncio.CancelledError:
+            self.request_outcomes[usage_index] = "cancelled"
+            raise
+        except BaseException:
+            self.request_outcomes[usage_index] = "error"
+            raise
+        else:
+            self.request_outcomes[usage_index] = (
+                "completed"
+                if self.usages[usage_index] is not None
+                else "completed_missing_usage"
+            )
         finally:
             self.durations_ms.append((perf_counter() - started_at) * 1000)
 
@@ -261,6 +275,7 @@ class TimedModelClient:
         self.requests.append(list(messages))
         self.usages.append(None)
         usage_index = len(self.usages) - 1
+        self.request_outcomes.append("running")
         started_at = perf_counter()
         try:
             async for event in self._client.stream_response(messages):
@@ -268,6 +283,18 @@ class TimedModelClient:
                     self.usages[usage_index] = event
                 elif isinstance(event, TextDelta):
                     yield event.content
+        except asyncio.CancelledError:
+            self.request_outcomes[usage_index] = "cancelled"
+            raise
+        except BaseException:
+            self.request_outcomes[usage_index] = "error"
+            raise
+        else:
+            self.request_outcomes[usage_index] = (
+                "completed"
+                if self.usages[usage_index] is not None
+                else "completed_missing_usage"
+            )
         finally:
             self.durations_ms.append((perf_counter() - started_at) * 1000)
 

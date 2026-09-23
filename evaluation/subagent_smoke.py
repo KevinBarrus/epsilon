@@ -3,12 +3,13 @@
 import argparse
 import asyncio
 import json
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from time import perf_counter
 
-from core.agent_loop import AgentLoop, ToolExecutionEvent
+from core.agent_loop import AgentLoop, ToolBatchEvent, ToolExecutionEvent
 from core.config import Settings, load_settings
 from core.context import ContextBudget, ContextBuildResult, ContextManager
 from core.model import Message, ModelClient
@@ -49,6 +50,14 @@ REQUIRED_EVIDENCE = (
 
 
 @dataclass(frozen=True)
+class ScoutBatchRecord:
+    """记录一个包含 Scout 调用的父级工具批次。"""
+
+    execution_mode: str
+    spawn_agent_calls: int
+
+
+@dataclass(frozen=True)
 class SubagentSmokeResult:
     """保存一个开关档位的描述性结果。"""
 
@@ -56,10 +65,16 @@ class SubagentSmokeResult:
     subagent_enabled: bool
     task_completed: bool
     parent_actual_tokens: int | None
-    scout_actual_tokens: int | None
+    scout_actual_tokens: int
+    scout_requests_missing_usage: int
+    scout_missing_usage_reasons: dict[str, int]
     all_agent_actual_tokens: int | None
     duration_ms: float
     scout_calls: int
+    scout_outcomes: dict[str, int]
+    scout_batches: tuple[ScoutBatchRecord, ...]
+    scout_parallel: bool
+    scout_parallel_summary: str
     parent_scout_result_chars: int
     parent_model_requests: int
     final_content: str
@@ -142,9 +157,10 @@ async def run_subagent_smoke_arm(
         return result
 
     parent_scout_result_chars = 0
+    scout_batches: list[ScoutBatchRecord] = []
 
     async def collect_event(event: object) -> None:
-        """只累计注入父上下文的 Scout 结果字符数。"""
+        """累计 Scout 结果字符数与父级工具批次。"""
 
         nonlocal parent_scout_result_chars
         if (
@@ -152,6 +168,15 @@ async def run_subagent_smoke_arm(
             and event.tool_call.name == "spawn_agent"
         ):
             parent_scout_result_chars += len(event.result.content)
+        elif isinstance(event, ToolBatchEvent):
+            spawn_calls = sum(
+                tool_call.name == "spawn_agent"
+                for tool_call in event.tool_calls
+            )
+            if spawn_calls:
+                scout_batches.append(
+                    ScoutBatchRecord(event.execution_mode, spawn_calls)
+                )
 
     result = await AgentLoop(
         parent_client,
@@ -165,15 +190,18 @@ async def run_subagent_smoke_arm(
         build_context=build_context,
     )
     parent_tokens = parent_client.total_actual_tokens
-    scout_tokens = (
-        scout_client.total_actual_tokens
-        if scout_client.requests
-        else 0
-    )
+    (
+        scout_tokens,
+        missing_scout_usage,
+        missing_usage_reasons,
+    ) = _partial_actual_tokens(scout_client)
     total_tokens = (
         parent_tokens + scout_tokens
-        if parent_tokens is not None and scout_tokens is not None
+        if parent_tokens is not None
         else None
+    )
+    scout_parallel, scout_parallel_summary = _scout_parallel_result(
+        tuple(scout_batches)
     )
     final_lower = result.final_content.lower()
     return SubagentSmokeResult(
@@ -185,12 +213,53 @@ async def run_subagent_smoke_arm(
         ),
         parent_actual_tokens=parent_tokens,
         scout_actual_tokens=scout_tokens,
+        scout_requests_missing_usage=missing_scout_usage,
+        scout_missing_usage_reasons=missing_usage_reasons,
         all_agent_actual_tokens=total_tokens,
         duration_ms=(perf_counter() - started_at) * 1000,
         scout_calls=len(scout_metrics),
+        scout_outcomes=dict(Counter(metric.outcome for metric in scout_metrics)),
+        scout_batches=tuple(scout_batches),
+        scout_parallel=scout_parallel,
+        scout_parallel_summary=scout_parallel_summary,
         parent_scout_result_chars=parent_scout_result_chars,
         parent_model_requests=len(parent_client.requests),
         final_content=result.final_content,
+    )
+
+
+def _partial_actual_tokens(
+    client: TimedModelClient,
+) -> tuple[int, int, dict[str, int]]:
+    """汇总已收到的 usage，并单独返回缺失 usage 的请求数。"""
+
+    missing_reasons = Counter(
+        outcome
+        for usage, outcome in zip(client.usages, client.request_outcomes)
+        if usage is None
+    )
+    return (
+        sum(usage.total_tokens for usage in client.usages if usage is not None),
+        sum(missing_reasons.values()),
+        dict(missing_reasons),
+    )
+
+
+def _scout_parallel_result(
+    batches: tuple[ScoutBatchRecord, ...],
+) -> tuple[bool, str]:
+    """按父级工具批次判断本轮 Scout 是否真正并行。"""
+
+    if not batches:
+        return False, "否（未调用 Scout）"
+    if len(batches) > 1:
+        return False, f"否（分散 {len(batches)} 批次）"
+    batch = batches[0]
+    if batch.execution_mode == "parallel" and batch.spawn_agent_calls > 1:
+        return True, f"是（同一批次 {batch.spawn_agent_calls} 个）"
+    return (
+        False,
+        f"否（同一批次 {batch.spawn_agent_calls} 个，{batch.execution_mode}）",
     )
 
 
@@ -272,7 +341,10 @@ def main() -> int:
             f"parent_tokens={result.parent_actual_tokens} "
             f"all_tokens={result.all_agent_actual_tokens} "
             f"duration_ms={result.duration_ms:.0f} scouts={result.scout_calls} "
-            f"summary_chars={result.parent_scout_result_chars}"
+            f"scout_missing_usage={result.scout_requests_missing_usage} "
+            f"missing_reasons={result.scout_missing_usage_reasons} "
+            f"summary_chars={result.parent_scout_result_chars} "
+            f"Scout 并行：{result.scout_parallel_summary}"
         )
     print(f"results: {args.output}")
     return 0 if all(result.task_completed for result in results) else 1
