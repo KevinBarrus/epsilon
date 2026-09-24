@@ -87,7 +87,10 @@ def coverage(workspace: Path, modules: list[str]) -> dict[str, object]:
     for module in modules:
         source = Path(module)
         target = source.with_name("index.ts") if source.name == "__init__.py" else source.with_suffix(".ts")
-        for candidate in (f"src/{target.as_posix()}", target.as_posix()):
+        for candidate in (
+            f"core/{target.as_posix()}", f"src/core/{target.as_posix()}",
+            f"src/{target.as_posix()}", target.as_posix(),
+        ):
             if candidate in names:
                 mapped[module] = candidate
                 break

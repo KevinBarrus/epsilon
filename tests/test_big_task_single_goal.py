@@ -7,7 +7,7 @@ from evaluation.big_task_single_goal import coverage, completion_verdict
 
 def test_coverage_excludes_dependencies_and_maps_modules(tmp_path: Path) -> None:
     """node_modules 不计入产物，__init__ 映射到 index.ts。"""
-    for name in ("ts/src/agent.ts", "ts/src/tools/index.ts", "ts/src/missing.d.ts", "ts/node_modules/pkg/extra.ts"):
+    for name in ("ts/core/agent.ts", "ts/src/tools/index.ts", "ts/core/missing.d.ts", "ts/node_modules/pkg/extra.ts"):
         path = tmp_path / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("export {};", encoding="utf-8")
