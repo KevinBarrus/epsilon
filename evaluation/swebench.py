@@ -624,6 +624,7 @@ def _context_builder(
     tool_manager: ToolManager,
     workspace: Path,
     artifact_store: ArtifactStore | None = None,
+    extra_system_message: Message | None = None,
     eviction_enabled: bool = False,
     eviction_threshold_tokens: int | None = None,
 ):
@@ -646,6 +647,8 @@ def _context_builder(
     manager.set_workspace_path(str(workspace))
     manager.set_model_name(model_name)
     manager.set_session_id(session.session_id)
+    if extra_system_message is not None:
+        manager.set_extra_system_messages((extra_system_message,))
 
     async def build_context(messages: Sequence[Message], force_compaction: bool):
         """构建低预算模型上下文，并将新摘要与驱逐写入评测 Session。"""

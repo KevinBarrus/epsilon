@@ -5,6 +5,7 @@ import asyncio
 import json
 import shutil
 import tempfile
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
@@ -13,10 +14,12 @@ from uuid import uuid4
 from core.agent_loop import AgentLoop, AgentRunResult
 from core.artifacts import ArtifactStore
 from core.config import load_settings
+from core.context import ContextBudget
 from core.end_policy import WriteVerificationPolicy
 from core.model import Message
 from core.openai_client import OpenAICompatibleClient
 from core.session import Session
+from core.subagent import ScoutRunMetrics, create_spawn_agent_tool, scout_parent_message
 from core.tools.command_executor import CommandExecutor
 
 from .events import event_to_record, message_to_record
@@ -28,7 +31,6 @@ from .long_task_validation import (
 )
 from .online import TimedModelClient
 from .swebench import (
-    DEFAULT_SWEBENCH_MAX_TOOL_ROUNDS,
     SwebenchTask,
     _context_builder,
     _tool_manager,
@@ -104,6 +106,10 @@ class LongTaskStageResult:
     tool_rounds: int
     model_requests: int
     actual_tokens: int
+    scout_actual_tokens: int
+    scout_requests_missing_usage: int
+    scout_calls: int
+    scout_outcomes: dict[str, int]
     cached_tokens: int
     cache_hit_rate: float | None
     eviction_events: int
@@ -124,8 +130,22 @@ class LongTaskResult:
     stages: tuple[LongTaskStageResult, ...]
 
     @property
+    def total_scout_tokens(self) -> int:
+        """累计 Scout 已收到 usage 的 token。"""
+
+        return sum(stage.scout_actual_tokens for stage in self.stages)
+
+    @property
     def total_actual_tokens(self) -> int:
-        """累计服务端实际 token。"""
+        """累计父 Agent 与 Scout 已收到 usage 的 token。"""
+
+        return sum(
+            stage.actual_tokens + stage.scout_actual_tokens for stage in self.stages
+        )
+
+    @property
+    def total_parent_tokens(self) -> int:
+        """累计父 Agent token。"""
 
         return sum(stage.actual_tokens for stage in self.stages)
 
@@ -203,6 +223,8 @@ class _StageInputs:
     agent: AgentLoop
     session: Session
     client: TimedModelClient
+    scout_client: TimedModelClient | None
+    scout_metrics: list[ScoutRunMetrics]
     events: list[dict[str, object]]
     context_builder: object
 
@@ -216,7 +238,8 @@ async def run_long_task(
     eviction_threshold_tokens: int | None,
     thinking: str = "high",
     firewall_enabled: bool = True,
-    max_tool_rounds_per_stage: int = DEFAULT_SWEBENCH_MAX_TOOL_ROUNDS,
+    max_tool_rounds_per_stage: int | None = None,
+    subagent_enabled: bool = False,
 ) -> LongTaskResult:
     """在单个 Session 中依次执行阶段序列，并落盘阶段与 arm 记录。"""
 
@@ -229,16 +252,44 @@ async def run_long_task(
     container = SwebenchTaskContainer(task.instance_image, prepared.workspace)
     run_id = str(uuid4())
     client: TimedModelClient | None = None
+    scout_client: TimedModelClient | None = None
     try:
         async with container.running():
             settings = load_settings()
-            client = TimedModelClient(OpenAICompatibleClient(settings))
+            model_client = OpenAICompatibleClient(settings)
+            client = TimedModelClient(model_client)
+            if subagent_enabled:
+                scout_client = TimedModelClient(model_client)
             artifact_store = ArtifactStore.for_workspace(prepared.session_root)
             executor = SwebenchContainerExecutor(container)
             manager = _tool_manager(prepared.workspace, executor, artifact_store)
+            events: list[dict[str, object]] = []
+            scout_metrics: list[ScoutRunMetrics] = []
+
+            async def collect_scout_event(event: object) -> None:
+                """将 Scout 内部模型与工具事件写入长任务轨迹。"""
+
+                record = event_to_record(event)
+                record.setdefault("agent_role", "scout")
+                events.append(record)
+
+            if scout_client is not None:
+                manager.register_local(
+                    *create_spawn_agent_tool(
+                        prepared.workspace,
+                        lambda: scout_client,
+                        lambda: thinking,
+                        ContextBudget(
+                            settings.context_window or 100_000,
+                            settings.reserve_tokens,
+                            settings.keep_recent_tokens,
+                        ),
+                        scout_metrics.append,
+                        on_event=collect_scout_event,
+                    )
+                )
             session = Session(prepared.session_root)
             artifact_store.set_session_id(session.session_id)
-            events: list[dict[str, object]] = []
             agent = AgentLoop(
                 client,
                 manager,
@@ -258,6 +309,7 @@ async def run_long_task(
                 manager,
                 prepared.workspace,
                 artifact_store=artifact_store,
+                extra_system_message=scout_parent_message() if subagent_enabled else None,
                 eviction_enabled=eviction_enabled,
                 eviction_threshold_tokens=eviction_threshold_tokens,
             )
@@ -271,6 +323,8 @@ async def run_long_task(
                 agent=agent,
                 session=session,
                 client=client,
+                scout_client=scout_client,
+                scout_metrics=scout_metrics,
                 events=events,
                 context_builder=context_builder,
             )
@@ -291,7 +345,10 @@ async def run_long_task(
         if client is not None:
             await client.close()
 
-    arm = "eviction_on" if eviction_enabled else "eviction_off"
+    arm = (
+        f"subagent_{'on' if subagent_enabled else 'off'}_"
+        f"eviction_{'on' if eviction_enabled else 'off'}"
+    )
     records_path = result_root / "long_task.jsonl"
     for stage_result in stage_results:
         _append_record(
@@ -319,6 +376,12 @@ async def _run_stage(
 
     started_at = perf_counter()
     requests_before = len(inputs.client.requests)
+    scout_metrics_before = len(inputs.scout_metrics)
+    scout_requests_before = (
+        len(inputs.scout_client.request_outcomes)
+        if inputs.scout_client is not None
+        else 0
+    )
     actual_before = inputs.client.total_actual_tokens
     cached_before = inputs.client.total_cached_tokens
     events_before = len(inputs.events)
@@ -359,6 +422,14 @@ async def _run_stage(
     cached_after = inputs.client.total_cached_tokens
     actual_tokens = _delta(actual_before, actual_after)
     cached_tokens = _delta(cached_before, cached_after)
+    scout_stage_metrics = inputs.scout_metrics[scout_metrics_before:]
+    scout_actual_tokens = sum(metric.total_tokens for metric in scout_stage_metrics)
+    scout_requests_missing_usage = 0
+    if inputs.scout_client is not None:
+        scout_requests_missing_usage = sum(
+            outcome != "completed"
+            for outcome in inputs.scout_client.request_outcomes[scout_requests_before:]
+        )
 
     return LongTaskStageResult(
         stage=stage.name,
@@ -370,6 +441,12 @@ async def _run_stage(
         tool_rounds=agent_result.tool_rounds,
         model_requests=requests_after - requests_before,
         actual_tokens=actual_tokens,
+        scout_actual_tokens=scout_actual_tokens,
+        scout_requests_missing_usage=scout_requests_missing_usage,
+        scout_calls=len(scout_stage_metrics),
+        scout_outcomes=dict(
+            Counter(metric.outcome for metric in scout_stage_metrics)
+        ),
         cached_tokens=cached_tokens,
         cache_hit_rate=(
             cached_tokens / actual_tokens if actual_tokens > 0 else None
@@ -489,6 +566,11 @@ def _stage_record(
         "tool_rounds": result.tool_rounds,
         "model_requests": result.model_requests,
         "actual_tokens": result.actual_tokens,
+        "scout_actual_tokens": result.scout_actual_tokens,
+        "all_agent_actual_tokens": result.actual_tokens + result.scout_actual_tokens,
+        "scout_requests_missing_usage": result.scout_requests_missing_usage,
+        "scout_calls": result.scout_calls,
+        "scout_outcomes": result.scout_outcomes,
         "cached_tokens": result.cached_tokens,
         "cache_hit_rate": result.cache_hit_rate,
         "eviction_events": result.eviction_events,
@@ -514,6 +596,16 @@ def _arm_record(
         "stages": [stage.stage for stage in stages],
         "stage_passed": [stage.passed for stage in stages],
         "total_actual_tokens": sum(stage.actual_tokens for stage in stages),
+        "total_scout_actual_tokens": sum(
+            stage.scout_actual_tokens for stage in stages
+        ),
+        "all_agent_actual_tokens": sum(
+            stage.actual_tokens + stage.scout_actual_tokens for stage in stages
+        ),
+        "total_scout_calls": sum(stage.scout_calls for stage in stages),
+        "total_scout_requests_missing_usage": sum(
+            stage.scout_requests_missing_usage for stage in stages
+        ),
         "total_cached_tokens": sum(stage.cached_tokens for stage in stages),
         "total_eviction_events": sum(stage.eviction_events for stage in stages),
         "total_eviction_gate_rejections": sum(
@@ -556,13 +648,15 @@ def main() -> int:
     parser.add_argument(
         "--max-tool-rounds",
         type=int,
-        default=DEFAULT_SWEBENCH_MAX_TOOL_ROUNDS,
+        default=None,
+        help="可选工具轮数上限；省略时由模型自然结束或用户取消",
     )
+    parser.add_argument("--subagent", action="store_true", help="启用只读 Scout")
     args = parser.parse_args()
     if not args.confirm:
         print("长任务评测会发起真实模型请求，请添加 --confirm 后运行")
         return 2
-    if args.max_tool_rounds <= 0:
+    if args.max_tool_rounds is not None and args.max_tool_rounds <= 0:
         parser.error("--max-tool-rounds 必须大于 0")
     if args.eviction_threshold is not None and args.eviction_threshold <= 0:
         parser.error("--eviction-threshold 必须大于 0")
@@ -582,13 +676,16 @@ def main() -> int:
             thinking=args.thinking,
             firewall_enabled=not args.no_firewall,
             max_tool_rounds_per_stage=args.max_tool_rounds,
+            subagent_enabled=args.subagent,
         )
     )
     print(f"long task arm: {result.arm}")
     for stage in result.stages:
         print(
             f"  {stage.stage}: passed={stage.passed} "
-            f"tokens={stage.actual_tokens} eviction={stage.eviction_events}"
+            f"parent_tokens={stage.actual_tokens} "
+            f"scout_tokens={stage.scout_actual_tokens} scouts={stage.scout_calls} "
+            f"outcomes={stage.scout_outcomes} eviction={stage.eviction_events}"
         )
     print(f"total actual tokens: {result.total_actual_tokens}")
     print(f"results: {args.result_root / 'long_task.jsonl'}")
