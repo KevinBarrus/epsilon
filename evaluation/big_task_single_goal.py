@@ -13,12 +13,12 @@ from collections.abc import Sequence
 from pathlib import Path
 from time import perf_counter
 
-from core.agent_loop import AgentLoop, AgentLoopFailed, ToolBatchEvent, ToolExecutionEvent
+from core.agent_loop import AgentLoop, AgentLoopFailed, RetryEvent, ToolBatchEvent, ToolExecutionEvent
 from core.config import load_settings
 from core.context import ContextBudget, ContextBuildResult, ContextManager
 from core.errors import AgentError
 from core.goal import Goal, GoalPolicy, create_goal_tool
-from core.model import Message, ToolCallEvent
+from core.model import Message, ToolCallEvent, UsageLedger, UsageTrackingClient
 from core.openai_client import OpenAICompatibleClient
 from core.project_instructions import load_project_instructions
 from core.prompts import load_prompt
@@ -36,6 +36,8 @@ from .online import TimedModelClient
 SOURCE = Path(__file__).resolve().parents[1]
 EXCLUDED = (".venv", ".git", "evaluation-results", ".epsilon", "__pycache__")
 IMAGE = "swebench/sweb.eval.x86_64.django_1776_django-11001:latest"
+TOKEN_FUSE = 50_000_000
+TIME_FUSE_SECONDS = 7200
 OBJECTIVE = "把副本 src/core 的全部 Python 模块重构成等价的 TypeScript，直到全部模块都有对应 TS 实现且类型检查通过"
 TASK = (
     "你的工作区是 Epsilon 项目的副本。把 src/core/ 下的全部 Python 源代码重构成 TypeScript，"
@@ -181,8 +183,10 @@ async def run(workspace: Path) -> dict[str, object]:
     if settings.model_name != "deepseek-flash":
         raise ValueError(f"本实验要求 deepseek-flash，当前为 {settings.model_name}")
     model = OpenAICompatibleClient(settings)
-    client = TimedModelClient(model)
-    goal = Goal(OBJECTIVE, max_rounds=300, token_budget=15_000_000, time_budget_seconds=3600)
+    timed_client = TimedModelClient(model)
+    ledger = UsageLedger()
+    client = UsageTrackingClient(timed_client, ledger)
+    goal = Goal(OBJECTIVE, token_budget=TOKEN_FUSE, time_budget_seconds=TIME_FUSE_SECONDS)
     goal_events = workspace.parent / "goal.jsonl"
 
     def save_goal(current: Goal) -> None:
@@ -190,7 +194,7 @@ async def run(workspace: Path) -> dict[str, object]:
         with goal_events.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(vars(current), ensure_ascii=False) + "\n")
 
-    policy = GoalPolicy(goal, on_change=save_goal)
+    policy = GoalPolicy(goal, on_change=save_goal, usage_ledger=ledger)
     save_goal(goal)
 
     async def approve(definition, tool_call, allow_session):
@@ -224,6 +228,9 @@ async def run(workspace: Path) -> dict[str, object]:
     started = perf_counter()
     tool_rounds = 0
     tool_calls = 0
+    tool_errors = 0
+    retry_events = 0
+    tsc_failures = 0
     progress: list[dict[str, object]] = []
     sample_lock = asyncio.Lock()
     events_path = workspace.parent / "events.jsonl"
@@ -231,14 +238,17 @@ async def run(workspace: Path) -> dict[str, object]:
     last_step: dict[str, object] | None = None
 
     def received_tokens() -> int:
-        """所有请求已收到的 usage 下界，包含可能的上下文压缩请求。"""
-        return sum(usage.total_tokens for usage in client.usages if usage is not None)
+        """读取客户端边界共享总账，包含上下文压缩请求。"""
+        return ledger.total_tokens
 
     async def sample(trigger: str) -> None:
         """按工具轮次、墙钟和最终状态采样，并立即持久化。"""
+        nonlocal tsc_failures
         async with sample_lock:
             state = coverage(workspace, modules)
             check = await asyncio.to_thread(typecheck, workspace)
+            if check["tsc_pass"] is False:
+                tsc_failures += 1
             point = {
                 "trigger": trigger,
                 "tool_rounds": tool_rounds,
@@ -249,6 +259,9 @@ async def run(workspace: Path) -> dict[str, object]:
                 "tsc_pass": check["tsc_pass"],
                 "tsc_note": check["tsc_note"],
                 "actual_tokens_received": received_tokens(),
+                "tool_errors": tool_errors,
+                "retry_events": retry_events,
+                "tsc_failures": tsc_failures,
             }
             progress.append(point)
             with progress_path.open("a", encoding="utf-8") as stream:
@@ -283,12 +296,14 @@ async def run(workspace: Path) -> dict[str, object]:
 
     async def collect_event(event: object) -> None:
         """保留工具轨迹并在每 25 个工具批次采样。"""
-        nonlocal tool_rounds, tool_calls, last_step
+        nonlocal tool_rounds, tool_calls, tool_errors, retry_events, last_step
         record: dict[str, object] | None = None
         if isinstance(event, ToolCallEvent):
             tool_calls += 1
             record = {"type": "call", "tool": event.tool_call.name, "arguments": event.tool_call.arguments}
         elif isinstance(event, ToolExecutionEvent):
+            if event.result.is_error:
+                tool_errors += 1
             record = {
                 "type": "result", "tool": event.tool_call.name,
                 "is_error": event.result.is_error, "result_excerpt": event.result.content[:500],
@@ -299,6 +314,13 @@ async def run(workspace: Path) -> dict[str, object]:
                 "type": "batch", "tool_round": tool_rounds,
                 "tools": [call.name for call in event.tool_calls],
                 "duration_ms": event.duration_ms,
+            }
+        elif isinstance(event, RetryEvent):
+            retry_events += 1
+            record = {
+                "type": "retry", "attempt": event.attempt,
+                "max_attempts": event.max_attempts,
+                "delay_seconds": event.delay_seconds,
             }
         if record is not None:
             record["elapsed_seconds"] = round(perf_counter() - started, 3)
@@ -316,7 +338,7 @@ async def run(workspace: Path) -> dict[str, object]:
     sampler = asyncio.create_task(periodic_sample())
     try:
         await sample("initial")
-        async with asyncio.timeout(goal.time_budget_seconds):
+        async with asyncio.timeout(TIME_FUSE_SECONDS):
             outcome = await AgentLoop(
                 client, tools, max_tool_rounds=None, thinking_level="high", end_policy=policy,
             ).run([Message(role="user", content=TASK)], on_event=collect_event, build_context=build_context)
@@ -353,6 +375,9 @@ async def run(workspace: Path) -> dict[str, object]:
     await sample("final")
     state = coverage(workspace, modules)
     check = typecheck(workspace)
+    client_usage_total = sum(
+        usage.total_tokens for usage in timed_client.usages if usage is not None
+    )
     result = {
         "workspace": str(workspace), "model_name": settings.model_name, "thinking": "high",
         "delegation_tools_registered": False, "max_tool_rounds": None,
@@ -361,8 +386,13 @@ async def run(workspace: Path) -> dict[str, object]:
         "stop_reason": stop_reason, "budget_guard": guard,
         "error_category": error_category, "error": error,
         "tool_rounds": tool_rounds, "tool_calls": tool_calls,
-        "model_requests": len(client.requests), "actual_tokens_received": received_tokens(),
-        "requests_missing_usage": sum(usage is None for usage in client.usages),
+        "model_requests": len(timed_client.requests), "actual_tokens_received": received_tokens(),
+        "client_usage_total": client_usage_total,
+        "requests_missing_usage": ledger.requests_missing_usage,
+        "accounting_matches": goal.tokens_used == ledger.total_tokens == client_usage_total,
+        "accounting_complete": ledger.requests_missing_usage == 0,
+        "tool_errors": tool_errors, "retry_events": retry_events,
+        "tsc_failures_at_samples": tsc_failures,
         "duration_seconds": round(perf_counter() - started, 3),
         "compaction_count": len(compactions), "eviction_count": len(evictions),
         "source_modules": modules, **state, **check, "progress": progress,

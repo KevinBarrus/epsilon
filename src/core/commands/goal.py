@@ -9,9 +9,16 @@ def sync_goal_runtime(context: CommandContext) -> None:
     """按 Session 快照同步结束策略、目标工具与系统说明。"""
     goal = context.session.get_goal()
     if goal is not None and goal.status == "active":
-        policy = GoalPolicy(goal, on_change=lambda _: context.session.update_goal())
+        ledger = context.client_holder.enable_usage_tracking()
+        policy = GoalPolicy(
+            goal, on_change=lambda _: context.session.update_goal(), usage_ledger=ledger,
+        )
         context.agent_loop.set_end_policy(policy)
+        context.agent_loop.swap_client(context.client_holder.client)
     else:
+        ledger = getattr(context.client_holder, "usage_ledger", None)
+        if ledger is not None:
+            ledger.set_observer(None)
         if isinstance(getattr(context.agent_loop, "end_policy", None), GoalPolicy):
             context.agent_loop.set_end_policy(None)
     if context.tool_manager is not None:
@@ -41,7 +48,7 @@ async def goal_command(context: CommandContext) -> None:
         sync_goal_runtime(context)
         context.screen.add_entry("tool", "目标已清除。")
         return
-    context.session.set_goal(Goal(argument, max_rounds=50, token_budget=5_000_000))
+    context.session.set_goal(Goal(argument))
     sync_goal_runtime(context)
     context.screen.add_entry("tool", f"已设置持续目标：{argument}")
 

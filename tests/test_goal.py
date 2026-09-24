@@ -9,8 +9,10 @@ import pytest
 from core.agent_loop import AgentLoop
 from core.commands.goal import goal_command_slash, sync_goal_runtime
 from core.commands.registry import CommandContext, CommandRegistry
+from core.config import Settings
 from core.goal import Goal, GoalPolicy, create_goal_tool
-from core.model import Message, TextDelta, ToolCall, ToolCallEvent, UsageEvent
+from core.model import ClientHolder, Message, TextDelta, ToolCall, ToolCallEvent, UsageEvent, UsageLedger, UsageTrackingClient
+from core.context import ContextBudget, ContextManager
 from core.session import Session
 from core.tools import ToolManager
 
@@ -48,6 +50,32 @@ def test_goal_policy_limits_rounds_tokens_and_time() -> None:
         assert goal.status == "budget_limited"
         assert policy.final_response_only
         assert policy.follow_up_message() is None
+
+
+def test_client_holder_reuses_usage_ledger_after_model_switch() -> None:
+    """热切换模型仍把新请求写入当前会话的同一本总账。"""
+    settings = Settings("https://example.com", "test", "key")
+    holder = ClientHolder(settings, SimpleNamespace())
+    ledger = holder.enable_usage_tracking()
+    first_client = holder.client
+
+    holder.swap(settings, SimpleNamespace())
+
+    assert holder.enable_usage_tracking() is ledger
+    assert holder.client is not first_client
+    assert isinstance(holder.client, UsageTrackingClient)
+    assert holder.client.ledger is ledger
+
+
+def test_usage_ledger_marks_missing_server_usage() -> None:
+    """服务端漏报 usage 时只给下界，不能宣称精确总量。"""
+    ledger = UsageLedger()
+    ledger.record(UsageEvent(8, 2, 10))
+    ledger.record(None)
+
+    assert ledger.total_tokens == 10
+    assert ledger.requests_with_usage == 1
+    assert ledger.requests_missing_usage == 1
 
 
 @pytest.mark.asyncio
@@ -110,7 +138,7 @@ async def test_goal_command_sets_shows_clears_and_restores_runtime(tmp_path: Pat
             update_model_tools=context_updates.append,
             set_extra_system_messages=runtime_messages.append,
         ),
-        client_holder=SimpleNamespace(),
+        client_holder=ClientHolder(Settings("https://example.com", "test", "key"), SimpleNamespace()),
         agent_loop=agent,
         project_dir=tmp_path,
         tool_manager=manager,
@@ -120,10 +148,12 @@ async def test_goal_command_sets_shows_clears_and_restores_runtime(tmp_path: Pat
 
     assert await registry.dispatch("/goal 迁移全部模块", context)
     assert session.get_goal().objective == "迁移全部模块"
-    assert session.get_goal().max_rounds == 50
-    assert session.get_goal().token_budget == 5_000_000
+    assert session.get_goal().max_rounds is None
+    assert session.get_goal().token_budget is None
     assert manager.is_model_tool_enabled("goal")
     assert isinstance(agent.end_policy, GoalPolicy)
+    assert context.client_holder.usage_ledger is not None
+    assert agent._client is context.client_holder.client
     assert "迁移全部模块" in runtime_messages[-1][-1].content
 
     await registry.dispatch("/goal status", context)
@@ -204,3 +234,52 @@ async def test_budget_close_response_has_no_tools() -> None:
     assert client.tools[0]
     assert client.tools[1] == []
     assert policy.goal.status == "budget_limited"
+
+
+@pytest.mark.asyncio
+async def test_goal_ledger_counts_parent_compaction_and_child_requests() -> None:
+    """真实压缩路径、父循环和独立子循环共用客户端边界总账。"""
+    summary = (
+        "## Goal\n目标\n## Progress\n进展\n## Key Decisions\n决策\n"
+        "## Next Steps\n下一步\n## Critical Context\n上下文\n"
+    )
+
+    class Client:
+        def __init__(self) -> None:
+            self.usages: list[UsageEvent] = []
+            self.summary_calls = 0
+
+        async def stream_response(self, messages, tools=(), thinking_level=None):
+            if "<conversation>" in messages[-1].content:
+                self.summary_calls += 1
+                content = summary
+            else:
+                content = "完成"
+            usage = UsageEvent(8, 2, 10)
+            self.usages.append(usage)
+            yield TextDelta(content)
+            yield usage
+
+    raw = Client()
+    ledger = UsageLedger()
+    client = UsageTrackingClient(raw, ledger)
+    goal = Goal("完成任务", max_rounds=0)
+    policy = GoalPolicy(goal, usage_ledger=ledger)
+    manager = ContextManager(ContextBudget(700, 100, 100))
+    history = [
+        Message(role="user", content="旧问题" + "x" * 1600),
+        Message(role="assistant", content="旧回答" + "x" * 1600),
+        Message(role="user", content="新问题" + "x" * 800),
+        Message(role="assistant", content="新回答"),
+    ]
+
+    async def build_context(messages, force_compaction):
+        return await manager.build_for_model_result(client, messages, force_compaction=force_compaction)
+
+    await AgentLoop(client, ToolManager(), end_policy=policy).run(history, build_context=build_context)
+    await AgentLoop(client, ToolManager()).run([Message(role="user", content="子任务")])
+
+    assert raw.summary_calls >= 1
+    assert len(raw.usages) > raw.summary_calls + 1
+    assert ledger.requests_missing_usage == 0
+    assert goal.tokens_used == ledger.total_tokens == sum(item.total_tokens for item in raw.usages)

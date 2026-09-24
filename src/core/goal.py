@@ -7,7 +7,7 @@ from time import monotonic
 from typing import Literal
 
 from .end_policy import EndPolicySummary
-from .model import Message, ToolCall, ToolResult, UsageEvent
+from .model import Message, ToolCall, ToolResult, UsageEvent, UsageLedger
 from .tools.args import string_argument
 from .tools.types import ToolDefinition, ToolHandler
 
@@ -57,6 +57,7 @@ class GoalPolicy:
         completion_check: Callable[[], bool] | None = None,
         on_change: Callable[[Goal], None] | None = None,
         clock: Callable[[], float] = monotonic,
+        usage_ledger: UsageLedger | None = None,
     ) -> None:
         """共享可变 Goal，并以回调持久化每次状态变化。"""
         self.goal = goal
@@ -65,6 +66,11 @@ class GoalPolicy:
         self._clock = clock
         self._last_tick = clock()
         self._closing_sent = False
+        self._usage_ledger = usage_ledger
+        self._initial_tokens = goal.tokens_used
+        self._ledger_baseline = usage_ledger.total_tokens if usage_ledger is not None else 0
+        if usage_ledger is not None:
+            usage_ledger.set_observer(self._observe_total_usage)
 
     @property
     def summary(self) -> EndPolicySummary:
@@ -103,8 +109,16 @@ class GoalPolicy:
 
     def observe_usage(self, usage: UsageEvent) -> None:
         """累计服务端实际用量，供预算与 resume 使用。"""
+        if self._usage_ledger is not None:
+            return
         self._tick()
         self.goal.tokens_used += usage.total_tokens
+        self._persist()
+
+    def _observe_total_usage(self, total_tokens: int) -> None:
+        """按共享总账的增量更新 Goal，避免主循环事件重复记账。"""
+        self._tick()
+        self.goal.tokens_used = self._initial_tokens + total_tokens - self._ledger_baseline
         self._persist()
 
     def observe_tool_results(
