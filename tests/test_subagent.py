@@ -3,17 +3,26 @@ from collections.abc import Sequence
 
 import pytest
 
-import core.subagent as subagent
-from core.agent_loop import AgentLoop
+from core.agent_loop import AgentLoop, ToolBatchEvent
 from core.context import ContextBudget
 from core.model import Message, TextDelta, ToolCall, ToolCallEvent, UsageEvent
 from core.session import Session
 from core.subagent import (
     SCOUT_SUMMARY_MAX_CHARS,
     SCOUT_SYSTEM_PROMPT,
+    SUBAGENT_PARENT_PROMPT,
     create_spawn_agent_tool,
+    create_spawn_reviewer_tool,
+    create_spawn_worker_tool,
+    _limit_summary,
 )
-from core.tools import ToolManager
+from core.tools import (
+    ApprovalDecision,
+    ApprovalResult,
+    PermissionManager,
+    ToolManager,
+)
+from core.tools.command_executor import CommandExecution
 
 
 class ScoutClient:
@@ -36,6 +45,51 @@ class ScoutClient:
             return
         yield TextDelta("结论：目标内容已定位")
         yield UsageEvent(10, 2, 12)
+
+
+class RoleClient:
+    """执行一次可选工具调用，再返回预设的角色摘要。"""
+
+    def __init__(
+        self,
+        call_batches: tuple[tuple[ToolCall, ...], ...],
+        summary: str,
+    ) -> None:
+        self.call_batches = call_batches
+        self.summary = summary
+        self.requests: list[list[Message]] = []
+        self.tools: list[list[dict[str, object]]] = []
+
+    async def stream_response(self, messages, tools=(), thinking_level=None):
+        self.requests.append(list(messages))
+        self.tools.append(list(tools))
+        request_index = len(self.requests) - 1
+        if request_index < len(self.call_batches):
+            for call in self.call_batches[request_index]:
+                yield ToolCallEvent(call)
+        else:
+            yield TextDelta(self.summary)
+
+
+class FakeCommandExecutor:
+    """记录命令并返回成功结果，避免测试执行真实 shell 命令。"""
+
+    def __init__(self) -> None:
+        self.commands: list[str] = []
+
+    async def execute(self, command, cwd, timeout_seconds):
+        self.commands.append(command)
+        return CommandExecution(b"checks passed", b"", 0)
+
+
+def test_parent_prompt_requires_worker_to_reviewer_handoff() -> None:
+    """父 Agent 必须把 Worker 修改范围和验证命令交给 Reviewer。"""
+
+    assert "spawn_reviewer" in SUBAGENT_PARENT_PROMPT
+    assert "context" in SUBAGENT_PARENT_PROMPT
+    assert "Worker 的实际改动内容" in SUBAGENT_PARENT_PROMPT
+    assert "从什么改成什么" in SUBAGENT_PARENT_PROMPT
+    assert "验证命令" in SUBAGENT_PARENT_PROMPT
 
 
 @pytest.mark.asyncio
@@ -191,12 +245,12 @@ async def test_spawn_agent_times_out_with_structured_error(tmp_path, monkeypatch
             await asyncio.sleep(1)
             yield TextDelta("不会返回")
 
-    monkeypatch.setattr(subagent, "SCOUT_TIMEOUT_SECONDS", 0.01)
     _, handler = create_spawn_agent_tool(
         tmp_path,
         SlowClient,
         lambda: "high",
         ContextBudget(10_000, 1_000, 2_000),
+        timeout_seconds=0.01,
     )
 
     result = await handler(ToolCall("spawn-1", "spawn_agent", {"task": "读取"}))
@@ -206,26 +260,207 @@ async def test_spawn_agent_times_out_with_structured_error(tmp_path, monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_spawn_agent_reports_tool_round_limit(tmp_path, monkeypatch) -> None:
-    """测试 Scout 达到工具轮次上限后返回结构化错误。"""
+async def test_spawn_agent_can_exceed_eight_tool_rounds(tmp_path) -> None:
+    """测试 Scout 不会在固定的第八轮工具调用处被截断。"""
 
     class LoopingClient:
-        async def stream_response(self, messages, tools=(), thinking_level=None):
-            yield ToolCallEvent(ToolCall("list-1", "list_files", {"path": "."}))
+        def __init__(self) -> None:
+            self.requests = 0
 
-    monkeypatch.setattr(subagent, "SCOUT_MAX_TOOL_ROUNDS", 1)
+        async def stream_response(self, messages, tools=(), thinking_level=None):
+            self.requests += 1
+            if self.requests <= 9:
+                yield ToolCallEvent(
+                    ToolCall(f"list-{self.requests}", "list_files", {"path": "."})
+                )
+            else:
+                yield TextDelta("Scout completed after nine tool rounds")
+
+    client = LoopingClient()
     _, handler = create_spawn_agent_tool(
         tmp_path,
-        LoopingClient,
+        lambda: client,
         lambda: "high",
         ContextBudget(10_000, 1_000, 2_000),
     )
 
     result = await handler(ToolCall("spawn-1", "spawn_agent", {"task": "读取"}))
 
-    assert result.is_error is True
-    assert result.error_category == "tool_execution"
-    assert "tool round limit" in result.content
+    assert result.is_error is False
+    assert "nine tool rounds" in result.content
+    assert client.requests == 10
+
+
+@pytest.mark.asyncio
+async def test_spawn_worker_parallel_reads_sequential_write_with_approval(tmp_path) -> None:
+    """测试 Worker 只读批次并行，写入批次串行且复用父级审批。"""
+
+    approvals = []
+
+    async def approve(definition, tool_call, allow_session):
+        approvals.append((definition.name, allow_session))
+        return ApprovalResult(ApprovalDecision.ALLOW_ONCE)
+
+    client = RoleClient(
+        (
+            (
+                ToolCall("list-1", "list_files", {"path": "."}),
+                ToolCall("search-1", "search_files", {"pattern": "result"}),
+            ),
+            (
+                ToolCall(
+                    "write-1",
+                    "write_file",
+                    {"path": "result.txt", "content": "done"},
+                ),
+            ),
+        ),
+        "## Changes\n- result.txt\n## Verification\n- not run\n## Result\n- done",
+    )
+    events = []
+
+    async def collect(event):
+        events.append(event)
+
+    definition, handler = create_spawn_worker_tool(
+        tmp_path,
+        lambda: client,
+        lambda: "high",
+        ContextBudget(10_000, 1_000, 2_000),
+        permission_manager=PermissionManager(approve),
+        on_event=collect,
+    )
+
+    result = await handler(ToolCall("worker-1", "spawn_worker", {"task": "修改文件"}))
+
+    names = [tool["function"]["name"] for tool in client.tools[0]]  # type: ignore[index]
+    assert definition.execution_mode == "sequential"
+    assert names == [
+        "read_file", "list_files", "search_files", "write_file", "edit_file", "run_command"
+    ]
+    assert all(not name.startswith("spawn_") for name in names)
+    assert approvals == [("write_file", True)]
+    assert (tmp_path / "result.txt").read_text(encoding="utf-8") == "done"
+    child_batches = [event for event in events if isinstance(event, ToolBatchEvent)]
+    assert [batch.execution_mode for batch in child_batches] == ["parallel", "sequential"]
+    assert len(child_batches[0].tool_calls) == 2
+    assert [call.name for call in child_batches[1].tool_calls] == ["write_file"]
+    assert "result.txt" in result.content and "Verification" in result.content
+    assert any("修改文件" in message.content for message in client.requests[0])
+
+
+@pytest.mark.asyncio
+async def test_spawn_reviewer_is_sequential_and_approves_verification_command(
+    tmp_path,
+) -> None:
+    """测试 Reviewer 只有只读工具与命令，运行命令仍经父级审批。"""
+
+    approvals = []
+
+    async def approve(definition, tool_call, allow_session):
+        approvals.append((definition.name, allow_session))
+        return ApprovalResult(ApprovalDecision.ALLOW_ONCE)
+
+    (tmp_path / "target.txt").write_text("检查内容", encoding="utf-8")
+    executor = FakeCommandExecutor()
+    client = RoleClient(
+        (
+            (
+                ToolCall("read-1", "read_file", {"path": "target.txt"}),
+                ToolCall("list-1", "list_files", {"path": "."}),
+            ),
+            (ToolCall("command-1", "run_command", {"command": "pytest tests/test_x.py"}),),
+        ),
+        "## Passed\n- tests passed\n## Findings\n- none\n## Evidence\n- exit code 0",
+    )
+    events = []
+
+    async def collect(event):
+        events.append(event)
+
+    definition, handler = create_spawn_reviewer_tool(
+        tmp_path,
+        lambda: client,
+        lambda: "high",
+        ContextBudget(10_000, 1_000, 2_000),
+        permission_manager=PermissionManager(approve),
+        command_executor=executor,
+        on_event=collect,
+    )
+
+    result = await handler(
+        ToolCall("reviewer-1", "spawn_reviewer", {"task": "验证修改"})
+    )
+
+    names = [tool["function"]["name"] for tool in client.tools[0]]  # type: ignore[index]
+    assert definition.execution_mode == "sequential"
+    assert names == ["read_file", "list_files", "search_files", "run_command"]
+    assert all(not name.startswith("spawn_") for name in names)
+    assert approvals == [("run_command", False)]
+    assert executor.commands == ["pytest tests/test_x.py"]
+    child_batches = [event for event in events if isinstance(event, ToolBatchEvent)]
+    assert [batch.execution_mode for batch in child_batches] == ["parallel", "sequential"]
+    assert "Passed" in result.content and "Findings" in result.content
+    assert any("只运行验证相关命令" in message.content for message in client.requests[0])
+
+
+@pytest.mark.asyncio
+async def test_scout_worker_and_reviewer_have_separate_initial_contexts(
+    tmp_path,
+) -> None:
+    """测试三个角色每次都从各自任务开始，不共享此前消息。"""
+
+    client = RoleClient((), "完成")
+    budget = ContextBudget(10_000, 1_000, 2_000)
+    manager = PermissionManager()
+    factories = (
+        ("Scout 专属任务", create_spawn_agent_tool),
+        ("Worker 专属任务", create_spawn_worker_tool),
+        ("Reviewer 专属任务", create_spawn_reviewer_tool),
+    )
+    for task, factory in factories:
+        kwargs = {"permission_manager": manager} if factory is not create_spawn_agent_tool else {}
+        _, handler = factory(
+            tmp_path,
+            lambda: client,
+            lambda: "high",
+            budget,
+            **kwargs,
+        )
+        await handler(ToolCall(f"call-{task}", factory.__name__, {"task": task}))
+
+    for request, (task, _) in zip(client.requests, factories):
+        user_messages = [message.content for message in request if message.role == "user"]
+        system_messages = [message.content for message in request if message.role == "system"]
+        assert user_messages == [task]
+        assert any(f"Current workspace root: `{tmp_path}`" in content for content in system_messages)
+        assert all(other_task not in "\n".join(user_messages) for other_task, _ in factories if other_task != task)
+
+
+@pytest.mark.parametrize(
+    ("role", "sections"),
+    [
+        ("worker", ("Changes", "Verification", "Result")),
+        ("reviewer", ("Passed", "Findings", "Evidence")),
+    ],
+)
+def test_role_summary_truncation_keeps_required_sections(role, sections) -> None:
+    """测试 Worker 与 Reviewer 的超长摘要仍保留各自必需分节。"""
+
+    first, second, third = sections
+    content = (
+        f"## {first}\n- required-{first.lower()}\n- " + "x" * 8_000
+        + f"\n## {second}\n- required-{second.lower()}\n"
+        + f"## {third}\n- required-{third.lower()}"
+    )
+
+    result = _limit_summary(content, role)
+
+    assert len(result) <= SCOUT_SUMMARY_MAX_CHARS
+    for section in sections:
+        assert f"## {section}" in result
+        assert f"required-{section.lower()}" in result
+    assert "[truncated]" in result
 
 
 @pytest.mark.asyncio
@@ -233,9 +468,11 @@ async def test_spawn_agent_cancels_running_scout_with_parent(tmp_path) -> None:
     """测试父调用取消时同步取消仍在运行的 Scout。"""
 
     cancelled = asyncio.Event()
+    started = asyncio.Event()
 
     class SlowClient:
         async def stream_response(self, messages, tools=(), thinking_level=None):
+            started.set()
             try:
                 await asyncio.sleep(10)
             finally:
@@ -251,7 +488,7 @@ async def test_spawn_agent_cancels_running_scout_with_parent(tmp_path) -> None:
     task = asyncio.create_task(
         handler(ToolCall("spawn-1", "spawn_agent", {"task": "读取"}))
     )
-    await asyncio.sleep(0)
+    await asyncio.wait_for(started.wait(), timeout=1)
 
     task.cancel()
 

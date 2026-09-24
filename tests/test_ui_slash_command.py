@@ -100,11 +100,11 @@ async def test_run_chat_start_skill_injects_active_skill(
 
 
 @pytest.mark.asyncio
-async def test_run_chat_subagent_command_enables_scout_for_next_request(
+async def test_run_chat_subagent_command_enables_all_roles_for_next_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """测试 /subagent 开启后下一轮可见 Scout 工具与父级说明。"""
+    """测试 /subagent 开启后下一轮可见三种角色工具与统一说明。"""
 
     class FakeScreen:
         def __init__(self, status, on_submit, command_names=None, **kwargs) -> None:
@@ -162,7 +162,18 @@ async def test_run_chat_subagent_command_enables_scout_for_next_request(
         for tool in client.tools[0]
     )
     assert any(
-        message.role == "system" and "Scout delegation is enabled" in message.content
+        tool["function"]["name"] == "spawn_worker"
+        for tool in client.tools[0]
+    )
+    assert any(
+        tool["function"]["name"] == "spawn_reviewer"
+        for tool in client.tools[0]
+    )
+    assert any(
+        message.role == "system"
+        and "Scout delegation is enabled" in message.content
+        and "Worker" in message.content
+        and "Reviewer" in message.content
         for message in client.requests[0]
     )
 

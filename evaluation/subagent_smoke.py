@@ -59,6 +59,48 @@ class ScoutBatchRecord:
 
 
 @dataclass(frozen=True)
+class ScoutRequestTiming:
+    """记录 Scout 的单次模型请求相对本档开始时间。"""
+
+    request_index: int
+    started_ms: float
+    finished_ms: float
+
+
+class _RequestTimelineClient:
+    """只为评测记录请求边界，不改变底层模型客户端行为。"""
+
+    def __init__(
+        self,
+        client: ModelClient,
+        origin: float,
+        timeline: list[ScoutRequestTiming],
+    ) -> None:
+        self._client = client
+        self._origin = origin
+        self._timeline = timeline
+        self._next_request_index = 0
+
+    async def stream_response(self, messages, tools=(), thinking_level=None):
+        request_index = self._next_request_index
+        self._next_request_index += 1
+        started_ms = (perf_counter() - self._origin) * 1000
+        try:
+            async for event in self._client.stream_response(
+                messages, tools, thinking_level
+            ):
+                yield event
+        finally:
+            self._timeline.append(
+                ScoutRequestTiming(
+                    request_index,
+                    started_ms,
+                    (perf_counter() - self._origin) * 1000,
+                )
+            )
+
+
+@dataclass(frozen=True)
 class SubagentSmokeResult:
     """保存一个开关档位的描述性结果。"""
 
@@ -74,6 +116,8 @@ class SubagentSmokeResult:
     scout_calls: int
     scout_outcomes: dict[str, int]
     scout_batches: tuple[ScoutBatchRecord, ...]
+    scout_request_timeline: tuple[ScoutRequestTiming, ...]
+    scout_max_concurrent_requests: int
     scout_parallel: bool
     scout_parallel_summary: str
     scout_context_calls: int
@@ -96,7 +140,10 @@ async def run_subagent_smoke_arm(
 
     started_at = perf_counter()
     parent_client = TimedModelClient(client)
-    scout_client = TimedModelClient(client)
+    scout_timeline: list[ScoutRequestTiming] = []
+    scout_client = TimedModelClient(
+        _RequestTimelineClient(client, started_at, scout_timeline)
+    )
     scout_metrics: list[ScoutRunMetrics] = []
     manager = ToolManager()
     for create_tool in (
@@ -229,6 +276,10 @@ async def run_subagent_smoke_arm(
         scout_calls=len(scout_metrics),
         scout_outcomes=dict(Counter(metric.outcome for metric in scout_metrics)),
         scout_batches=tuple(scout_batches),
+        scout_request_timeline=tuple(scout_timeline),
+        scout_max_concurrent_requests=_maximum_request_overlap(
+            tuple(scout_timeline)
+        ),
         scout_parallel=scout_parallel,
         scout_parallel_summary=scout_parallel_summary,
         scout_context_calls=scout_context_calls,
@@ -272,6 +323,21 @@ def _scout_parallel_result(
         False,
         f"否（同一批次 {batch.spawn_agent_calls} 个，{batch.execution_mode}）",
     )
+
+
+def _maximum_request_overlap(
+    timeline: tuple[ScoutRequestTiming, ...],
+) -> int:
+    """计算同时处于进行中的 Scout 模型请求峰值。"""
+
+    points = [(timing.started_ms, 1) for timing in timeline] + [
+        (timing.finished_ms, -1) for timing in timeline
+    ]
+    active = maximum = 0
+    for _, change in sorted(points, key=lambda point: (point[0], point[1])):
+        active += change
+        maximum = max(maximum, active)
+    return maximum
 
 
 async def run_subagent_smoke(
@@ -357,6 +423,7 @@ def main() -> int:
             f"summary_chars={result.parent_scout_result_chars} "
             f"Scout context={result.scout_context_calls} calls/"
             f"{result.scout_context_chars} chars "
+            f"Scout 请求最大并发={result.scout_max_concurrent_requests} "
             f"Scout 并行：{result.scout_parallel_summary}"
         )
     print(f"results: {args.output}")

@@ -134,22 +134,24 @@ async def test_mcp_command_lists_only_mcp_tools() -> None:
 
 
 @pytest.mark.asyncio
-async def test_subagent_command_enables_scout_and_refreshes_context() -> None:
-    """测试 /subagent 开启 Scout 后同步工具定义与系统说明。"""
+async def test_subagent_command_enables_all_roles_and_refreshes_context() -> None:
+    """测试 /subagent 统一开启三种角色并展示各自状态。"""
 
     screen = _Screen()
     screen.choices = ["on"]
-    enabled = False
+    enabled = {"spawn_agent": False, "spawn_worker": False, "spawn_reviewer": False}
 
     def set_enabled(name: str, value: bool) -> None:
-        nonlocal enabled
-        assert name == "spawn_agent"
-        enabled = value
+        enabled[name] = value
 
     tool_manager = SimpleNamespace(
-        is_model_tool_enabled=lambda name: enabled,
+        is_model_tool_enabled=lambda name: enabled[name],
         set_model_tool_enabled=set_enabled,
-        model_tools=lambda: [{"function": {"name": "spawn_agent"}}] if enabled else [],
+        model_tools=lambda: [
+            {"function": {"name": name}}
+            for name, is_enabled in enabled.items()
+            if is_enabled
+        ],
     )
     updates: list[object] = []
     messages: list[object] = []
@@ -165,10 +167,16 @@ async def test_subagent_command_enables_scout_and_refreshes_context() -> None:
 
     await subagent_command_slash.handler(context)
 
-    assert enabled is True
-    assert updates == [[{"function": {"name": "spawn_agent"}}]]
+    assert all(enabled.values())
+    assert updates == [[
+        {"function": {"name": "spawn_agent"}},
+        {"function": {"name": "spawn_worker"}},
+        {"function": {"name": "spawn_reviewer"}},
+    ]]
     assert len(messages) == 1
     assert "Scout: on" in screen.entries[-1][1]
+    assert "Worker: on" in screen.entries[-1][1]
+    assert "Reviewer: on" in screen.entries[-1][1]
     assert "deepseek-v4-pro" in screen.entries[-1][1]
 
 

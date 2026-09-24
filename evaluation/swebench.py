@@ -234,6 +234,7 @@ async def run_task(
                 events,
                 model_name,
                 manager,
+                prepared.workspace,
                 artifact_store=artifact_store,
                 eviction_enabled=eviction_enabled,
             )
@@ -621,6 +622,7 @@ def _context_builder(
     events: list[dict[str, object]],
     model_name: str,
     tool_manager: ToolManager,
+    workspace: Path,
     artifact_store: ArtifactStore | None = None,
     eviction_enabled: bool = False,
     eviction_threshold_tokens: int | None = None,
@@ -641,6 +643,7 @@ def _context_builder(
         eviction_enabled=eviction_enabled,
         eviction_threshold_tokens=eviction_threshold_tokens,
     )
+    manager.set_workspace_path(str(workspace))
     manager.set_model_name(model_name)
     manager.set_session_id(session.session_id)
 

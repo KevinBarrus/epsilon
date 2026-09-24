@@ -51,7 +51,11 @@ from .prompts import load_prompt
 from .project_instructions import load_project_instructions
 from .session import Session
 from .skills import SkillManager
-from .subagent import create_spawn_agent_tool
+from .subagent import (
+    create_spawn_agent_tool,
+    create_spawn_reviewer_tool,
+    create_spawn_worker_tool,
+)
 from .model import ClientHolder
 from .tools import (
     PermissionManager,
@@ -416,9 +420,8 @@ async def run_chat(
         copy_hint_provider=lambda: copy_hint,
         startup_info_provider=_render_startup_info,
     )
-    tool_manager = ToolManager(
-        permission_manager=PermissionManager(screen.request_approval),
-    )
+    permission_manager = PermissionManager(screen.request_approval)
+    tool_manager = ToolManager(permission_manager=permission_manager)
     artifact_store = ArtifactStore.for_workspace(session_workspace)
     tool_manager.register_local(
         *create_read_file_tool(session_workspace, artifact_store)
@@ -432,15 +435,28 @@ async def run_chat(
     ):
         tool_manager.register_local(*create_tool(session_workspace))
     resolved_context_budget = context_budget or DEFAULT_CONTEXT_BUDGET
+    client_provider = lambda: client_holder.client
+    thinking_provider = lambda: agent_loop.thinking_level
     tool_manager.register_local(
         *create_spawn_agent_tool(
             session_workspace,
-            lambda: client_holder.client,
-            lambda: agent_loop.thinking_level,
+            client_provider,
+            thinking_provider,
             resolved_context_budget,
         )
     )
-    tool_manager.set_model_tool_enabled("spawn_agent", False)
+    for create_role_tool in (create_spawn_worker_tool, create_spawn_reviewer_tool):
+        tool_manager.register_local(
+            *create_role_tool(
+                session_workspace,
+                client_provider,
+                thinking_provider,
+                resolved_context_budget,
+                permission_manager=permission_manager,
+            )
+        )
+    for name in ("spawn_agent", "spawn_worker", "spawn_reviewer"):
+        tool_manager.set_model_tool_enabled(name, False)
     if mcp_provider is not None:
         try:
             await tool_manager.register_mcp_provider(mcp_provider)
@@ -460,6 +476,7 @@ async def run_chat(
         eviction_enabled=settings.eviction_enabled,
         eviction_threshold_tokens=settings.eviction_threshold_tokens,
     )
+    context_manager.set_workspace_path(str(session_workspace))
     project_instructions = load_project_instructions(session_workspace)
     context_manager.set_project_instructions(project_instructions.content)
     context_manager.set_model_name(settings.model_name)

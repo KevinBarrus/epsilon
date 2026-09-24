@@ -205,8 +205,16 @@ async def test_run_chat_retries_once_with_forced_context_compaction(
         role="system",
         content=ui.AGENT_SYSTEM_PROMPT.replace("{model_name}", "test"),
     )
-    assert client.requests[0][1].role == "system"
-    assert "项目测试约束" in client.requests[0][1].content
+    assert any(
+        f"Current workspace root: `{tmp_path}`" in message.content
+        for message in client.requests[0]
+        if message.role == "system"
+    )
+    assert any(
+        "项目测试约束" in message.content
+        for message in client.requests[0]
+        if message.role == "system"
+    )
     assert any(
         message.content == CONTEXT_FALLBACK_NOTICE
         for message in client.requests[1]

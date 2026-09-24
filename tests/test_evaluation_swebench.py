@@ -261,12 +261,18 @@ async def test_evaluation_context_uses_production_system_prompt(tmp_path: Path) 
         [],
         "test-model",
         ToolManager(),
+        tmp_path,
     )
 
     result = await build_context(session.get_messages(), False)
 
     assert result.messages[0].role == "system"
     assert "test-model" in result.messages[0].content
+    assert any(
+        f"Current workspace root: `{tmp_path}`" in message.content
+        for message in result.messages
+        if message.role == "system"
+    )
     session.close()
 
 
@@ -695,6 +701,7 @@ async def test_evaluation_context_persists_eviction(tmp_path: Path) -> None:
         events,
         "test-model",
         ToolManager(),
+        tmp_path,
         artifact_store=store,
         eviction_enabled=True,
     )
@@ -738,6 +745,7 @@ async def test_evaluation_context_records_eviction_gate_rejection(
         events,
         "test-model",
         ToolManager(),
+        tmp_path,
         artifact_store=store,
         eviction_enabled=True,
         eviction_threshold_tokens=4_000,

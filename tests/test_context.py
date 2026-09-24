@@ -217,6 +217,22 @@ def test_context_manager_appends_extra_system_messages_after_base_prompt() -> No
     assert result[2] == Message(role="user", content="你好")
 
 
+def test_context_manager_injects_workspace_root_without_persisting_it(tmp_path) -> None:
+    """工作区根目录进入模型系统消息，不写入会话原始消息。"""
+
+    manager = ContextManager(ContextBudget(1000, 100, 200), system_prompt="基础提示词")
+    messages = [Message(role="user", content="检查文件")]
+    manager.set_workspace_path(str(tmp_path))
+
+    result = manager.build(messages)
+
+    assert result[1] == Message(
+        role="system",
+        content=f"Current workspace root: `{tmp_path}`。所有文件工具的路径都相对这个根目录。",
+    )
+    assert messages == [Message(role="user", content="检查文件")]
+
+
 def test_context_manager_keeps_project_instructions_when_skills_change() -> None:
     """测试项目说明固定保留，Skill 说明仍可独立更新。"""
 

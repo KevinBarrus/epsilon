@@ -256,6 +256,7 @@ async def run_long_task(
                 events,
                 settings.model_name,
                 manager,
+                prepared.workspace,
                 artifact_store=artifact_store,
                 eviction_enabled=eviction_enabled,
                 eviction_threshold_tokens=eviction_threshold_tokens,

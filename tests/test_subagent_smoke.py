@@ -1,4 +1,6 @@
+import asyncio
 import json
+from time import perf_counter
 
 import pytest
 
@@ -10,6 +12,8 @@ from evaluation.subagent_smoke import (
     ScoutBatchRecord,
     SubagentSmokeResult,
     _scout_parallel_result,
+    _maximum_request_overlap,
+    _RequestTimelineClient,
     _write_results,
     main,
     run_subagent_smoke_arm,
@@ -17,6 +21,35 @@ from evaluation.subagent_smoke import (
 
 
 FINAL_ANSWER = " ".join(REQUIRED_EVIDENCE)
+
+
+@pytest.mark.asyncio
+async def test_request_timeline_records_overlapping_model_requests() -> None:
+    """测试时间线能识别同时进行的 Scout 模型请求。"""
+
+    entered = 0
+    both_entered = asyncio.Event()
+
+    class ConcurrentClient:
+        async def stream_response(self, messages, tools=(), thinking_level=None):
+            nonlocal entered
+            entered += 1
+            if entered == 2:
+                both_entered.set()
+            await both_entered.wait()
+            yield TextDelta("done")
+
+    timeline = []
+    client = _RequestTimelineClient(ConcurrentClient(), perf_counter(), timeline)
+
+    async def consume() -> None:
+        async for _ in client.stream_response([]):
+            pass
+
+    await asyncio.gather(consume(), consume())
+
+    assert len(timeline) == 2
+    assert _maximum_request_overlap(tuple(timeline)) == 2
 
 
 def test_subagent_smoke_prompt_contains_independent_parallel_investigations() -> None:
@@ -185,6 +218,8 @@ def test_subagent_smoke_writes_jsonl(tmp_path) -> None:
                 scout_calls=0,
                 scout_outcomes={},
                 scout_batches=(),
+                scout_request_timeline=(),
+                scout_max_concurrent_requests=0,
                 scout_parallel=False,
                 scout_parallel_summary="否（未调用 Scout）",
                 scout_context_calls=0,

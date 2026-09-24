@@ -147,6 +147,7 @@ class ContextManager:
         self._model_tools = tuple(model_tools)
         self._system_prompt_template = system_prompt
         self._model_name: str | None = None
+        self._workspace_path: str | None = None
         self._project_instructions: Message | None = None
         self._extra_system_messages: tuple[Message, ...] = ()
         self._artifact_store = artifact_store
@@ -177,6 +178,11 @@ class ContextManager:
 
         self._model_name = model_name
 
+    def set_workspace_path(self, path: str) -> None:
+        """设置当前工具工作区根目录，仅注入模型请求而不持久化。"""
+
+        self._workspace_path = path
+
     @property
     def _base_system_messages(self) -> tuple[Message, ...]:
         """返回注入当前模型名的基础提示词和额外系统消息的组合。"""
@@ -185,12 +191,25 @@ class ContextManager:
         if prompt and self._model_name:
             prompt = prompt.replace("{model_name}", self._model_name)
         base = (Message(role="system", content=prompt),) if prompt else ()
+        workspace = (
+            (
+                Message(
+                    role="system",
+                    content=(
+                        f"Current workspace root: `{self._workspace_path}`。"
+                        "所有文件工具的路径都相对这个根目录。"
+                    ),
+                ),
+            )
+            if self._workspace_path is not None
+            else ()
+        )
         project = (
             (self._project_instructions,)
             if self._project_instructions is not None
             else ()
         )
-        return (*base, *project, *self._extra_system_messages)
+        return (*base, *workspace, *project, *self._extra_system_messages)
 
     def set_project_instructions(self, content: str) -> None:
         """设置仅在当前工作区启动时读取一次的项目说明。"""
