@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import TextIO
 
 from .memory import Memory
+from .goal import Goal
 from .model import Message
 from .session_persistence import SessionPersistenceQueue
 from .session_store import CompactionRecord, EvictionRecord, SessionStore
@@ -29,6 +30,8 @@ class Session:
         self._evictions: list[EvictionRecord] = []
         self._transient_evictions: list[EvictionRecord] = []
         self._eviction_persistence_degraded = False
+        self._goal: Goal | None = None
+        self._goal_persistence_degraded = False
         self._deleted = False
         self._persistence = SessionPersistenceQueue(
             lambda message: self._store.append_message(self.session_id, message),
@@ -60,6 +63,7 @@ class Session:
                 session._add_to_memory(message)
             session._compactions = session._store.load_compactions(session.session_id)
             session._evictions = session._store.load_evictions(session.session_id)
+            session._goal = session._store.load_goal(session.session_id)
             return session
         except BaseException:
             session.close()
@@ -84,6 +88,42 @@ class Session:
         """返回当前会话的消息历史"""
 
         return self._memory.get_messages()
+
+    def get_goal(self) -> Goal | None:
+        """返回当前会话共享的目标状态。"""
+        return self._goal
+
+    def set_goal(self, goal: Goal) -> bool:
+        """设置新目标并追加首条 JSONL 快照。"""
+        self._goal = goal
+        return self.update_goal()
+
+    def update_goal(self) -> bool:
+        """持久化目标的预算与状态变化。"""
+        if self._goal is None:
+            return False
+        if not self._persistence.flush():
+            self._goal_persistence_degraded = True
+            return False
+        try:
+            self._store.append_goal(self.session_id, self._goal)
+        except OSError:
+            self._goal_persistence_degraded = True
+            return False
+        return True
+
+    def clear_goal(self) -> bool:
+        """清除运行时目标并追加可恢复的清除标记。"""
+        self._goal = None
+        if not self._persistence.flush():
+            self._goal_persistence_degraded = True
+            return False
+        try:
+            self._store.append_goal(self.session_id, None)
+        except OSError:
+            self._goal_persistence_degraded = True
+            return False
+        return True
 
     def get_compactions(self) -> list[CompactionRecord]:
         """返回当前会话的压缩记录副本"""
@@ -157,6 +197,7 @@ class Session:
             self._persistence.degraded
             or self._compaction_persistence_degraded
             or self._eviction_persistence_degraded
+            or self._goal_persistence_degraded
         )
 
     def _append_message(self, message: Message) -> None:

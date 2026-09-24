@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TextIO
 
 from .errors import is_error_category
+from .goal import Goal
 from .model import Message, MessageStatus, ToolCall, UsageEvent
 
 
@@ -157,6 +158,47 @@ class SessionStore:
             "tokens_before": compaction.tokens_before,
         }
         self._append_record(session_id, record)
+
+    def append_goal(self, session_id: str, goal: Goal | None) -> None:
+        """追加目标快照或清除标记，不改写历史消息。"""
+        if goal is None:
+            self._append_record(session_id, {"type": "goal", "op": "clear"})
+            return
+        self._append_record(session_id, {
+            "type": "goal",
+            "objective": goal.objective,
+            "max_rounds": goal.max_rounds,
+            "token_budget": goal.token_budget,
+            "time_budget_seconds": goal.time_budget_seconds,
+            "status": goal.status,
+            "tokens_used": goal.tokens_used,
+            "rounds_started": goal.rounds_started,
+            "elapsed_seconds": goal.elapsed_seconds,
+        })
+
+    def load_goal(self, session_id: str) -> Goal | None:
+        """读取最后一条目标快照，清除标记会覆盖此前目标。"""
+        goal: Goal | None = None
+        for line_number, record in self._read_records(self._session_path(session_id)):
+            if not isinstance(record, dict) or record.get("type") != "goal":
+                continue
+            if record.get("op") == "clear":
+                goal = None
+                continue
+            try:
+                goal = Goal(
+                    objective=record["objective"],
+                    max_rounds=record.get("max_rounds"),
+                    token_budget=record.get("token_budget"),
+                    time_budget_seconds=record.get("time_budget_seconds"),
+                    status=record.get("status", "active"),
+                    tokens_used=record.get("tokens_used", 0),
+                    rounds_started=record.get("rounds_started", 0),
+                    elapsed_seconds=record.get("elapsed_seconds", 0.0),
+                )
+            except (KeyError, ValueError, AttributeError, TypeError) as exc:
+                raise SessionStoreError(f"line {line_number} has an invalid goal record") from exc
+        return goal
 
     def load_messages(self, session_id: str) -> list[Message]:
         """按文件顺序读取指定会话的全部消息。

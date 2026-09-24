@@ -5,7 +5,7 @@ import shlex
 from collections.abc import Sequence
 from typing import Protocol
 
-from .model import Message, ToolCall, ToolResult
+from .model import Message, ToolCall, ToolResult, UsageEvent
 
 
 VERIFICATION_REMINDER = (
@@ -41,6 +41,13 @@ class TurnEndPolicy(Protocol):
         results: Sequence[ToolResult],
     ) -> None:
         """接收一批按模型调用顺序排列的工具结果。"""
+
+    def observe_usage(self, usage: UsageEvent) -> None:
+        """接收一次模型请求的实际用量。"""
+
+    @property
+    def final_response_only(self) -> bool:
+        """是否进入不暴露工具的最后收尾请求。"""
 
     def follow_up_message(self) -> Message | None:
         """返回至多一次的后续上下文消息，或允许自然结束。"""
@@ -116,6 +123,14 @@ class WriteVerificationPolicy:
         self._reminder_injected = False
         self._post_write_command_results: list[ToolResult] = []
         self._verification_command_results: list[ToolResult] = []
+
+    def observe_usage(self, usage: UsageEvent) -> None:
+        """写后验证不以 token 计费，保持既有行为。"""
+
+    @property
+    def final_response_only(self) -> bool:
+        """写后验证仍允许模型运行工具。"""
+        return False
 
     def observe_tool_results(
         self,

@@ -36,7 +36,9 @@ from .commands import (
     delete_command_slash,
     thinking_toggle_command_slash,
     subagent_command_slash,
+    goal_command_slash,
 )
+from .commands.goal import sync_goal_runtime
 from .balance import UNAVAILABLE_BALANCE, BalanceProvider
 from .config import Settings
 from .cost import UsageTotals, cache_hit_rate, format_tokens
@@ -47,6 +49,7 @@ from .context import (
     DEFAULT_CONTEXT_BUDGET,
     UserInputTooLarge,
 )
+from .goal import GoalPolicy, create_goal_tool
 from .prompts import load_prompt
 from .project_instructions import load_project_instructions
 from .session import Session
@@ -105,6 +108,7 @@ def _default_command_registry() -> CommandRegistry:
     registry.register(delete_command_slash)
     registry.register(thinking_toggle_command_slash)
     registry.register(subagent_command_slash)
+    registry.register(goal_command_slash)
     return registry
 
 
@@ -434,6 +438,14 @@ async def run_chat(
         create_run_command_tool,
     ):
         tool_manager.register_local(*create_tool(session_workspace))
+    tool_manager.register_local(
+        *create_goal_tool(
+            lambda: agent_loop.end_policy
+            if isinstance(agent_loop.end_policy, GoalPolicy)
+            else None
+        )
+    )
+    tool_manager.set_model_tool_enabled("goal", False)
     resolved_context_budget = context_budget or DEFAULT_CONTEXT_BUDGET
     client_provider = lambda: client_holder.client
     thinking_provider = lambda: agent_loop.thinking_level
@@ -502,6 +514,12 @@ async def run_chat(
     agent_loop.set_artifact_session(session.session_id)
     context_manager.set_session_id(session.session_id)
     artifact_store.set_session_id(session.session_id)
+    sync_goal_runtime(
+        CommandContext(
+            screen, session, skill_manager, context_manager,
+            client_holder, agent_loop, session_workspace, tool_manager,
+        )
+    )
     try:
         history = session.get_messages()
         screen.add_history_entries(

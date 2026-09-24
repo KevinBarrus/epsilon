@@ -176,6 +176,15 @@ class AgentLoop:
 
         self._session_id = session_id
 
+    def set_end_policy(self, policy: TurnEndPolicy | None) -> None:
+        """按当前会话目标切换收尾策略，不影响无目标的单轮行为。"""
+        self._end_policy = policy
+
+    @property
+    def end_policy(self) -> TurnEndPolicy | None:
+        """返回当前会话使用的收尾策略。"""
+        return self._end_policy
+
 
     @property
     def thinking_level(self) -> str:
@@ -228,6 +237,11 @@ class AgentLoop:
                 reasoning_parts = []
                 latest_usage: UsageEvent | None = None
                 request_messages = context
+                available_tools = (
+                    ()
+                    if self._end_policy is not None and self._end_policy.final_response_only
+                    else self._tool_manager.model_tools()
+                )
                 for force_compaction in (False, True):
                     if build_context is not None:
                         context_result = await build_context(
@@ -238,7 +252,7 @@ class AgentLoop:
                     try:
                         async for event in self._stream_model_events(
                             request_messages,
-                            tools=self._tool_manager.model_tools(),
+                            tools=available_tools,
                             thinking_level=self._thinking_level,
                             on_event=on_event,
                         ):
@@ -250,6 +264,8 @@ class AgentLoop:
                                 tool_calls.append(event.tool_call)
                             elif isinstance(event, UsageEvent):
                                 latest_usage = event
+                                if self._end_policy is not None:
+                                    self._end_policy.observe_usage(event)
                             if on_event is not None:
                                 await on_event(event)
                             if isinstance(event, TextDelta):
@@ -271,7 +287,7 @@ class AgentLoop:
                     request_fingerprint=(
                         model_request_fingerprint(
                             request_messages,
-                            self._tool_manager.model_tools(),
+                            available_tools,
                         )
                         if latest_usage is not None
                         else None

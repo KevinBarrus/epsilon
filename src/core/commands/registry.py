@@ -1,7 +1,7 @@
 """统一注册和分发 slash command。"""
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from ..agent_loop import AgentLoop
@@ -28,6 +28,7 @@ class CommandContext:
     agent_loop: AgentLoop
     project_dir: Path
     tool_manager: "ToolManager | None" = None
+    arguments: str = ""
 
 
 @dataclass(frozen=True)
@@ -73,5 +74,10 @@ class CommandRegistry:
         command = self._commands.get(name)
         if command is None:
             return False
-        await command.handler(context)
+        arguments = line[1:].partition(" ")[2].strip()
+        await command.handler(
+            replace(context, arguments=arguments)
+            if isinstance(context, CommandContext)
+            else context
+        )
         return True

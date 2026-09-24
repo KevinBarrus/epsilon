@@ -23,6 +23,7 @@ from .background_image import background_image_command_slash
 from .delete import delete_command_slash
 from .thinking_toggle import thinking_toggle_command_slash
 from .subagent import subagent_command_slash
+from .goal import goal_command_slash
 
 __all__ = [
     "CommandContext",
@@ -46,4 +47,5 @@ __all__ = [
     "delete_command_slash",
     "thinking_toggle_command_slash",
     "subagent_command_slash",
+    "goal_command_slash",
 ]

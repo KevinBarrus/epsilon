@@ -1,6 +1,7 @@
 """实现 /subagent 命令：查看并切换 Scout。"""
 
 from ..subagent import subagent_parent_message
+from ..goal import GoalPolicy
 from .registry import CommandContext, SlashCommand
 
 SUBAGENT_TOOL_NAMES = ("spawn_agent", "spawn_worker", "spawn_reviewer")
@@ -50,6 +51,9 @@ def _refresh_runtime_messages(context: CommandContext) -> None:
     """合并当前 Skill 与 Scout 说明，避免两个运行时开关互相覆盖。"""
 
     messages = context.skill_manager.active_system_messages()
+    policy = getattr(context.agent_loop, "end_policy", None)
+    if isinstance(policy, GoalPolicy):
+        messages.append(policy.instruction_message())
     if context.tool_manager is not None and any(
         context.tool_manager.is_model_tool_enabled(name)
         for name in SUBAGENT_TOOL_NAMES
