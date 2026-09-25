@@ -21,6 +21,7 @@ from pathlib import Path
 
 # 报告里可能是"路径/文件名"的 token
 _PATH_PATTERN = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_./-]*\.(?:py|ts|tsx|vue|md|json|sql|ya?ml)")
+DEFAULT_PATH_PATTERN = _PATH_PATTERN
 # 路径判定用的后缀集合，避免把每个文件都装进内存后再做 O(n) 扫描
 _CODE_SUFFIXES = (".py", ".ts", ".tsx", ".vue", ".md", ".json", ".sql", ".yml", ".yaml")
 
@@ -180,11 +181,11 @@ def _coverage(text: str, checklist: tuple[ChecklistItem, ...]) -> dict[str, obje
     }
 
 
-def mentioned_paths(text: str) -> list[str]:
+def mentioned_paths(text: str, pattern: re.Pattern[str] = DEFAULT_PATH_PATTERN) -> list[str]:
     """提取报告里提到的路径/文件名 token（去重、保序）。"""
 
     seen: dict[str, None] = {}
-    for match in _PATH_PATTERN.finditer(text):
+    for match in pattern.finditer(text):
         token = match.group(0).strip("./")
         if token and token not in seen:
             seen[token] = None
@@ -205,11 +206,15 @@ def _existing_paths(workspace: Path) -> tuple[set[str], set[str]]:
     return relative, names
 
 
-def precision(text: str, workspace: Path) -> dict[str, object]:
+def precision(
+    text: str,
+    workspace: Path,
+    pattern: re.Pattern[str] = DEFAULT_PATH_PATTERN,
+) -> dict[str, object]:
     """计算报告里提到的路径是否真实存在（防幻觉）。"""
 
     relative, names = _existing_paths(workspace)
-    mentioned = mentioned_paths(text)
+    mentioned = mentioned_paths(text, pattern)
     existing: list[str] = []
     hallucinated: list[str] = []
     for token in mentioned:

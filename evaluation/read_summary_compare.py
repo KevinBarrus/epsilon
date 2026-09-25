@@ -18,7 +18,7 @@ import json
 import os
 import shutil
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from time import perf_counter
 
@@ -110,28 +110,39 @@ _ARM_SENTENCE: dict[str, str] = {
 }
 
 
-def repository_hash(root: Path) -> str:
+def repository_hash(
+    root: Path,
+    max_file_bytes: int = MAX_FILE_BYTES,
+    excluded_dirs: set[str] | None = None,
+) -> str:
     """对仓库（按排除规则）求稳定哈希，用于确认原仓库零改动。"""
 
+    excluded = EXCLUDED_DIRS if excluded_dirs is None else excluded_dirs
     digest = hashlib.sha256()
     for path in sorted(root.rglob("*")):
-        if not path.is_file() or any(part in EXCLUDED_DIRS for part in path.parts):
+        if not path.is_file() or any(part in excluded for part in path.parts):
             continue
-        if path.stat().st_size > MAX_FILE_BYTES:
+        if path.stat().st_size > max_file_bytes:
             continue
         digest.update(path.relative_to(root).as_posix().encode())
         digest.update(path.read_bytes())
     return digest.hexdigest()
 
 
-def copy_repository(source: Path, target: Path) -> dict[str, int]:
-    """按排除规则复制仓库：跳过元数据目录与超过 1MB 的文件。"""
+def copy_repository(
+    source: Path,
+    target: Path,
+    max_file_bytes: int = MAX_FILE_BYTES,
+    excluded_dirs: set[str] | None = None,
+) -> dict[str, int]:
+    """按排除规则复制仓库：跳过元数据目录与超过阈值的大文件。"""
 
+    excluded = EXCLUDED_DIRS if excluded_dirs is None else excluded_dirs
     files = 0
     total_bytes = 0
     skipped_large = 0
     for root, dirs, names in os.walk(source):
-        dirs[:] = sorted(name for name in dirs if name not in EXCLUDED_DIRS)
+        dirs[:] = sorted(name for name in dirs if name not in excluded)
         relative_root = Path(root).relative_to(source)
         (target / relative_root).mkdir(parents=True, exist_ok=True)
         for name in sorted(names):
@@ -140,7 +151,7 @@ def copy_repository(source: Path, target: Path) -> dict[str, int]:
                 size = origin.stat().st_size
             except OSError:
                 continue
-            if size > MAX_FILE_BYTES:
+            if size > max_file_bytes:
                 skipped_large += 1
                 continue
             shutil.copy2(origin, target / relative_root / name)
@@ -261,8 +272,26 @@ def scout_summary(
     return summary
 
 
-async def run(workspace: Path, arm: str, scout_mode: str | None = None) -> dict[str, object]:
-    """运行一档任务，并在中断或失败时仍保存真实进度。"""
+async def run(
+    workspace: Path,
+    arm: str,
+    scout_mode: str | None = None,
+    *,
+    source: Path = SOURCE,
+    objective: str = OBJECTIVE,
+    task_text: str = TASK,
+    arm_sentence: dict[str, str] | None = None,
+    score_fn: Callable[[str, Path], dict[str, object]] = score,
+    token_fuse: int = TOKEN_FUSE,
+    time_fuse_seconds: float = TIME_FUSE_SECONDS,
+    report_name: str = REPORT_NAME,
+) -> dict[str, object]:
+    """运行一档任务，并在中断或失败时仍保存真实进度。
+
+    任务/评分/熔断都由调用方通过 profile 参数传入，便于复用同一套 harness。
+    """
+
+    sentences = arm_sentence if arm_sentence is not None else _ARM_SENTENCE
 
     baseline = json.loads((workspace.parent / "baseline.json").read_text(encoding="utf-8"))
     settings = load_settings()
@@ -270,8 +299,8 @@ async def run(workspace: Path, arm: str, scout_mode: str | None = None) -> dict[
     model = OpenAICompatibleClient(settings)
     timed_client = TimedModelClient(model)
     ledger = UsageLedger()
-    client = BudgetedClient(UsageTrackingClient(timed_client, ledger), ledger, TOKEN_FUSE)
-    goal = Goal(OBJECTIVE, token_budget=TOKEN_FUSE, time_budget_seconds=TIME_FUSE_SECONDS)
+    client = BudgetedClient(UsageTrackingClient(timed_client, ledger), ledger, token_fuse)
+    goal = Goal(objective, token_budget=token_fuse, time_budget_seconds=time_fuse_seconds)
     goal_events = workspace.parent / "goal.jsonl"
 
     def save_goal(current: Goal) -> None:
@@ -345,7 +374,7 @@ async def run(workspace: Path, arm: str, scout_mode: str | None = None) -> dict[
 
         timed = TimedModelClient(model)
         child_clients["scout"].append(timed)
-        return BudgetedClient(UsageTrackingClient(timed, ledger), ledger, TOKEN_FUSE)
+        return BudgetedClient(UsageTrackingClient(timed, ledger), ledger, token_fuse)
 
     delegation_enabled = arm != "single"
     resolved_mode = scout_mode or DEFAULT_SCOUT_MODE[arm]
@@ -391,7 +420,7 @@ async def run(workspace: Path, arm: str, scout_mode: str | None = None) -> dict[
     async def build_context(messages, force_compaction) -> ContextBuildResult:
         """在请求边界执行与 Goal 相同的总 token 预算安全网。"""
 
-        if received_tokens() >= TOKEN_FUSE:
+        if received_tokens() >= token_fuse:
             raise TokenBudgetReached
         result = await context.build_for_model_result(
             client, messages, compactions, force_compaction, evictions
@@ -402,7 +431,7 @@ async def run(workspace: Path, arm: str, scout_mode: str | None = None) -> dict[
             evictions.append(result.eviction)
         return result
 
-    task = TASK + _ARM_SENTENCE.get(arm, "")
+    task = task_text + sentences.get(arm, "")
     agent = AgentLoop(
         client,
         tools,
@@ -426,7 +455,7 @@ async def run(workspace: Path, arm: str, scout_mode: str | None = None) -> dict[
                 on_event=collect_event,
                 build_context=build_context,
             ),
-            TIME_FUSE_SECONDS,
+            time_fuse_seconds,
         )
         stop_reason = outcome.stop_reason
         final_content = outcome.final_content
@@ -450,7 +479,7 @@ async def run(workspace: Path, arm: str, scout_mode: str | None = None) -> dict[
     duration = perf_counter() - started
     await client.close()
 
-    report_path = workspace / REPORT_NAME
+    report_path = workspace / report_name
     report_text = report_path.read_text(encoding="utf-8") if report_path.is_file() else ""
     split = usage_breakdown(timed_client, child_clients)
     client_usage_total = split["parent"] + sum(sum(split[role]) for role in child_clients)
@@ -461,9 +490,9 @@ async def run(workspace: Path, arm: str, scout_mode: str | None = None) -> dict[
         "thinking": "high",
         "delegation_tools_registered": delegation_enabled,
         "scout_mode": resolved_mode,
-        "task_sentence": _ARM_SENTENCE.get(arm, ""),
-        "token_fuse": TOKEN_FUSE,
-        "time_fuse_seconds": TIME_FUSE_SECONDS,
+        "task_sentence": sentences.get(arm, ""),
+        "token_fuse": token_fuse,
+        "time_fuse_seconds": time_fuse_seconds,
         "goal": vars(goal).copy(),
         "goal_final_status": goal.status,
         "continuation_count": goal.rounds_started,
@@ -495,9 +524,9 @@ async def run(workspace: Path, arm: str, scout_mode: str | None = None) -> dict[
         "eviction_count": len(evictions),
         "report_path": str(report_path),
         "report_chars": len(report_text),
-        "quality": score(report_text, workspace) if report_text else None,
+        "quality": score_fn(report_text, workspace) if report_text else None,
         "read_duplication": read_duplication(parent_events, child_events),
-        "original_code_unchanged": baseline["source_hash"] == repository_hash(SOURCE),
+        "original_code_unchanged": baseline["source_hash"] == repository_hash(source),
         "events_path": str(events_path),
         "final_content": final_content,
     }
