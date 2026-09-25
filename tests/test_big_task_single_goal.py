@@ -145,8 +145,8 @@ async def test_budget_guard_rejects_new_child_request() -> None:
 
 
 @pytest.mark.asyncio
-async def test_budget_guard_can_be_disabled_for_approved_two_hour_run() -> None:
-    """用户允许超出 50M 时，模型请求继续计账但不再被 token 熔断。"""
+async def test_budget_guard_can_be_disabled_for_approved_long_run() -> None:
+    """获得授权放宽熔断后，模型请求继续计账但不再被 token 熔断。"""
     class DummyClient:
         async def stream_response(self, messages, tools=(), thinking_level=None):
             yield UsageEvent(1, 1, 2)

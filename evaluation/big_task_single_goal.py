@@ -631,7 +631,7 @@ def main() -> int:
     parser.add_argument("--confirm", action="store_true")
     parser.add_argument("--delegate", action="store_true", help="开启 Scout/Worker/Reviewer 委派对照")
     parser.add_argument("--isolate-workers", action="store_true", help="在临时 Git worktree 并行执行 Worker")
-    parser.add_argument("--no-token-fuse", action="store_true", help="已获授权时只保留两小时墙钟熔断")
+    parser.add_argument("--no-token-fuse", action="store_true", help="已获授权时只保留三小时墙钟熔断")
     parser.add_argument("--source-core", type=Path, help="使用归档的 src/core 作为对照任务源码")
     args = parser.parse_args()
     if args.prepare:
