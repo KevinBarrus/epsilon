@@ -281,13 +281,34 @@ class GoalPolicy:
         return Message(role="system", content=self._continuation_text())
 
     def instruction_message(self) -> Message:
-        """在目标开始或恢复时告知模型完整目标与完成入口。"""
+        """在目标开始或恢复时告知模型完整目标、验收标准与完成入口。
+
+        长契约只在 kickoff 注入一次，后续 `follow_up_message` 只给短提示，
+        以保持继承前缀稳定（对齐 prompt cache 的 cache-prefix stable 要求）。
+        """
+        criteria = self.goal.acceptance_criteria.strip()
+        criteria_block = (
+            f"\n验收标准（完成前必须逐条满足，并给出对应证据）：\n{criteria}\n"
+            if criteria
+            else ""
+        )
+        gate_block = (
+            "完成声明会交给一个独立、只读的验证器对照验收标准核查："
+            "未通过会被拒绝，并返回未满足项。\n"
+            "不要把不确定或间接的证据当作完成的证据；审计必须“证明完成”，"
+            "而不是“没找到明显的剩余工作”。\n"
+            if self._verifier is not None
+            else ""
+        )
         return Message(
             role="system",
             content=(
                 f"当前持续目标：{self.goal.objective}\n"
-                "目标不会因为一次回复结束而结束。完成全部目标并审计证据后，必须调用 goal({\"op\":\"complete\"})；"
-                "只回复‘完成’或只停止工具调用都不算完成。"
+                f"{criteria_block}"
+                "目标不会因为一次回复结束而结束。完成全部目标并审计证据后，"
+                "必须调用 goal({\"op\":\"complete\"})；"
+                "只回复‘完成’或只停止工具调用都不算完成。\n"
+                f"{gate_block}"
             ),
         )
 
@@ -306,11 +327,15 @@ class GoalPolicy:
             return CompletionOutcome(
                 accepted, accepted, "met" if accepted else "inconclusive", None, (), attempt, message
             )
-        verdict, reason = await self._run_verifier()
-        return await self._apply_verdict(verdict, reason, attempt)
+        verdict, reason, raw = await self._run_verifier()
+        return await self._apply_verdict(verdict, reason, attempt, raw)
 
-    async def _run_verifier(self) -> tuple[Verdict, RejectionReason | None]:
-        """跑一次独立验证；超时按 inconclusive、抛错按 verifier_error。"""
+    async def _run_verifier(self) -> tuple[Verdict, RejectionReason | None, str]:
+        """跑一次独立验证；超时按 inconclusive、抛错按 verifier_error。
+
+        返回 (判定, 拒绝原因, 验证器原文节选)——原文要跟着拒绝消息回注给模型，
+        否则"未满足项"只有一句话，模型拿不到可执行的信息。
+        """
 
         assert self._verifier is not None
         try:
@@ -319,17 +344,19 @@ class GoalPolicy:
             )
         except (TimeoutError, asyncio.TimeoutError):
             # 超时是"证据不足"而不是"验证器坏了"
-            return Verdict("inconclusive"), "inconclusive"
-        except Exception:  # noqa: BLE001 - 验证器不可用一律 fail-closed
-            return Verdict("inconclusive"), "verifier_error"
+            return Verdict("inconclusive"), "inconclusive", "验证器超时，未能取得证据"
+        except Exception as exc:  # noqa: BLE001 - 验证器不可用一律 fail-closed
+            return Verdict("inconclusive"), "verifier_error", f"验证器不可用：{type(exc).__name__}"
         verdict = parse_verdict(raw)
-        return verdict, (None if verdict.outcome == "met" else verdict.outcome)
+        excerpt = re.sub(r"\s+", " ", raw).strip()[:600]
+        return verdict, (None if verdict.outcome == "met" else verdict.outcome), excerpt
 
     async def _apply_verdict(
         self,
         verdict: Verdict,
         reason: RejectionReason | None,
         attempt: int,
+        raw_excerpt: str = "",
     ) -> CompletionOutcome:
         """按判定结果接受、拒绝或（超限后）放行并标注未验证。"""
 

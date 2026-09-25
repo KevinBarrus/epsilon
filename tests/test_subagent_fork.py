@@ -450,3 +450,34 @@ async def test_fresh_child_is_not_told_to_reuse_context(tmp_path: Path) -> None:
     await AgentLoop(ParentClient(), manager).run([Message(role="user", content="总结 notes.txt")])
 
     assert not any(FORK_CONTEXT_NOTICE in message.content for message in child.requests[0])
+
+
+def test_tool_call_message_always_carries_reasoning_field() -> None:
+    """DeepSeek 思考模式下，历史里的工具调用消息必须带 reasoning_content（可为空串）。
+
+    服务端对"自己签发的 id"的豁免不可靠（id 状态会过期），真机复现过 400。
+    """
+
+    from core.model import ToolCall
+    from core.openai_client import _serialize_message
+
+    with_reasoning = Message(
+        role="assistant",
+        content="",
+        reasoning="想了一下",
+        tool_calls=(ToolCall("c1", "read_file", {"path": "a"}),),
+    )
+    without = Message(
+        role="assistant",
+        content="",
+        reasoning="",
+        tool_calls=(ToolCall("c2", "read_file", {"path": "a"}),),
+    )
+    plain = Message(role="assistant", content="普通回复", reasoning="")
+
+    assert _serialize_message(with_reasoning, include_reasoning=True)["reasoning_content"] == "想了一下"
+    assert _serialize_message(without, include_reasoning=True)["reasoning_content"] == ""
+    # 非工具调用、无推理的普通回复不加该字段
+    assert "reasoning_content" not in _serialize_message(plain, include_reasoning=True)
+    # 非 DeepSeek 端点仍然完全不加
+    assert "reasoning_content" not in _serialize_message(with_reasoning, include_reasoning=False)

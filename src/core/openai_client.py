@@ -284,8 +284,14 @@ def _serialize_message(
         "role": message.role,
         "content": message.content,
     }
-    if include_reasoning and message.role == "assistant" and message.reasoning:
-        request["reasoning_content"] = message.reasoning
+    if include_reasoning and message.role == "assistant":
+        if message.reasoning:
+            request["reasoning_content"] = message.reasoning
+        elif message.tool_calls:
+            # DeepSeek 思考模式下，历史里的工具调用必须带 reasoning_content。
+            # 服务端对"自己签发的 id"有豁免，但该豁免不可靠（id 状态会过期），
+            # 真机已复现 400；补空串即可满足协议。
+            request["reasoning_content"] = ""
     if message.tool_calls:
         request["tool_calls"] = [
             {
