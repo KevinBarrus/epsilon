@@ -136,10 +136,40 @@ worktree 并行大任务评测中，出现一个**失控 Worker**：
 
 ---
 
-## 附：遗留（不阻塞本任务）
+## 九、v2 迭代方向（借鉴 MiniMax Code 的 `runaway-guard`）
 
-- 上一轮 worktree 并行的 `REPORT.md` 与 `problems/` 四档结论文档待补（零成本，排在 loop guard 之后）；
-- `--no-token-fuse` 帮助文本仍写"两小时"，实际 3 小时，待顺手修。
+MiniMax Code（`packages/agent-modules/runaway-guard`）在"检测 + 纠偏"上做得比 oh-my-pi / dsh
+深一个量级：它有 **6 种信号**，且"进展"来自宿主验证过的可信事实。以下 5 点是本项目 v2 值得
+吸收的，**均不改变"不设上限"的前提**。
+
+1. **补两种信号**：
+   - `abab_action_cycle`（A→B→A→B 交替循环，如"改测试→跑→改回去→再跑"）——v1 的"连续相同"
+     与"无进展"都抓不到；
+   - `same_error_family`（同一错误族反复出现，**换了调用也抓**）——v1 只看调用签名，换调用即漏。
+2. **"进展"改为可信来源**：v1 用 `capability != file.read`（任何成功的非读调用都算进展，
+   平凡 `run_command` 会掩盖循环，见第八节局限）。MiniMax 的做法是 **host 在执行工具时捕获
+   `verifiedProgress`（loopKey / progressKey / stateChanged / artifactChanged），绝不从模型
+   消息推断**。v2 应让"进展"由工具/宿主显式声明，而不是靠 capability 猜。
+3. **提醒文案加"防持久化"**：MiniMax 的提醒明确写"这是本轮临时提醒，不是用户偏好；不要把它
+   写进 Memory / Skills 或任何持久文件"。v1 没有这句，模型有可能把纠偏当成"用户偏好"存进记忆。
+4. **提醒改为"每轮最多一次 + 优先级"**：MiniMax 每轮**最多注入一条**（先占位、失败不重试），
+   按 `进展不变 > 错误族 > 重复调用 > 轮询` 挑最要紧的。v1 是"3/5/8 + 每 4 轮持续施压"，
+   更耗上下文；v2 可收敛为"每轮一次"。
+5. **观察与提醒分离 + 离线回放**：MiniMax 把 `onSignal`（观察，从第 2 次就发，免费）与
+   `remindAfterOccurrences`（提醒，受限）分开，并能 `replayRunawayGuardTrajectory` 离线回放
+   历史轨迹、给出 `postSignalProviderTokens`（信号出现后还烧了多少 token）。v2 应补一个回放
+   评估器，用数据回答"纠偏到底省了多少"。
+
+**另注（同源、可选）**：参数/结果做 HMAC 指纹（原文不落状态，隐私 + 有界）；工具级策略
+`detect / polling / exempt` + 投影钩子（`projectActionKey` 剔除 timeout 等传输参数、
+`isExpectedResult` 让预期失败不算错误族）；全链路 fail-open（检测失败绝不影响工具执行）。
+
+---
+
+## 附：遗留
+
+- ✅ 已完成：`problems/multi-agent-arms.md`（四档对照结论）与 `evaluation-results/` 原始轨迹留存；
+- ✅ 已完成：`--no-token-fuse` 帮助文本"两小时"→"三小时"。
 
 ---
 
