@@ -1,5 +1,9 @@
 # 大语料只读对比实验（codex）：A / B / C
 
+> ⚠️ **标注：本文所有结果为"完成门前"的数据。**
+> 完成门（Completion Gate）开启后会改变评测行为（`goal(op=complete)` 需经独立验证），
+> 因此本文的 A/B/C 与此后任何结果**不可比**。门后的实验见 `problems/completion-gate.md`。
+
 **单次运行、描述性对照，不作统计推断。** 语料 = codex 仓库的**生产 Rust + docs/ + scripts/ + 顶层 Markdown**
 （排除 `tests/`、`*tests.rs` 与生成物噪声），实测 **829,876 行 / 2,145 文件**——是单 Agent 可读上限
 （约 22 万行）的 **3.8 倍**。三档同模型 `deepseek-flash`（`thinking=high`）、**同一熔断 40M token / 90 分钟**、

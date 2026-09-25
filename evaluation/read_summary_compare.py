@@ -353,40 +353,6 @@ async def run(
         with goal_events.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(vars(current), ensure_ascii=False) + "\n")
 
-    async def verify_completion(current: Goal) -> str:
-        """独立、只读的完成审计；预算耗尽或不可用一律 inconclusive。"""
-
-        verifier_client = BudgetedClient(
-            UsageTrackingClient(TimedModelClient(model), ledger),
-            ledger,
-            settings.completion_gate_verifier_token_budget,
-        )
-        try:
-            return await run_readonly_audit(
-                verifier_task(current),
-                workspace,
-                verifier_client,
-                settings.completion_gate_verifier_thinking,
-                budget,
-                timeout_seconds=settings.completion_gate_verifier_timeout_seconds,
-                on_event=collect_child_event,
-                loop_guard_config=loop_guard_config,
-            )
-        except TokenBudgetReached:
-            return "VERDICT: inconclusive\nUNMET: 验证器 token 预算耗尽"
-
-    policy = GoalPolicy(
-        goal,
-        on_change=save_goal,
-        usage_ledger=ledger,
-        verifier=verify_completion if settings.completion_gate_enabled else None,
-        max_rejections=settings.completion_gate_max_rejections,
-        verifier_timeout_seconds=settings.completion_gate_verifier_timeout_seconds,
-        no_tool_nudge_rounds=settings.completion_gate_no_tool_nudge_rounds,
-        on_event=collect_event,
-    )
-    save_goal(goal)
-
     async def approve(definition, tool_call, allow_session):
         """副本内的写入自动放行，避免评测被审批卡住。"""
 
@@ -446,6 +412,41 @@ async def run(
         child_events.append(record)
         with child_events_path.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    async def verify_completion(current: Goal) -> str:
+        """独立、只读的完成审计；预算耗尽或不可用一律 inconclusive。"""
+
+        verifier_client = BudgetedClient(
+            UsageTrackingClient(TimedModelClient(model), ledger),
+            ledger,
+            settings.completion_gate_verifier_token_budget,
+        )
+        try:
+            return await run_readonly_audit(
+                verifier_task(current),
+                workspace,
+                verifier_client,
+                settings.completion_gate_verifier_thinking,
+                budget,
+                timeout_seconds=settings.completion_gate_verifier_timeout_seconds,
+                on_event=collect_child_event,
+                loop_guard_config=loop_guard_config,
+            )
+        except TokenBudgetReached:
+            return "VERDICT: inconclusive\nUNMET: 验证器 token 预算耗尽"
+
+    policy = GoalPolicy(
+        goal,
+        on_change=save_goal,
+        usage_ledger=ledger,
+        verifier=verify_completion if settings.completion_gate_enabled else None,
+        max_rejections=settings.completion_gate_max_rejections,
+        verifier_timeout_seconds=settings.completion_gate_verifier_timeout_seconds,
+        no_tool_nudge_rounds=settings.completion_gate_no_tool_nudge_rounds,
+        on_event=collect_event,
+    )
+    save_goal(goal)
+
 
     def child_provider() -> ModelClient:
         """每次委派独立计量，并汇入共享用量总账。"""
