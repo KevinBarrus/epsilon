@@ -1,135 +1,119 @@
 # 指令：只读汇总任务的多 Agent 对比实验（oncall）
 
-> 本实验是本项目第一次测"**多 Agent 应该赢的场景**"（fan-out 读）。
-> 前两个实验（重构任务）测的是 fan-out 写——那是多 Agent 的已知劣势场景。
+> **本次是"修正版"**：A 档已跑完，暴露了任务太浅的问题。先改任务与评分，**重跑 A**，再跑 B/C。
 
-## Phase 0：先提交积压（**必须先做**）
+## 零、当前进度与本次要改什么
 
-上两轮 Loop Guard v2 的代码与文档**尚未提交**，工作区有未跟踪文件。先提两个提交，再开始本实验。
+**A 档（单 Agent 串行读）已跑完**：
 
-**提交 1（代码）**：`src/core/loop_guard.py`、`src/core/agent_loop.py`、`src/core/subagent.py`、
-`evaluation/events.py`、`evaluation/big_task_single_goal.py`、`tests/test_loop_guard.py`、
-`tests/test_evaluation_events.py`、新增 `evaluation/replay_loop_guard.py`、
-`tests/test_replay_loop_guard.py`、`todo/loop-guard-v2.md`
+| 项 | 值 |
+|---|---|
+| token | 1,858,503 |
+| 墙钟 | **104 秒** |
+| 覆盖率 | 9/12（0.75）—— 缺 memory 三档压缩、Skill 渐进式加载、引用可解释性 |
+| 精确率 | 55/57（0.965）—— 幻觉路径 `template.json`、`ragas_evaluation.py` |
+| 重复读率 | 0.089（45 次读、41 份唯一） |
 
-```
-feat(agent): Loop Guard v2 与可回放观测，并完成真机验证
+**两个关键判断**：
 
-- 观测：ToolExecution/ToolCallStarted/ToolCallCancelled/ToolBatch 事件新增
-  agent_run_id，AgentLoop 新增 run_id 并把父级 spawn 调用标识透传给子 Agent
-- 归档：新增 evaluation/events.py:child_event_record，子事件按轮落盘
-  （round / call_id / args_digest / args_preview / output_digest / error_family）
-- 检测 A 增强：新增 abab_action_cycle 与 same_error_family
-- 检测 B 重设计：由"没有成功的非读调用"改为"没有新事实"
-- 提醒节制：每轮最多一条，按 进展不变 > 错误族 > 重复调用 > abab 取优先级
-- 新增 evaluation/replay_loop_guard.py：按 run_id 回放归档
-- 测试：全量 795 项通过
-```
+1. **任务太浅，测不出扇出读的价值**。12 项清单几乎全在 `README.md` / `MISSION.md` 里
+   （`grep README.md` 命中 8 处 RRF/BM25/Argon2/渐进式 Skill/30 轮）。A 的 9/12 本质是
+   "**把那份 README 读全了**"，不是"读得深"。而 oncall 的真实体量在源码——
+   `apps/backend/src/super_ai` 有 **57 个 Python 文件、19,918 行**，A 只读了其中很小一部分。
+   **信息集中在文档里，就没有可扇出的读。**
+2. **"压缩墙钟"这个维度作废**：A 只用 **104 秒**，并行最多压到几十秒，协调开销就吃回去了。
+   本实验的主战场改为**覆盖率**与**精确率**。
 
-**提交 2（文档）**：更新 `problems/multi-agent-arms.md`
-
-```
-docs(problems): 补充 worktree v2 档与 Loop Guard v2 真机结论
-
-- 增加 worktree v2 档（120.1M / 2:14:06 / 73/75 / tsc 不通过）
-- "并行能否压缩墙钟"更新为明确结论：失控未复现的情况下仍是 2.83× 墙钟 /
-  3.60× token、完成度更低，多 Agent 在本任务上不划算
-- 记录 Loop Guard v2 真机表现：全轮注入 3 次、回放与真机一致、反事实
-  v1≈304 次 → v2 3 次、288 轮合法探索零误报；纠偏的救援效果未获证据
-```
+**本次要改四件事**：① 任务加"源码级"要求；② 评分拆成两张清单；③ 档位定稿；④ **改完重跑 A**，再跑 B/C。
 
 ## 一、实验目的与假设
 
 **目的**：验证"**多 Agent 在只读、可扇出的任务上是否比单 Agent 更好**"。
 
-**为什么选读任务**：读是**唯一能真正分摊**的成本——各 Scout 读**互不重叠**的部分，
-不像写那样每个 Agent 都要重建上下文、还要对齐接口。业界（Claude Code / codex /
-pi）也是把 subagent 用在并行只读探索上。
+**修正后的假设**（不再含墙钟）：
 
-**假设**：
-- **墙钟**：多 Agent **明显下降**；
-- **token**：多 Agent **大致持平或略升**（扇出读不重复，但每个子 Agent 仍有固定开销）；
-- **质量**：多 Agent **不劣于**单 Agent（分区读不会丢信息）。
+- **覆盖率（源码级）**：多 Agent **应高于**单 Agent——这是扇出读唯一可能赢的维度；
+- **token**：多 Agent **更高**（子 Agent 有固定开销）；
+- **精确率**：多 Agent **不应低于**单 Agent（但幻觉机会更多，必须盯）。
 
-若假设不成立（墙钟没降、质量更差），如实记录——那也是结论。
+## 二、任务与档位
 
-## 二、实验设计（三档，A/B 必做，C 选做）
+### 2.1 任务描述（在原任务后追加）
 
-**任务目标**：阅读副本里的 oncall 项目，产出 `report.md` 总结报告。
+> 除项目级总结外，报告还必须回答下面的**源码级**问题（答案不在文档里，必须读源码）；
+> 无法确定时明确写"未能确定"，**不许编造**。
 
-**范围**：`docs/`、`openspec/`、`apps/backend`、`apps/frontend`、顶层 `*.md`。
-**排除**：`.git`、`node_modules`、`.venv`、以及任何超过 1MB 的文件。
-（oncall 排除后约 3800 个文件、约 4.7 万行 py/ts。）
+### 2.2 档位
 
-| 档 | 委派工具 | 提示词 |
+| 档 | arm 名 | 内容 |
 |---|---|---|
-| **A 单 Agent** | 不注册委派工具 | 中性任务描述 |
-| **B 多 Agent·主动** | 注册 `spawn_agent`（只读 Scout） | 中性任务 + "请把阅读工作按主题/目录拆给若干**只读**子 Agent 并行完成，再由你汇总成报告" |
-| **C 多 Agent·中性**（选做） | 注册 `spawn_agent` | **只给**中性任务描述（**不提委派**），测"模型会不会自发并行" |
+| **A** | `single` | 单 Agent 串行读 |
+| **B** | `fanout_fresh` | **fresh** Scout 扇出并行读（各读不相关分区，不共享上下文） |
+| **C** | `map_then_fork` | **父先做项目测绘** → **fork** Scout 继承项目图后深读各分区（延续式探索） |
 
-**三档用完全相同的内容副本**（分别复制，内容一致）；模型、thinking 等级、任务描述
-（除上述差异）全部一致。
+- `multi_neutral`（模型自发是否委派）**选做**，不计入主对照；
+- **B 与 C 是本次的核心对照**：同一任务、同样扇出，唯一差别是**子 Agent 是否继承父的上下文**。
 
-## 三、质量评分（**必须预注册，跑之前就定死**）
+## 三、评分：两张清单（**必须预注册，跑之前定死**）
 
-清单从 oncall 的 `MISSION.md` + `README.md` 提炼，**共 12 项**：
+### 3.1 文档级清单（原 12 项，保留）
 
-1. 项目定位：本地优先的 AIOps 工作台
-2. 技术栈：Vue 3 / FastAPI / SQLite / Milvus / LangChain / Qwen(OpenAI-compatible) / 腾讯云 CLS MCP
-3. 诊断链路四个角色：**Planner / Executor / Replanner / Report**
-4. 使用 **LangGraph** 编排（并说明理由）
-5. 隔离模型：**单用户即单租户**（tenant 范围 = owner 用户）
-6. RAG 混合召回：Milvus 向量 + 内存 **BM25L**，**RRF（k=60）**融合，再 **rerank**
-7. 文档索引：后台任务 + 状态机（排队/执行中/成功/失败/取消）+ 重试/重建
-8. 会话记忆模式：每 30 轮压缩 / 上下文 70% 自动压缩 / 手动压缩
-9. Skill 渐进式加载：初始只注入 `name`+`description`，需要时 `load_skill`
-10. 权限：密码用 **Argon2** 哈希；越权返回统一权限错误
-11. 引用可解释性：同时展示向量排名+相似度、BM25 排名+分数、RRF 分数、rerank 排名+分数
-12. 已知局限/未落地（`MISSION.md` 的 Out of scope：生产级自动修复、分布式恢复、通用 Tool Registry）
+沿用 `evaluation/read_summary_score.py` 现有 `CHECKLIST`，作为"读全文档"的能力指标。
 
-**两个分数**：
-- **覆盖率（recall）** = 命中项数 ÷ 12；
-- **精确率（precision）** = 报告里提到的**模块名/文件路径**中**真实存在**的比例（**防幻觉**，可脚本核查）。
+### 3.2 源码级清单（**新增 6 项**，本次的主指标）
 
-**（可选）** 引入一个模型当裁判打分，但必须在报告里标注"主观项"。
+| # | 问题 | 代码位置（已核实） | 判定要点 |
+|---|---|---|---|
+| 1 | BM25 那一路的**中文分词**怎么做？ | `retrieval/hybrid.py` | 提到正则 token 规则（`_TOKEN_PATTERN`）、`tokenize_hybrid_text`、**中文片段单独切**（`_is_chinese_segment`）；只说"用了 BM25"不算 |
+| 2 | **信念压缩**的确切阈值规则？ | `aiops/sop_belief.py` | **≥3 次观测 且 成功概率 ≥ 0.72** 才压缩（`n >= 3 and p >= 0.72`） |
+| 3 | 会话记忆三档的**字面枚举值**，以及压缩发生在**哪一层**？ | `api/app.py:164` | `Literal["every_30_turns", "context_70_percent", "manual"]`；并说明压缩在**存储层**还是**上下文构建层** |
+| 4 | Planner / Executor / Replanner / Report 的**实现位置**与**状态传递字段**？ | `aiops/`（只有 `cases.py`/`diagnostics.py`/`fixtures.py`/`sop_belief.py`） | 指出四者**在同一 `diagnostics.py` 内**（**不是四个文件**），并说出关键状态字段 |
+| 5 | `compressed_tool_evidence` 表的**用途与关键字段**？ | `memory/sqlite.py`（`_compressed_tool_evidence_record`）、迁移 `202607110012_add_compressed_tool_evidence.py` | 说出"工具证据压缩后落库" + 关键字段（如 `source_hash`） |
+| 6 | 索引任务状态机的**字面枚举值**与**失败重试**路径？ | `memory/repositories.py`、`memory/sqlite.py` | 说出至少 3 个字面状态值，以及失败后如何重试/重建 |
+
+**出题纪律**：每一项在写入 `CHECKLIST_SOURCE` 前，**必须确认答案不在 `README.md` / `MISSION.md` / `docs/` 里**
+（例如 `RRF_K = 60` 就**在 README 里**，所以不能当源码题）。
+
+**两个分数**：**文档级覆盖率**、**源码级覆盖率**（各 = 命中项 ÷ 总数）；
+外加 **精确率**（报告提到的模块/路径中真实存在的比例，脚本核查，**防幻觉**）。
 
 ## 四、指标（每档都要）
 
-token（总量 + 按角色）、墙钟、模型请求数、工具错误数/错误率、委派次数、
-质量（覆盖率 + 精确率）、**重复读率**（多个 Scout 是否读了同一个文件——衡量分区质量）。
+token（总量 + 按角色）、**文档级覆盖率**、**源码级覆盖率**、**精确率**、
+读调用次数、**重复读率**、委派次数、**缓存命中率**（fork/fresh 分开）。
+墙钟**记录但不作主指标**。
 
-## 五、实现要求
+## 五、执行顺序
 
-新增 `evaluation/read_summary_compare.py`：
-
-- `--prepare`：把 oncall 复制到临时目录（按第二节的排除规则），写 `baseline.json`；
-- `--arm single|multi_delegated|multi_neutral`；
-- `--confirm` 才真机跑（未加时只做准备与校验）；
-- 熔断：**40M token / 60 分钟墙钟**（每档独立计时；宽松但必须有界）；
-- 产出：`result.json`（指标）+ `report.md`（Agent 产物）+ 轨迹归档到
-  `evaluation-results/oncall-read-<arm>-<date>/`（该目录已被忽略，不入库）；
-- **复用现有件**：`usage_breakdown`、`child_event_record`、`config_from_settings`（Loop Guard 接线）、
-  `evaluate` 侧的 `--delegate` 工具注册路径；不要另起一套；
-- **原 oncall 仓库零改动**（只改副本），并在 `result.json` 里记 `original_code_unchanged`。
+1. **改评分脚本** `evaluation/read_summary_score.py`：新增 `CHECKLIST_SOURCE`（6 项）与
+   `coverage_source()`，输出两个覆盖率；补单测（用 A 档报告验证"6 项里应命中 0~2 项"）；
+2. **改任务描述** `evaluation/read_summary_compare.py`：追加"源码级问题"段（对**所有档完全相同**）；
+3. **重跑 A**（`--arm single`，约 2M / 2 分钟）——任务变了必须重跑，否则不公平；
+4. **跑 B**（`--arm fanout_fresh`）；
+5. **跑 C**（`--arm map_then_fork`，`--scout-mode fork`）；
+6. 产出对照表，写入 `problems/oncall-read-compare.md`（**并归档三档产物到 `evaluation-results/`**，
+   当前 A 档产物还在 `/tmp/epsilon-read-single-*`，**属易失**，必须固化）。
 
 ## 六、验收
 
-1. 三档（或两档）各自跑完并产出 `report.md` + `result.json`；
-2. 覆盖率/精确率可脚本复算（评分脚本随实验提交在 `evaluation/` 下）；
-3. 墙钟与 token 对比表可直接放进 `problems/` 文档；
+1. 三档都产出 `report.md` + `result.json`，且**归档到 `evaluation-results/oncall-read-<arm>-<date>/`**；
+2. 两个覆盖率与精确率**可脚本复算**；
+3. 对照表含四维（token / 文档级覆盖率 / 源码级覆盖率 / 精确率）+ 读调用次数与缓存命中率；
 4. 如实标注：**单次运行、描述性结论，不作统计推断**；
-5. 若某一档撞熔断，如实记录并说明未完成。
+5. **重点回答**：B/C 相对 A，**源码级覆盖率**有没有提高？提高的代价是几倍 token？
+   C 相对 B，**继承父上下文**有没有让"深读"更有效？
 
 ## 七、边界
 
-- **不改 oncall 仓库**；
-- 不给子 Agent 写权限（Scout 只读）；
-- 不为"让多 Agent 赢"而调提示词——两档的任务描述除委派句外**必须一致**；
-- 不设轮次上限（沿用"长任务不掐死"原则），只用熔断兜底。
+- **不改 oncall 仓库**（只改副本），`result.json` 记 `original_code_unchanged`；
+- 子 Agent **只读**（Scout），不给写权限；
+- 任务描述**除档位说明外必须一致**，不为"让多 Agent 赢"调提示词；
+- **不设轮次上限**，只用熔断兜底：**40M token / 60 分钟每档**；
+- fork 档必须用**放宽后的引用口径**（已读过可直接引用，不必重读；未出现过的不得引用）。
 
 ---
 
-## 附：成本提示
+## 附：成本
 
-读任务预计每档 **2~10M token**（远低于重构任务）。熔断上限 40M token / 60 分钟。
-执行方在 `--confirm` 前报一次预估，用户确认后开跑。
+每档预计 **2~10M token**（A 实测 1.86M）。**逐档跑、逐档汇报**，每档开跑前报预估。
+三档合计预计 **< 30M token**。
