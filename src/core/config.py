@@ -54,6 +54,9 @@ class Settings:
     eviction_enabled: bool = False
     # 驱逐阈值，缺省使用压缩阈值的一半；长任务评测可调低以强制触发
     eviction_threshold_tokens: int | None = None
+    # Worker 工作区隔离默认关闭；开启时要求当前目录是干净的 Git 检出。
+    isolation_enabled: bool = False
+    worker_max_concurrency: int = 4
 
     def __post_init__(self) -> None:
         """统一超时默认值并校验直接构造的配置。"""
@@ -77,6 +80,8 @@ class Settings:
                 raise ConfigError(f"{name} must be > 0")
         if self.max_tool_rounds is not None and self.max_tool_rounds <= 0:
             raise ConfigError("max_tool_rounds must be > 0")
+        if self.worker_max_concurrency <= 0:
+            raise ConfigError("worker_max_concurrency must be > 0")
         if (
             self.eviction_threshold_tokens is not None
             and self.eviction_threshold_tokens <= 0
@@ -153,6 +158,10 @@ def _merge_configs(user_data: dict, project_data: dict) -> dict:
         }
     if "mcp_stdio" in project_data and project_data["mcp_stdio"] is not None:
         merged["mcp_stdio"] = project_data["mcp_stdio"]
+    if "isolation_enabled" in project_data and project_data["isolation_enabled"] is not None:
+        merged["isolation_enabled"] = project_data["isolation_enabled"]
+    if "worker_max_concurrency" in project_data and project_data["worker_max_concurrency"] is not None:
+        merged["worker_max_concurrency"] = project_data["worker_max_concurrency"]
     return merged
 
 
@@ -220,6 +229,12 @@ def _settings_from_data(data: dict) -> Settings:
         None,
         "model.max_tool_rounds",
     )
+    isolation_enabled = _optional_bool(
+        data.get("isolation_enabled"), False, "isolation_enabled"
+    )
+    worker_max_concurrency = _optional_int(
+        data.get("worker_max_concurrency"), 4, "worker_max_concurrency"
+    )
     price = _optional_model_price(model.get("price"))
     if context_window is not None and context_window <= 0:
         raise ConfigError("model.context_window must be > 0")
@@ -248,6 +263,8 @@ def _settings_from_data(data: dict) -> Settings:
         firewall_enabled=firewall_enabled,
         eviction_enabled=eviction_enabled,
         eviction_threshold_tokens=eviction_threshold_tokens,
+        isolation_enabled=isolation_enabled,
+        worker_max_concurrency=worker_max_concurrency,
     )
 
 

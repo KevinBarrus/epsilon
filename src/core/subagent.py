@@ -28,6 +28,7 @@ from .tools import (
 from .tools.args import string_argument
 from .tools.command_executor import CommandExecutor
 from .tools.types import ToolExecutionMode, ToolHandler
+from .worktree import WorktreeError, commit_worktree, create_worktree, merge_branch, remove_worktree
 
 
 SCOUT_MAX_CONCURRENCY = 3
@@ -65,6 +66,10 @@ class SubagentRunMetrics:
     summary_chars: int
     context_chars: int
     role: Literal["scout", "worker", "reviewer"] = "scout"
+    merge_status: str | None = None
+    branch: str | None = None
+    started_at: float = 0.0  # 子 Agent 运行开始，不含 worktree 准备
+    finished_at: float = 0.0  # 子 Agent 运行结束，不含提交和合并
 
 
 ScoutRunMetrics = SubagentRunMetrics
@@ -124,24 +129,36 @@ def create_spawn_worker_tool(
     *,
     permission_manager: PermissionManager,
     command_executor: CommandExecutor | None = None,
+    command_executor_factory: Callable[[Path], CommandExecutor] | None = None,
+    isolation_enabled: bool = False,
+    max_concurrency: int = 4,
     on_metrics: Callable[[SubagentRunMetrics], None] | None = None,
     on_event: Callable[[object], Awaitable[None]] | None = None,
 ) -> tuple[ToolDefinition, ToolHandler]:
     """创建可修改代码、写操作仍需用户审批的串行 Worker 工具。"""
 
-    tools = [
-        create_read_file_tool(workspace),
-        create_list_files_tool(workspace),
-        create_search_files_tool(workspace),
-        create_write_file_tool(workspace),
-        create_edit_file_tool(workspace),
-        create_run_command_tool(workspace, executor=command_executor),
-    ]
+    if max_concurrency <= 0:
+        raise ValueError("max_concurrency must be > 0")
+
+    def worker_tools(path: Path) -> list[tuple[ToolDefinition, ToolHandler]]:
+        """为每个隔离工作区绑定自己的文件与命令工具。"""
+        executor = command_executor_factory(path) if command_executor_factory else command_executor
+        return [
+            create_read_file_tool(path),
+            create_list_files_tool(path),
+            create_search_files_tool(path),
+            create_write_file_tool(path),
+            create_edit_file_tool(path),
+            create_run_command_tool(path, executor=executor),
+        ]
+
+    tools = worker_tools(workspace)
     return _create_spawn_role_tool(
         "worker",
         "spawn_worker",
-        "Delegate a code change to a Worker with workspace file and command tools.",
-        "sequential",
+        "Delegate a code change to an isolated parallel Worker." if isolation_enabled
+        else "Delegate a code change to a Worker with workspace file and command tools.",
+        "parallel" if isolation_enabled else "sequential",
         WORKER_SYSTEM_PROMPT,
         tools,
         workspace,
@@ -151,6 +168,9 @@ def create_spawn_worker_tool(
         permission_manager=permission_manager,
         on_metrics=on_metrics,
         on_event=on_event,
+        isolation_enabled=isolation_enabled,
+        worker_tools_factory=worker_tools,
+        max_concurrency=max_concurrency,
     )
 
 
@@ -206,10 +226,16 @@ def _create_spawn_role_tool(
     on_metrics: Callable[[SubagentRunMetrics], None] | None = None,
     timeout_seconds: float | None = None,
     on_event: Callable[[object], Awaitable[None]] | None = None,
+    isolation_enabled: bool = False,
+    worker_tools_factory: Callable[[Path], Sequence[tuple[ToolDefinition, ToolHandler]]] | None = None,
+    max_concurrency: int = 4,
 ) -> tuple[ToolDefinition, ToolHandler]:
     """按角色组装独立 Agent；子工具集不包含任何 spawn 工具。"""
 
-    semaphore = asyncio.Semaphore(SCOUT_MAX_CONCURRENCY if role == "scout" else 1)
+    semaphore = asyncio.Semaphore(
+        SCOUT_MAX_CONCURRENCY if role == "scout"
+        else max_concurrency if role == "worker" and isolation_enabled else 1
+    )
     project_instructions = load_project_instructions(workspace).content
 
     async def spawn_role(tool_call: ToolCall) -> ToolResult:
@@ -222,69 +248,132 @@ def _create_spawn_role_tool(
             usages: list[UsageEvent] = []
             outcome: Literal["completed", "error", "cancelled"] = "error"
             content = ""
+            branch: str | None = None
+            merge_status: str | None = None
+            worktree_path: Path | None = None
+            scout_task: asyncio.Task[AgentRunResult] | None = None
+            run_started_at = 0.0
+            run_finished_at = 0.0
             try:
+                run_workspace = workspace
+                run_tools = tools
+                if role == "worker" and isolation_enabled:
+                    worktree_path = await asyncio.to_thread(create_worktree, workspace, tool_call.call_id)
+                    run_workspace = worktree_path
+                    assert worker_tools_factory is not None
+                    run_tools = worker_tools_factory(run_workspace)
                 scout_task = asyncio.create_task(
                     _run_subagent(
                         role,
                         task,
-                        workspace,
+                        run_workspace,
                         client_provider(),
                         thinking_level_provider(),
                         context_budget,
                         project_instructions,
                         context,
                         usages,
-                        tools,
+                        run_tools,
                         permission_manager,
                         system_prompt,
                         on_event,
                     )
                 )
-                if timeout_seconds is None:
-                    result = await scout_task
-                else:
-                    done, _ = await asyncio.wait(
-                        (scout_task,), timeout=timeout_seconds
-                    )
-                    if not done:
-                        outcome = "timeout"
-                        scout_task.cancel()
-                        await asyncio.gather(scout_task, return_exceptions=True)
-                        content = "Scout timed out before producing a summary"
-                        return ToolResult(
-                            tool_call.call_id,
-                            content,
-                            is_error=True,
-                            error_category="timeout",
+                run_started_at = perf_counter()
+                try:
+                    if timeout_seconds is None:
+                        result = await scout_task
+                    else:
+                        done, _ = await asyncio.wait(
+                            (scout_task,), timeout=timeout_seconds
                         )
-                    result = scout_task.result()
+                        if not done:
+                            outcome = "timeout"
+                            scout_task.cancel()
+                            await asyncio.gather(scout_task, return_exceptions=True)
+                            content = "Scout timed out before producing a summary"
+                            return ToolResult(
+                                tool_call.call_id,
+                                content,
+                                is_error=True,
+                                error_category="timeout",
+                            )
+                        result = scout_task.result()
+                finally:
+                    run_finished_at = perf_counter()
                 outcome = "completed"
                 content = _limit_summary(result.final_content, role)
+                if worktree_path is not None:
+                    branch = await asyncio.to_thread(commit_worktree, worktree_path)
+                    merge = await asyncio.to_thread(merge_branch, workspace, branch)
+                    merge_status = merge.status
+                    await asyncio.to_thread(remove_worktree, workspace, worktree_path)
+                    if merge.status == "conflict":
+                        outcome = "error"
+                        return ToolResult(
+                            tool_call.call_id,
+                            f"merge conflict in {', '.join(merge.conflicted_paths)}; "
+                            f"Worker changes preserved on branch {branch}",
+                            is_error=True,
+                            error_category="merge_conflict",
+                        )
                 return ToolResult(tool_call.call_id, content)
             except asyncio.CancelledError:
                 outcome = "cancelled"
-                scout_task.cancel()
-                await asyncio.gather(scout_task, return_exceptions=True)
+                if scout_task is not None:
+                    scout_task.cancel()
+                    await asyncio.gather(scout_task, return_exceptions=True)
+                if worktree_path is not None:
+                    try:
+                        branch = await asyncio.to_thread(commit_worktree, worktree_path)
+                    except WorktreeError:
+                        pass  # 提交失败时保留整个工作区，不能丢失部分改动。
                 raise
             except AgentLoopFailed as exc:
                 content = exc.model_message or exc.user_message
+                if worktree_path is not None:
+                    try:
+                        branch = await asyncio.to_thread(commit_worktree, worktree_path)
+                        content += f"\nWorker partial changes preserved on branch {branch}"
+                    except WorktreeError as save_error:
+                        content += f"\nWorker worktree preserved at {worktree_path}: {save_error}"
                 return ToolResult(
                     tool_call.call_id,
                     content,
                     is_error=True,
                     error_category=exc.category,
                 )
+            except WorktreeError as exc:
+                content = str(exc)
+                if worktree_path is not None:
+                    content += f"; worktree preserved at {worktree_path}"
+                return ToolResult(tool_call.call_id, content, is_error=True, error_category="worktree")
+            except Exception as exc:
+                if worktree_path is None:
+                    raise
+                # 预算熔断等子循环异常不能丢弃已写文件；留分支供父级恢复。
+                try:
+                    branch = await asyncio.to_thread(commit_worktree, worktree_path)
+                    content = f"Worker stopped: {type(exc).__name__}; partial changes on branch {branch}"
+                except WorktreeError as save_error:
+                    content = f"Worker stopped: {type(exc).__name__}; worktree at {worktree_path}: {save_error}"
+                return ToolResult(tool_call.call_id, content, is_error=True, error_category="worker")
             finally:
                 if on_metrics is not None:
+                    finished_at = perf_counter()
                     on_metrics(
                         SubagentRunMetrics(
                             tool_call.call_id,
                             outcome,
                             sum(usage.total_tokens for usage in usages),
-                            (perf_counter() - started_at) * 1000,
+                            (finished_at - started_at) * 1000,
                             len(content),
                             len(context),
                             role,
+                            merge_status,
+                            branch,
+                            run_started_at,
+                            run_finished_at,
                         )
                     )
 

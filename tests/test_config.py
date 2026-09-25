@@ -47,6 +47,32 @@ def test_load_settings_reads_required_values(tmp_path: Path) -> None:
     assert settings.api_key == "test-key"
     assert settings.context_window is None
     assert settings.price is None
+    assert settings.isolation_enabled is False
+    assert settings.worker_max_concurrency == 4
+
+
+def test_isolation_setting_can_be_enabled_by_project(tmp_path: Path) -> None:
+    """隔离开关默认关闭，项目配置显式开启且必须是布尔值。"""
+    user_path = _write_user_settings(tmp_path, _valid_model())
+    project = tmp_path / "project"
+    project.mkdir()
+    config_path = _write_project_settings(project, {"isolation_enabled": True})
+    assert load_settings(project_dir=project, user_config_path=user_path).isolation_enabled is True
+    config_path.write_text('{"isolation_enabled": "maybe"}', encoding="utf-8")
+    with pytest.raises(ConfigError, match="isolation_enabled"):
+        load_settings(project_dir=project, user_config_path=user_path)
+
+
+def test_worker_concurrency_can_be_configured(tmp_path: Path) -> None:
+    """隔离 Worker 并发数可调整，非法上限被拒绝。"""
+    user_path = _write_user_settings(tmp_path, _valid_model())
+    project = tmp_path / "project"
+    project.mkdir()
+    config_path = _write_project_settings(project, {"worker_max_concurrency": 2})
+    assert load_settings(project_dir=project, user_config_path=user_path).worker_max_concurrency == 2
+    config_path.write_text('{"worker_max_concurrency": 0}', encoding="utf-8")
+    with pytest.raises(ConfigError, match="worker_max_concurrency"):
+        load_settings(project_dir=project, user_config_path=user_path)
 
 
 def test_load_settings_reads_model_price(tmp_path: Path) -> None:

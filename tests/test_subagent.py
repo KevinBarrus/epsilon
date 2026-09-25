@@ -1,8 +1,12 @@
 import asyncio
+import subprocess
 from collections.abc import Sequence
+from pathlib import Path
+from time import perf_counter
 
 import pytest
 
+import core.subagent as subagent
 from core.agent_loop import AgentLoop, ToolBatchEvent
 from core.context import ContextBudget
 from core.model import Message, TextDelta, ToolCall, ToolCallEvent, UsageEvent
@@ -328,6 +332,7 @@ async def test_spawn_worker_parallel_reads_sequential_write_with_approval(tmp_pa
         lambda: "high",
         ContextBudget(10_000, 1_000, 2_000),
         permission_manager=PermissionManager(approve),
+        isolation_enabled=False,
         on_event=collect,
     )
 
@@ -347,6 +352,116 @@ async def test_spawn_worker_parallel_reads_sequential_write_with_approval(tmp_pa
     assert [call.name for call in child_batches[1].tool_calls] == ["write_file"]
     assert "result.txt" in result.content and "Verification" in result.content
     assert any("修改文件" in message.content for message in client.requests[0])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("conflict", [False, True])
+async def test_isolated_workers_run_concurrently_and_merge(tmp_path: Path, conflict: bool, monkeypatch) -> None:
+    """并发 Worker 的独立写入可合并，冲突时保留失败分支。"""
+    repo = tmp_path / "main"
+    repo.mkdir()
+    for args in (
+        ("init",),
+        ("config", "user.name", "Worker Test"),
+        ("config", "user.email", "worker@example.invalid"),
+    ):
+        subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+    (repo / "base.txt").write_text("base", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-m", "baseline"], check=True, capture_output=True)
+
+    started = 0
+    simultaneous = asyncio.Event()
+    roots: list[str] = []
+    command_cwds: list[Path] = []
+
+    class ParallelWorkerClient:
+        """两次首请求都到达后才允许写入，以验证并发而非串行。"""
+
+        def __init__(self) -> None:
+            self.requests = 0
+
+        async def stream_response(self, messages, tools=(), thinking_level=None):
+            nonlocal started
+            self.requests += 1
+            if self.requests == 1:
+                roots.append(next(message.content for message in messages if "Current workspace root:" in message.content))
+                started += 1
+                if started == 2:
+                    simultaneous.set()
+                await asyncio.wait_for(simultaneous.wait(), timeout=3)
+                task = messages[-1].content
+                filename = "shared.txt" if conflict else f"{task}.txt"
+                yield ToolCallEvent(ToolCall(task, "write_file", {"path": filename, "content": task}))
+            elif self.requests == 2:
+                yield ToolCallEvent(ToolCall("verify", "run_command", {"command": "verify"}))
+            else:
+                yield TextDelta("## Changes\n- file written\n## Verification\n- checked\n## Result\n- done")
+
+    class PathRecordingExecutor:
+        async def execute(self, command, cwd, timeout_seconds):
+            command_cwds.append(cwd)
+            return CommandExecution(b"ok", b"", 0)
+
+    async def approve(definition, tool_call, allow_session):
+        return ApprovalResult(ApprovalDecision.ALLOW_ONCE)
+
+    merge_started: dict[str, float] = {}
+    original_merge = subagent.merge_branch
+
+    def observed_merge(root: Path, branch: str):
+        merge_started[branch] = perf_counter()
+        return original_merge(root, branch)
+
+    monkeypatch.setattr(subagent, "merge_branch", observed_merge)
+    metrics = []
+    definition, handler = create_spawn_worker_tool(
+        repo, ParallelWorkerClient, lambda: "high",
+        ContextBudget(10_000, 1_000, 2_000),
+        permission_manager=PermissionManager(approve),
+        isolation_enabled=True,
+        command_executor_factory=lambda path: PathRecordingExecutor(),
+        on_metrics=metrics.append,
+    )
+    results = await asyncio.gather(
+        handler(ToolCall("one", "spawn_worker", {"task": "one"})),
+        handler(ToolCall("two", "spawn_worker", {"task": "two"})),
+    )
+
+    assert definition.execution_mode == "parallel"
+    assert started == 2
+    assert len(set(roots)) == 2
+    assert len(set(command_cwds)) == 2
+    assert all(path != repo for path in command_cwds)
+    assert max(metric.started_at for metric in metrics) < min(metric.finished_at for metric in metrics)
+    assert all(metric.finished_at <= merge_started[metric.branch] for metric in metrics)
+    if conflict:
+        failed = [result for result in results if result.is_error]
+        assert len(failed) == 1
+        assert failed[0].error_category == "merge_conflict"
+        assert "shared.txt" in failed[0].content
+        rejected_branch = next(metric.branch for metric in metrics if metric.merge_status == "conflict")
+        assert rejected_branch is not None
+        assert subprocess.run(["git", "-C", str(repo), "show", f"{rejected_branch}:shared.txt"],
+                              check=True, capture_output=True).stdout.strip() in {b"one", b"two"}
+    else:
+        assert all(not result.is_error for result in results)
+        assert (repo / "one.txt").read_text(encoding="utf-8") == "one"
+        assert (repo / "two.txt").read_text(encoding="utf-8") == "two"
+
+
+@pytest.mark.asyncio
+async def test_isolated_worker_reports_non_git_workspace(tmp_path: Path) -> None:
+    """开启隔离但没有 Git 检出时明确失败，不回退共享写入。"""
+    _, handler = create_spawn_worker_tool(
+        tmp_path, lambda: RoleClient((), "done"), lambda: "high",
+        ContextBudget(10_000, 1_000, 2_000),
+        permission_manager=PermissionManager(), isolation_enabled=True,
+    )
+    result = await handler(ToolCall("worker", "spawn_worker", {"task": "change"}))
+    assert result.is_error
+    assert result.error_category == "worktree"
+    assert "Git checkout" in result.content
 
 
 @pytest.mark.asyncio

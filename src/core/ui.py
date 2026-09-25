@@ -465,6 +465,13 @@ async def run_chat(
                 thinking_provider,
                 resolved_context_budget,
                 permission_manager=permission_manager,
+                **(
+                    {
+                        "isolation_enabled": settings.isolation_enabled,
+                        "max_concurrency": settings.worker_max_concurrency,
+                    }
+                    if create_role_tool is create_spawn_worker_tool else {}
+                ),
             )
         )
     for name in ("spawn_agent", "spawn_worker", "spawn_reviewer"):

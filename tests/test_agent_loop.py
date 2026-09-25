@@ -631,6 +631,56 @@ async def test_agent_loop_serializes_batch_with_a_sequential_tool() -> None:
 
 
 @pytest.mark.asyncio
+async def test_mixed_batch_runs_adjacent_isolated_workers_after_write_in_parallel() -> None:
+    """先完成父级写入，再并行执行同批相邻 Worker。"""
+    class BatchClient:
+        def __init__(self) -> None:
+            self.requests = 0
+
+        async def stream_response(self, messages, tools=(), thinking_level=None):
+            self.requests += 1
+            if self.requests == 1:
+                for name in ("write", "worker_a", "worker_b"):
+                    yield ToolCallEvent(ToolCall(name, name, {}))
+            else:
+                yield TextDelta("完成")
+
+    write_done = False
+    workers_running = 0
+    both_started = asyncio.Event()
+
+    async def handler(tool_call: ToolCall) -> ToolResult:
+        nonlocal write_done, workers_running
+        if tool_call.name == "write":
+            write_done = True
+        else:
+            assert write_done
+            workers_running += 1
+            if workers_running == 2:
+                both_started.set()
+            await asyncio.wait_for(both_started.wait(), timeout=1)
+        return ToolResult(tool_call.call_id, tool_call.name)
+
+    async def approve(definition, tool_call, allow_session):
+        return ApprovalResult(ApprovalDecision.ALLOW_ONCE)
+
+    manager = ToolManager(permission_manager=PermissionManager(approve))
+    manager.register_local(ToolDefinition("write", "write", {"type": "object"}, "local", "write", True), handler)
+    for name in ("worker_a", "worker_b"):
+        manager.register_local(
+            ToolDefinition(name, name, {"type": "object"}, "local", "read", True, "parallel"),
+            handler,
+        )
+
+    result = await AgentLoop(BatchClient(), manager).run([Message("user", "修改")])
+
+    assert workers_running == 2
+    assert [message.content for message in result.new_messages if message.role == "tool"] == [
+        "write", "worker_a", "worker_b",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_agent_loop_cancels_parallel_tool_tasks() -> None:
     """测试取消 Agent 时会停止同批仍在运行的工具。"""
 

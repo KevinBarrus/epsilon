@@ -453,15 +453,25 @@ class AgentLoop:
                     on_event,
                 )
             else:
-                for index, prepared in prepared_calls:
-                    result = await self._tool_manager.execute_prepared(prepared)
-                    results[index] = result
-                    if on_event is not None:
-                        await on_event(
-                            ToolExecutionEvent(
-                                prepared.tool_call, result, self._agent_role
-                            )
+                # 保持写工具前后顺序，只让相邻且声明可并行的工具同组执行。
+                position = 0
+                while position < len(prepared_calls):
+                    index, prepared = prepared_calls[position]
+                    if prepared.definition.execution_mode == "parallel":
+                        end = position + 1
+                        while (end < len(prepared_calls)
+                               and prepared_calls[end][1].definition.execution_mode == "parallel"):
+                            end += 1
+                        await self._execute_parallel_prepared_calls(
+                            prepared_calls[position:end], results, on_event,
                         )
+                        position = end
+                    else:
+                        result = await self._tool_manager.execute_prepared(prepared)
+                        results[index] = result
+                        if on_event is not None:
+                            await on_event(ToolExecutionEvent(prepared.tool_call, result, self._agent_role))
+                        position += 1
             batch_duration_ms = (perf_counter() - batch_started_at) * 1000
             assert all(result is not None for result in results)
             return [result for result in results if result is not None], execution_mode, batch_duration_ms
