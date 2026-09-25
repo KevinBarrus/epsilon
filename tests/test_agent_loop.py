@@ -2,7 +2,7 @@ import asyncio
 import json
 import re
 from collections.abc import AsyncIterator, Sequence
-
+from time import perf_counter
 import pytest
 
 from core.agent_loop import (
@@ -1421,3 +1421,143 @@ async def test_tool_events_include_agent_role_and_start(monkeypatch) -> None:
     finished = next(event for event in events if isinstance(event, ToolExecutionEvent))
     assert started.agent_role == "parent"
     assert finished.agent_role == "parent"
+
+
+def _timing_manager() -> tuple[ToolManager, dict[str, list[tuple[float, float]]]]:
+    """构造记录执行区间的读写工具集，用于验证批次内并发分组。"""
+
+    windows: dict[str, list[tuple[float, float]]] = {}
+
+    async def approve(definition, tool_call, allow_session):
+        return ApprovalResult(ApprovalDecision.ALLOW_ONCE)
+
+    def make_handler(name: str):
+        async def handler(tool_call: ToolCall) -> ToolResult:
+            started = perf_counter()
+            await asyncio.sleep(0.05)
+            windows.setdefault(name, []).append((started, perf_counter()))
+            return ToolResult(tool_call.call_id, "ok")
+
+        return handler
+
+    manager = ToolManager(permission_manager=PermissionManager(approve))
+    manager.register_local(
+        ToolDefinition(
+            "probe_read", "读", {"type": "object"}, "local", "read", True,
+            execution_mode="parallel",
+        ),
+        make_handler("probe_read"),
+    )
+    manager.register_local(
+        ToolDefinition(
+            "probe_write", "写", {"type": "object"}, "local", "write", False,
+            execution_mode="sequential",
+        ),
+        make_handler("probe_write"),
+    )
+    return manager, windows
+
+
+def _batch_client(script: Sequence[str]) -> object:
+    """按脚本顺序产出工具调用，第二轮直接结束。"""
+
+    class ScriptedClient:
+        def __init__(self) -> None:
+            self.round = 0
+
+        async def stream_response(self, messages, tools=(), thinking_level=None):
+            self.round += 1
+            if self.round == 1:
+                for index, name in enumerate(script):
+                    yield ToolCallEvent(
+                        ToolCall(f"call-{index}", name, {})
+                    )
+                return
+            yield TextDelta("done")
+
+    return ScriptedClient()
+
+
+def _overlaps(a: tuple[float, float], b: tuple[float, float]) -> bool:
+    """判断两个执行区间是否时间重叠。"""
+
+    return a[0] < b[1] and b[0] < a[1]
+
+
+@pytest.mark.asyncio
+async def test_mixed_batch_runs_adjacent_parallel_groups_around_write() -> None:
+    """[读,写,读]：读被写分隔成两个组，写按原顺序单独执行。"""
+
+    manager, windows = _timing_manager()
+    events = []
+
+    async def collect(event):
+        events.append(event)
+
+    await AgentLoop(
+        _batch_client(["probe_read", "probe_write", "probe_read"]), manager
+    ).run([Message("user", "mix")], on_event=collect)
+
+    read_a, read_b = windows["probe_read"]
+    (write,) = windows["probe_write"]
+    # 写与前后读都不重叠（顺序保持），两个读分属不同组也不重叠
+    assert not _overlaps(read_a, write)
+    assert not _overlaps(write, read_b)
+    assert not _overlaps(read_a, read_b)
+    batch = next(e for e in events if isinstance(e, ToolBatchEvent))
+    assert batch.execution_mode == "sequential"
+
+
+@pytest.mark.asyncio
+async def test_write_only_batch_runs_all_serially() -> None:
+    """[写,写]：全部写工具严格按顺序执行，无重叠。"""
+
+    manager, windows = _timing_manager()
+
+    await AgentLoop(
+        _batch_client(["probe_write", "probe_write"]), manager
+    ).run([Message("user", "writes")])
+
+    first, second = windows["probe_write"]
+    assert not _overlaps(first, second)
+
+
+@pytest.mark.asyncio
+async def test_read_only_batch_runs_concurrently() -> None:
+    """[读,读,读]：可并行工具同组并发执行，批次标记为 parallel。"""
+
+    manager, windows = _timing_manager()
+    events = []
+
+    async def collect(event):
+        events.append(event)
+
+    await AgentLoop(
+        _batch_client(["probe_read", "probe_read", "probe_read"]), manager
+    ).run([Message("user", "reads")], on_event=collect)
+
+    a, b, c = windows["probe_read"]
+    assert _overlaps(a, b) and _overlaps(a, c) and _overlaps(b, c)
+    batch = next(e for e in events if isinstance(e, ToolBatchEvent))
+    assert batch.execution_mode == "parallel"
+
+
+@pytest.mark.asyncio
+async def test_mixed_batch_keeps_read_group_concurrency_across_write() -> None:
+    """[读,读,写,读,读]：写前后的相邻读各自并发，不因写整批串行化。"""
+
+    manager, windows = _timing_manager()
+
+    await AgentLoop(
+        _batch_client(
+            ["probe_read", "probe_read", "probe_write", "probe_read", "probe_read"]
+        ),
+        manager,
+    ).run([Message("user", "groups")])
+
+    before_a, before_b, after_a, after_b = windows["probe_read"]
+    (write,) = windows["probe_write"]
+    assert _overlaps(before_a, before_b)
+    assert _overlaps(after_a, after_b)
+    assert max(before_a[1], before_b[1]) <= write[0]
+    assert write[1] <= min(after_a[0], after_b[0])

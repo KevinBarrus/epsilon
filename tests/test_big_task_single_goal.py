@@ -99,10 +99,14 @@ def test_isolated_copy_uses_fixed_source_and_git_baseline(tmp_path: Path, monkey
     (workspace / "ts/AGENTS.md").write_text("new instructions", encoding="utf-8")
     (workspace / ".npm/_logs").mkdir(parents=True)
     (workspace / ".npm/_logs/install.log").write_text("generated cache", encoding="utf-8")
+    (workspace / "node_modules/pkg").mkdir(parents=True)
+    (workspace / "node_modules/pkg/index.js").write_text("dep", encoding="utf-8")
     commit_worktree(workspace)
     assert subprocess.run(["git", "-C", str(workspace), "show", "HEAD:ts/AGENTS.md"],
                           capture_output=True, check=True).stdout == b"new instructions"
     assert subprocess.run(["git", "-C", str(workspace), "ls-files", ".npm"],
+                          capture_output=True, check=True).stdout == b""
+    assert subprocess.run(["git", "-C", str(workspace), "ls-files", "node_modules"],
                           capture_output=True, check=True).stdout == b""
     assert json.loads((workspace.parent / "baseline.json").read_text(encoding="utf-8"))["source_modules"] == ["agent_loop.py"]
 
