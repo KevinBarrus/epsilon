@@ -288,6 +288,7 @@ def _create_spawn_role_tool(
                         system_prompt,
                         on_event,
                         loop_guard_config,
+                        tool_call.call_id,
                     )
                 )
                 run_started_at = perf_counter()
@@ -427,6 +428,7 @@ async def _run_subagent(
     system_prompt: str,
     on_event: Callable[[object], Awaitable[None]] | None,
     loop_guard_config: LoopGuardConfig | None = None,
+    run_id: str = "",
 ) -> AgentRunResult:
     """用独立上下文和当前角色限定的工具运行一次子 Agent。"""
 
@@ -494,6 +496,7 @@ async def _run_subagent(
         firewall_enabled=False,
         agent_role=role,
         loop_guard_config=loop_guard_config,
+        run_id=run_id,
     ).run(
         [
             Message(

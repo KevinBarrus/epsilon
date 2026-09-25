@@ -35,6 +35,7 @@ class ToolExecutionEvent:
     tool_call: ToolCall
     result: ToolResult
     agent_role: str = "parent"
+    agent_run_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,7 @@ class ToolCallStartedEvent:
 
     tool_call: ToolCall
     agent_role: str = "parent"
+    agent_run_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -51,6 +53,7 @@ class ToolCallCancelledEvent:
 
     tool_call: ToolCall
     agent_role: str = "parent"
+    agent_run_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -60,6 +63,8 @@ class ToolBatchEvent:
     tool_calls: tuple[ToolCall, ...]
     execution_mode: Literal["parallel", "sequential"]
     duration_ms: float
+    agent_role: str = "parent"
+    agent_run_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -157,6 +162,7 @@ class AgentLoop:
         firewall_enabled: bool = True,
         agent_role: str = "parent",
         loop_guard_config: LoopGuardConfig | None = None,
+        run_id: str = "",
     ) -> None:
         """创建 Agent Loop，可选地限制单轮工具调用次数。"""
 
@@ -173,6 +179,7 @@ class AgentLoop:
         self._session_id = session_id
         self._firewall_enabled = firewall_enabled
         self._agent_role = agent_role
+        self._run_id = run_id
         # 每个 Agent 各持一个 guard，子 Agent 的空转由子 Agent 自己抓到
         self._loop_guard = ToolCallLoopGuard(loop_guard_config, agent_role)
 
@@ -364,6 +371,8 @@ class AgentLoop:
                             completed_tool_calls,
                             execution_mode,
                             batch_duration_ms,
+                            self._agent_role,
+                            self._run_id,
                         )
                     )
                 injection = self._loop_guard.observe(
@@ -375,7 +384,14 @@ class AgentLoop:
                     # 纠偏消息只进入本轮上下文，不写入 new_messages、不落盘
                     context.append(injection.message)
                     if on_event is not None:
-                        await on_event(injection.event)
+                        # 补上归属信息，便于按 Worker 归因与离线回放
+                        await on_event(
+                            replace(
+                                injection.event,
+                                agent_role=self._agent_role,
+                                agent_run_id=self._run_id,
+                            )
+                        )
 
             return self._run_result(
                 context,
@@ -456,14 +472,25 @@ class AgentLoop:
                 if isinstance(prepared, ToolResult):
                     results[index] = prepared
                     if on_event is not None:
-                        await on_event(ToolExecutionEvent(tool_call, prepared, self._agent_role))
+                        await on_event(
+                            ToolExecutionEvent(
+                                tool_call,
+                                prepared,
+                                self._agent_role,
+                                self._run_id,
+                            )
+                        )
                 else:
                     prepared_calls.append((index, prepared))
 
             if on_event is not None:
                 for _, prepared in prepared_calls:
                     await on_event(
-                        ToolCallStartedEvent(prepared.tool_call, self._agent_role)
+                        ToolCallStartedEvent(
+                            prepared.tool_call,
+                            self._agent_role,
+                            self._run_id,
+                        )
                     )
 
             execution_mode: Literal["parallel", "sequential"] = (
@@ -500,7 +527,14 @@ class AgentLoop:
                         result = await self._tool_manager.execute_prepared(prepared)
                         results[index] = result
                         if on_event is not None:
-                            await on_event(ToolExecutionEvent(prepared.tool_call, result, self._agent_role))
+                            await on_event(
+                            ToolExecutionEvent(
+                                prepared.tool_call,
+                                result,
+                                self._agent_role,
+                                self._run_id,
+                            )
+                        )
                         position += 1
             batch_duration_ms = (perf_counter() - batch_started_at) * 1000
             assert all(result is not None for result in results)
@@ -510,7 +544,11 @@ class AgentLoop:
                 for index, tool_call in enumerate(tool_calls):
                     if results[index] is None:
                         await on_event(
-                            ToolCallCancelledEvent(tool_call, self._agent_role)
+                            ToolCallCancelledEvent(
+                                tool_call,
+                                self._agent_role,
+                                self._run_id,
+                            )
                         )
             unknown_call_ids = frozenset(
                 tool_call.call_id
@@ -551,7 +589,12 @@ class AgentLoop:
                 results[index] = result
                 if on_event is not None:
                     await on_event(
-                        ToolExecutionEvent(tool_call, result, self._agent_role)
+                        ToolExecutionEvent(
+                            tool_call,
+                            result,
+                            self._agent_role,
+                            self._run_id,
+                        )
                     )
         except BaseException:
             for task in tasks:

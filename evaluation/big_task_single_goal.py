@@ -37,6 +37,7 @@ from core.tools import (
 )
 from core.tools.command_executor import CommandExecution, terminate_process_group
 
+from .events import child_event_record
 from .online import TimedModelClient
 
 
@@ -333,17 +334,20 @@ async def run(workspace: Path, *, delegate: bool = False, isolate_workers: bool 
     child_retry_events = 0
     child_events_path = workspace.parent / "child_events.jsonl"
 
+    child_rounds: dict[str, int] = {}
+
     async def collect_child_event(event: object) -> None:
-        """子 Agent 轨迹单独落盘，不混入父 Agent 的工具轮次。"""
+        """子 Agent 轨迹单独落盘，保留可离线回放的轮次、签名与 Worker 标识。"""
         nonlocal child_tool_errors, child_retry_events
         if isinstance(event, ToolExecutionEvent):
             child_tool_errors += int(event.result.is_error)
-            record = {"type": "result", "role": event.agent_role, "tool": event.tool_call.name,
-                      "is_error": event.result.is_error}
         elif isinstance(event, RetryEvent):
             child_retry_events += 1
-            record = {"type": "retry", "attempt": event.attempt}
-        else:
+        run_id = getattr(event, "agent_run_id", "")
+        if isinstance(event, ToolBatchEvent):
+            child_rounds[run_id] = child_rounds.get(run_id, 0) + 1
+        record = child_event_record(event, child_rounds.get(run_id, 0))
+        if record is None:
             return
         with child_events_path.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(record, ensure_ascii=False) + "\n")
