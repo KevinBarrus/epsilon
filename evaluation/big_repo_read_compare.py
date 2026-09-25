@@ -76,6 +76,8 @@ def codex_scope(relative: Path) -> bool:
     """
 
     parts = relative.parts
+    if any(part in EXCLUDED_DIRS for part in parts):
+        return False
     if relative.suffix == ".rs":
         return not is_test_code(relative)
     if parts and parts[0] in {"docs", "scripts"}:
@@ -135,6 +137,9 @@ async def run(workspace: Path, arm: str, scout_mode: str | None = None) -> dict[
         token_fuse=TOKEN_FUSE,
         time_fuse_seconds=TIME_FUSE_SECONDS,
         report_name=REPORT_NAME,
+        source_hash_fn=lambda root: repository_hash(
+            root, MAX_FILE_BYTES, EXCLUDED_DIRS, skip_tests=True, include=codex_scope
+        ),
     )
 
 

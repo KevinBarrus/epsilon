@@ -311,6 +311,7 @@ async def run(
     token_fuse: int = TOKEN_FUSE,
     time_fuse_seconds: float = TIME_FUSE_SECONDS,
     report_name: str = REPORT_NAME,
+    source_hash_fn: Callable[[Path], str] | None = None,
 ) -> dict[str, object]:
     """运行一档任务，并在中断或失败时仍保存真实进度。
 
@@ -318,6 +319,11 @@ async def run(
     """
 
     sentences = arm_sentence if arm_sentence is not None else _ARM_SENTENCE
+    # 校验"原仓库零改动"必须用与 baseline 完全相同的范围口径，否则比的是两个哈希
+    if source_hash_fn is not None:
+        hash_source = source_hash_fn
+    else:
+        hash_source = lambda root: repository_hash(root, MAX_FILE_BYTES, EXCLUDED_DIRS)
 
     baseline = json.loads((workspace.parent / "baseline.json").read_text(encoding="utf-8"))
     settings = load_settings()
@@ -552,7 +558,7 @@ async def run(
         "report_chars": len(report_text),
         "quality": score_fn(report_text, workspace) if report_text else None,
         "read_duplication": read_duplication(parent_events, child_events),
-        "original_code_unchanged": baseline["source_hash"] == repository_hash(source),
+        "original_code_unchanged": baseline["source_hash"] == hash_source(source),
         "events_path": str(events_path),
         "final_content": final_content,
     }
