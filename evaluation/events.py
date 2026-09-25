@@ -7,6 +7,7 @@ from core.agent_loop import (
     ToolCallStartedEvent,
     ToolExecutionEvent,
 )
+from core.goal import CompletionGateEvent
 from core.loop_guard import (
     LoopGuardEvent,
     action_digest,
@@ -83,6 +84,16 @@ def event_to_record(event: object) -> dict[str, object]:
             "level": event.level,
             "tool_name": event.tool_name,
             "count": event.count,
+        }
+    if isinstance(event, CompletionGateEvent):
+        return {
+            "type": "completion_gate",
+            "verdict": event.verdict,
+            "unmet": list(event.unmet),
+            "attempt": event.attempt,
+            "accepted": event.accepted,
+            "verified": event.verified,
+            "reason": event.reason,
         }
     if isinstance(event, UsageEvent):
         return {

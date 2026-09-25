@@ -119,6 +119,7 @@ class AgentRunResult:
     post_write_command_results: tuple[ToolResult, ...] = ()
     verification_command_results: tuple[ToolResult, ...] = ()
     loop_guard_injections: int = 0
+    completion_gate_rejections: int = 0
 
 
 class AgentLoopCancelled(asyncio.CancelledError):
@@ -327,7 +328,7 @@ class AgentLoop:
                 reasoning_parts = []
                 if not completed_tool_calls:
                     follow_up = (
-                        self._end_policy.follow_up_message()
+                        self._end_policy.follow_up_message(assistant_content)
                         if self._end_policy is not None
                         else None
                     )
@@ -465,6 +466,7 @@ class AgentLoop:
             summary.post_write_command_results,
             summary.verification_command_results,
             loop_guard_injections,
+            summary.completion_gate_rejections,
         )
 
     def _tool_capabilities(self) -> dict[str, str | None]:

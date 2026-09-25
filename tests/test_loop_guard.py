@@ -614,3 +614,47 @@ async def test_agent_loop_events_carry_run_id(tmp_path: Path) -> None:
     batches = [event for event in events if isinstance(event, ToolBatchEvent)]
     assert executions and all(event.agent_run_id == "worker-1" for event in executions)
     assert batches and all(event.agent_run_id == "worker-1" for event in batches)
+
+
+def test_settings_parses_completion_gate_object(tmp_path: Path) -> None:
+    """嵌套 completion_gate 配置解析成 Settings 字段。"""
+
+    data = _valid_settings()
+    data["completion_gate"] = {
+        "enabled": False,
+        "max_rejections": 5,
+        "verifier_timeout_seconds": 30,
+        "verifier_token_budget": 1000,
+        "verifier_thinking": "low",
+        "no_tool_nudge_rounds": 2,
+    }
+    settings = load_settings(user_config_path=_write_settings(tmp_path, data))
+
+    assert settings.completion_gate_enabled is False
+    assert settings.completion_gate_max_rejections == 5
+    assert settings.completion_gate_verifier_timeout_seconds == 30
+    assert settings.completion_gate_verifier_token_budget == 1000
+    assert settings.completion_gate_verifier_thinking == "low"
+    assert settings.completion_gate_no_tool_nudge_rounds == 2
+
+
+def test_settings_completion_gate_defaults(tmp_path: Path) -> None:
+    """缺省时完成门默认开启，且超时默认 300 秒、验证器预算默认 2M。"""
+
+    settings = load_settings(_write_settings(tmp_path, _valid_settings()))
+
+    assert settings.completion_gate_enabled is True
+    assert settings.completion_gate_max_rejections == 2
+    assert settings.completion_gate_verifier_timeout_seconds == 300.0
+    assert settings.completion_gate_verifier_token_budget == 2_000_000
+    assert settings.completion_gate_verifier_thinking == "high"
+    assert settings.completion_gate_no_tool_nudge_rounds == 3
+
+
+def test_settings_rejects_invalid_completion_gate(tmp_path: Path) -> None:
+    """非法 completion_gate 配置必须报配置错误。"""
+
+    data = _valid_settings()
+    data["completion_gate"] = {"verifier_token_budget": 0}
+    with pytest.raises(ConfigError):
+        load_settings(user_config_path=_write_settings(tmp_path, data))

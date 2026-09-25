@@ -54,6 +54,12 @@ TASK = (
     "报告要覆盖所有主要子系统，每个子系统至少一段；"
     "无法确定的地方明确写“未能确定”，不许编造。"
 )
+# 验收标准（**泛化**，绝不点名任何隐藏清单条目——否则就是重演 oncall 的泄露错误）
+ACCEPTANCE_CRITERIA = (
+    "报告必须覆盖全部核心子系统，且每个子系统的剖析都要写到"
+    "机制、关键参数或阈值、关键数据结构、以及真实代码位置这一级别；"
+    "只给出概括性描述或无法定位到代码的条目不算通过。"
+)
 DELEGATION_SENTENCE = (
     " 请把阅读工作按子系统拆给若干只读子 Agent 并行完成，再由你汇总成报告。"
 )
@@ -133,6 +139,7 @@ async def run(workspace: Path, arm: str, scout_mode: str | None = None) -> dict[
         objective=OBJECTIVE,
         task_text=TASK,
         arm_sentence=_ARM_SENTENCE,
+        criteria=ACCEPTANCE_CRITERIA,
         score_fn=codex_score,
         token_fuse=TOKEN_FUSE,
         time_fuse_seconds=TIME_FUSE_SECONDS,

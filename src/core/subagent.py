@@ -695,6 +695,41 @@ def _structured_summary(content: str, headings: tuple[str, ...]) -> str:
     return "\n".join(lines)
 
 
+async def run_readonly_audit(
+    task: str,
+    workspace: Path,
+    client: ModelClient,
+    thinking_level: str,
+    context_budget: ContextBudget,
+    *,
+    timeout_seconds: float | None = None,
+    on_event: Callable[[object], Awaitable[None]] | None = None,
+    loop_guard_config: LoopGuardConfig | None = None,
+) -> str:
+    """跑一次 fresh、只读的完成审计，返回子 Agent 的原始输出。
+
+    复用 Scout 路径（只读工具 + 独立上下文），供 Completion Gate 做独立验证。
+    """
+
+    _, handler = create_spawn_agent_tool(
+        workspace,
+        lambda: client,
+        lambda: thinking_level,
+        context_budget,
+        timeout_seconds=timeout_seconds,
+        on_event=on_event,
+        force_mode="fresh",
+        loop_guard_config=loop_guard_config,
+    )
+    result = await handler(
+        ToolCall("completion-verifier", "spawn_agent", {"task": task})
+    )
+    if result.is_error:
+        # 验证器不可用 → 交给上层按 inconclusive 处理，绝不默认放行
+        return f"VERDICT: inconclusive\nUNMET: 验证器不可用（{result.error_category or 'error'}）"
+    return result.content
+
+
 def _limit_summary(
     content: str,
     role: Literal["scout", "worker", "reviewer"] = "scout",

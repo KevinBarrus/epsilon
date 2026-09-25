@@ -59,6 +59,13 @@ class Settings:
     worker_max_concurrency: int = 4
     # 提示缓存键：仅对支持该参数的 provider 透传（DeepSeek 前缀缓存自动，不写请求体）
     prompt_cache_key: str | None = None
+    # 完成门（Completion Gate）：用独立验证器否决模型的完成声明（默认开）
+    completion_gate_enabled: bool = True
+    completion_gate_max_rejections: int = 2
+    completion_gate_verifier_timeout_seconds: float = 300.0
+    completion_gate_verifier_token_budget: int = 2_000_000
+    completion_gate_verifier_thinking: str = "high"
+    completion_gate_no_tool_nudge_rounds: int = 3
     # 子 Agent 的默认上下文模式：scout/worker/reviewer 各自可配
     subagent_scout_mode: str = "fresh"
     subagent_worker_mode: str = "fork"
@@ -109,6 +116,14 @@ class Settings:
             raise ConfigError("loop_guard.thresholds must not be empty")
         if self.loop_guard_no_progress_rounds < 0:
             raise ConfigError("loop_guard.no_progress_rounds must be >= 0")
+        if self.completion_gate_max_rejections < 0:
+            raise ConfigError("completion_gate.max_rejections must be >= 0")
+        if self.completion_gate_verifier_timeout_seconds <= 0:
+            raise ConfigError("completion_gate.verifier_timeout_seconds must be > 0")
+        if self.completion_gate_verifier_token_budget <= 0:
+            raise ConfigError("completion_gate.verifier_token_budget must be > 0")
+        if self.completion_gate_no_tool_nudge_rounds < 0:
+            raise ConfigError("completion_gate.no_tool_nudge_rounds must be >= 0")
         for name, mode in (
             ("subagent.default_mode.scout", self.subagent_scout_mode),
             ("subagent.default_mode.worker", self.subagent_worker_mode),
@@ -278,6 +293,14 @@ def _settings_from_data(data: dict) -> Settings:
         subagent_worker_mode,
         subagent_reviewer_mode,
     ) = _subagent_settings(data)
+    (
+        completion_gate_enabled,
+        completion_gate_max_rejections,
+        completion_gate_verifier_timeout_seconds,
+        completion_gate_verifier_token_budget,
+        completion_gate_verifier_thinking,
+        completion_gate_no_tool_nudge_rounds,
+    ) = _completion_gate_settings(data)
     price = _optional_model_price(model.get("price"))
     if context_window is not None and context_window <= 0:
         raise ConfigError("model.context_window must be > 0")
@@ -316,6 +339,12 @@ def _settings_from_data(data: dict) -> Settings:
         subagent_scout_mode=subagent_scout_mode,
         subagent_worker_mode=subagent_worker_mode,
         subagent_reviewer_mode=subagent_reviewer_mode,
+        completion_gate_enabled=completion_gate_enabled,
+        completion_gate_max_rejections=completion_gate_max_rejections,
+        completion_gate_verifier_timeout_seconds=completion_gate_verifier_timeout_seconds,
+        completion_gate_verifier_token_budget=completion_gate_verifier_token_budget,
+        completion_gate_verifier_thinking=completion_gate_verifier_thinking,
+        completion_gate_no_tool_nudge_rounds=completion_gate_no_tool_nudge_rounds,
     )
 
 
@@ -458,6 +487,41 @@ def _loop_guard_settings(
 
 # 子 Agent 上下文模式的合法取值；与 core.subagent.SPAWN_MODES 一致，有测试守住漂移
 _SPAWN_MODES = ("fresh", "fork", "fork_last_n")
+
+
+def _completion_gate_settings(
+    data: dict,
+) -> tuple[bool, int, float, int, str, int]:
+    """读取可选的 completion_gate 嵌套配置。"""
+
+    raw = data.get("completion_gate")
+    if raw is None:
+        return True, 2, 300.0, 2_000_000, "high", 3
+    if not isinstance(raw, dict):
+        raise ConfigError("completion_gate must be an object")
+    return (
+        _optional_bool(raw.get("enabled"), True, "completion_gate.enabled"),
+        _optional_int(raw.get("max_rejections"), 2, "completion_gate.max_rejections"),
+        _optional_float(
+            raw.get("verifier_timeout_seconds"),
+            300.0,
+            "completion_gate.verifier_timeout_seconds",
+        ),
+        _optional_int(
+            raw.get("verifier_token_budget"),
+            2_000_000,
+            "completion_gate.verifier_token_budget",
+        ),
+        _optional_str(
+            raw.get("verifier_thinking"), "high", "completion_gate.verifier_thinking"
+        )
+        or "high",
+        _optional_int(
+            raw.get("no_tool_nudge_rounds"),
+            3,
+            "completion_gate.no_tool_nudge_rounds",
+        ),
+    )
 
 
 def _subagent_settings(data: dict) -> tuple[str, str, str]:

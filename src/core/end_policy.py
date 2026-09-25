@@ -30,6 +30,8 @@ class EndPolicySummary:
     write_count: int
     post_write_command_results: tuple[ToolResult, ...]
     verification_command_results: tuple[ToolResult, ...]
+    # 完成门拒绝次数（默认 0，未启用完成门时不变）
+    completion_gate_rejections: int = 0
 
 
 class TurnEndPolicy(Protocol):
@@ -49,8 +51,11 @@ class TurnEndPolicy(Protocol):
     def final_response_only(self) -> bool:
         """是否进入不暴露工具的最后收尾请求。"""
 
-    def follow_up_message(self) -> Message | None:
-        """返回至多一次的后续上下文消息，或允许自然结束。"""
+    def follow_up_message(self, assistant_content: str = "") -> Message | None:
+        """返回至多一次的后续上下文消息，或允许自然结束。
+
+        `assistant_content` 是刚结束的助手回复，供"防退化"判定（如重复总结）。
+        """
 
     @property
     def summary(self) -> EndPolicySummary:
@@ -151,7 +156,7 @@ class WriteVerificationPolicy:
                     self._needs_verification = result.is_error
                     self._last_verification_failed = result.is_error
 
-    def follow_up_message(self) -> Message | None:
+    def follow_up_message(self, assistant_content: str = "") -> Message | None:
         """在缺少或失败的写后验证时最多追加一次固定提醒。"""
 
         if not self._needs_verification or self._reminder_injected:

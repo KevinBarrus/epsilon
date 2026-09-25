@@ -32,12 +32,17 @@ from core.agent_loop import (
 from core.config import load_settings
 from core.context import ContextBudget, ContextBuildResult, ContextManager
 from core.errors import AgentError
-from core.goal import Goal, GoalPolicy, create_goal_tool
+from core.goal import CompletionGateEvent, Goal, GoalPolicy, create_goal_tool, verifier_task
 from core.loop_guard import action_digest, config_from_settings
 from core.model import Message, ModelClient, UsageLedger, UsageTrackingClient
 from core.openai_client import OpenAICompatibleClient
 from core.prompts import load_prompt
-from core.subagent import SubagentRunMetrics, create_spawn_agent_tool, scout_parent_message
+from core.subagent import (
+    SubagentRunMetrics,
+    create_spawn_agent_tool,
+    run_readonly_audit,
+    scout_parent_message,
+)
 from core.tools import (
     ApprovalDecision,
     ApprovalResult,
@@ -312,6 +317,7 @@ async def run(
     time_fuse_seconds: float = TIME_FUSE_SECONDS,
     report_name: str = REPORT_NAME,
     source_hash_fn: Callable[[Path], str] | None = None,
+    criteria: str = "",
 ) -> dict[str, object]:
     """运行一档任务，并在中断或失败时仍保存真实进度。
 
@@ -332,7 +338,13 @@ async def run(
     timed_client = TimedModelClient(model)
     ledger = UsageLedger()
     client = BudgetedClient(UsageTrackingClient(timed_client, ledger), ledger, token_fuse)
-    goal = Goal(objective, token_budget=token_fuse, time_budget_seconds=time_fuse_seconds)
+    # 验收标准由调用方提供（**必须是泛化的，绝不点名任何隐藏清单条目**）
+    goal = Goal(
+        objective,
+        acceptance_criteria=criteria,
+        token_budget=token_fuse,
+        time_budget_seconds=time_fuse_seconds,
+    )
     goal_events = workspace.parent / "goal.jsonl"
 
     def save_goal(current: Goal) -> None:
@@ -341,7 +353,38 @@ async def run(
         with goal_events.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(vars(current), ensure_ascii=False) + "\n")
 
-    policy = GoalPolicy(goal, on_change=save_goal, usage_ledger=ledger)
+    async def verify_completion(current: Goal) -> str:
+        """独立、只读的完成审计；预算耗尽或不可用一律 inconclusive。"""
+
+        verifier_client = BudgetedClient(
+            UsageTrackingClient(TimedModelClient(model), ledger),
+            ledger,
+            settings.completion_gate_verifier_token_budget,
+        )
+        try:
+            return await run_readonly_audit(
+                verifier_task(current),
+                workspace,
+                verifier_client,
+                settings.completion_gate_verifier_thinking,
+                budget,
+                timeout_seconds=settings.completion_gate_verifier_timeout_seconds,
+                on_event=collect_child_event,
+                loop_guard_config=loop_guard_config,
+            )
+        except TokenBudgetReached:
+            return "VERDICT: inconclusive\nUNMET: 验证器 token 预算耗尽"
+
+    policy = GoalPolicy(
+        goal,
+        on_change=save_goal,
+        usage_ledger=ledger,
+        verifier=verify_completion if settings.completion_gate_enabled else None,
+        max_rejections=settings.completion_gate_max_rejections,
+        verifier_timeout_seconds=settings.completion_gate_verifier_timeout_seconds,
+        no_tool_nudge_rounds=settings.completion_gate_no_tool_nudge_rounds,
+        on_event=collect_event,
+    )
     save_goal(goal)
 
     async def approve(definition, tool_call, allow_session):
@@ -371,6 +414,7 @@ async def run(
     child_tool_errors = 0
     parent_events: list[dict[str, object]] = []
     child_events: list[dict[str, object]] = []
+    gate_events: list[CompletionGateEvent] = []
     child_rounds: dict[str, int] = {}
     events_path = workspace.parent / "events.jsonl"
     child_events_path = workspace.parent / "child_events.jsonl"
@@ -378,6 +422,8 @@ async def run(
     async def collect_event(event: object) -> None:
         """父 Agent 事件落盘。"""
 
+        if isinstance(event, CompletionGateEvent):
+            gate_events.append(event)
         record = event_to_record(event)
         parent_events.append(record)
         with events_path.open("a", encoding="utf-8") as stream:
@@ -551,6 +597,29 @@ async def run(
             "scout": [metric.loop_guard_injections for metric in child_metrics]
         },
         "scout_summary": scout_summary(child_metrics, child_events),
+        "completion_gate": {
+            "enabled": settings.completion_gate_enabled,
+            "rejections": goal.completion_rejections,
+            "verified": goal.verified,
+            "rejected_not_met": sum(1 for e in gate_events if e.reason == "not_met"),
+            "rejected_inconclusive": sum(
+                1 for e in gate_events if e.reason == "inconclusive"
+            ),
+            "rejected_verifier_error": sum(
+                1 for e in gate_events if e.reason == "verifier_error"
+            ),
+            "attempts": [
+                {
+                    "attempt": e.attempt,
+                    "verdict": e.verdict,
+                    "reason": e.reason,
+                    "accepted": e.accepted,
+                    "verified": e.verified,
+                    "unmet": list(e.unmet),
+                }
+                for e in gate_events
+            ],
+        },
         "duration_seconds": round(duration, 3),
         "compaction_count": len(compactions),
         "eviction_count": len(evictions),
