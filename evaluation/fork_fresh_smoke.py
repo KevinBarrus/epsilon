@@ -107,6 +107,7 @@ async def measure(mode: str, workspace: Path, settings, target: str) -> dict[str
         "prompt_tokens": metric.prompt_tokens,
         "cache_hit_rate": metric.cache_hit_rate,
         "read_calls": len(reads),
+        "read_paths": [event.tool_call.arguments.get("path") for event in reads],
         "answered_with_fact": ANSWER_FACT in result.content,
         "duration_seconds": round(perf_counter() - started, 2),
     }
@@ -118,7 +119,6 @@ async def run(target: str, output_root: Path) -> dict[str, object]:
     settings = load_settings()
     output_root.mkdir(parents=True, exist_ok=True)
     workspace = build_workspace(output_root)
-    ledger = UsageLedger()
     results = []
     for mode in ("fresh", "fork", "fork_last_n"):
         results.append(await measure(mode, workspace, settings, target))

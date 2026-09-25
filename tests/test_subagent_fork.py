@@ -11,6 +11,7 @@ from core.loop_guard import config_from_settings
 from core.model import Message, TextDelta, ToolCall, ToolCallEvent, ToolResult, UsageEvent
 from core.subagent import (
     DEFAULT_FORK_TURNS,
+    FORK_CONTEXT_NOTICE,
     SPAWN_MODES,
     SubagentRunMetrics,
     _limit_summary,
@@ -398,3 +399,54 @@ async def test_parent_context_snapshot_is_cleared_after_tools(tmp_path: Path) ->
 
     assert seen and seen[0] is not None
     assert parent_context_snapshot() is None
+
+
+@pytest.mark.asyncio
+async def test_fork_child_is_told_it_may_cite_inherited_reads(tmp_path: Path) -> None:
+    """fork 子 Agent 收到“可引用继承内容、但不得引用未出现内容”的边界说明。"""
+
+    (tmp_path / NOTES).write_text(f"备注：{NEEDLE}", encoding="utf-8")
+    child = ContentAwareClient(NEEDLE, NOTES, inherits_context=True)
+    manager = ToolManager()
+    manager.register_local(*create_read_file_tool(tmp_path))
+    manager.register_local(
+        *create_spawn_agent_tool(
+            tmp_path,
+            lambda: child,
+            lambda: "high",
+            ContextBudget(10_000, 1_000, 2_000),
+            force_mode="fork",
+        )
+    )
+
+    await AgentLoop(ParentClient(), manager).run([Message(role="user", content="总结 notes.txt")])
+
+    notices = [
+        message
+        for message in child.requests[0]
+        if message.role == "system" and FORK_CONTEXT_NOTICE in message.content
+    ]
+    assert notices, "fork 子 Agent 必须收到可引用继承内容的说明"
+
+
+@pytest.mark.asyncio
+async def test_fresh_child_is_not_told_to_reuse_context(tmp_path: Path) -> None:
+    """fresh 子 Agent 不该收到 fork 说明。"""
+
+    (tmp_path / NOTES).write_text(f"备注：{NEEDLE}", encoding="utf-8")
+    child = ContentAwareClient(NEEDLE, NOTES)
+    manager = ToolManager()
+    manager.register_local(*create_read_file_tool(tmp_path))
+    manager.register_local(
+        *create_spawn_agent_tool(
+            tmp_path,
+            lambda: child,
+            lambda: "high",
+            ContextBudget(10_000, 1_000, 2_000),
+            force_mode="fresh",
+        )
+    )
+
+    await AgentLoop(ParentClient(), manager).run([Message(role="user", content="总结 notes.txt")])
+
+    assert not any(FORK_CONTEXT_NOTICE in message.content for message in child.requests[0])

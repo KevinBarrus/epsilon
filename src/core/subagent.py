@@ -37,6 +37,11 @@ from .tools.types import ToolExecutionMode, ToolHandler
 from .worktree import WorktreeError, commit_worktree, create_worktree, merge_branch, remove_worktree
 
 
+# fork 子 Agent 的上下文说明：允许引用继承内容，但不得引用继承里从未出现过的内容
+FORK_CONTEXT_NOTICE = (
+    "你继承了父 Agent 的上下文：其中已经读过的文件内容可以直接引用，不必重新读取；"
+    "但不得引用继承上下文里从未出现过的内容。"
+)
 SCOUT_MAX_CONCURRENCY = 3
 SCOUT_SUMMARY_MAX_CHARS = 6_000
 # 子 Agent 的上下文模式：fresh 空上下文；fork 继承父快照；fork_last_n 只继承最后 n 个 user 回合
@@ -598,6 +603,11 @@ async def _run_subagent(
         model_tools=tool_manager.model_tools(),
         system_prompt=system_prompt,
     )
+    if history:
+        # fork 子 Agent：把“可引用继承内容”的边界写进系统消息
+        context_manager.set_extra_system_messages(
+            [Message(role="system", content=FORK_CONTEXT_NOTICE)]
+        )
     context_manager.set_workspace_path(str(workspace))
     context_manager.set_project_instructions(project_instructions)
     compactions: list[CompactionRecord] = []
