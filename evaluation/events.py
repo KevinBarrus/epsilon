@@ -7,6 +7,7 @@ from core.agent_loop import (
     ToolCallStartedEvent,
     ToolExecutionEvent,
 )
+from core.loop_guard import LoopGuardEvent
 from core.model import Message, TextDelta, ToolCallEvent, UsageEvent
 
 
@@ -61,6 +62,14 @@ def event_to_record(event: object) -> dict[str, object]:
             "attempt": event.attempt,
             "max_attempts": event.max_attempts,
             "delay_seconds": event.delay_seconds,
+        }
+    if isinstance(event, LoopGuardEvent):
+        return {
+            "type": "loop_guard",
+            "kind": event.kind,
+            "level": event.level,
+            "tool_name": event.tool_name,
+            "count": event.count,
         }
     if isinstance(event, UsageEvent):
         return {

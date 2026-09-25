@@ -57,6 +57,11 @@ class Settings:
     # Worker 工作区隔离默认关闭；开启时要求当前目录是干净的 Git 检出。
     isolation_enabled: bool = False
     worker_max_concurrency: int = 4
+    # Agent 空转检测与纠偏：重复工具调用或长期无进展时注入系统提醒（默认开）
+    loop_guard_enabled: bool = True
+    loop_guard_thresholds: tuple[int, ...] = (3, 5, 8)
+    loop_guard_exempt_tools: tuple[str, ...] = ()
+    loop_guard_no_progress_rounds: int = 8
 
     def __post_init__(self) -> None:
         """统一超时默认值并校验直接构造的配置。"""
@@ -87,6 +92,17 @@ class Settings:
             and self.eviction_threshold_tokens <= 0
         ):
             raise ConfigError("eviction_threshold_tokens must be > 0")
+        previous_threshold = 0
+        for threshold in self.loop_guard_thresholds:
+            if threshold <= previous_threshold:
+                raise ConfigError(
+                    "loop_guard.thresholds must be strictly increasing positive ints"
+                )
+            previous_threshold = threshold
+        if not self.loop_guard_thresholds:
+            raise ConfigError("loop_guard.thresholds must not be empty")
+        if self.loop_guard_no_progress_rounds < 0:
+            raise ConfigError("loop_guard.no_progress_rounds must be >= 0")
         object.__setattr__(self, "first_byte_timeout_seconds", first_byte_timeout)
         object.__setattr__(self, "stream_idle_timeout_seconds", stream_idle_timeout)
 
@@ -235,6 +251,12 @@ def _settings_from_data(data: dict) -> Settings:
     worker_max_concurrency = _optional_int(
         data.get("worker_max_concurrency"), 4, "worker_max_concurrency"
     )
+    (
+        loop_guard_enabled,
+        loop_guard_thresholds,
+        loop_guard_exempt_tools,
+        loop_guard_no_progress_rounds,
+    ) = _loop_guard_settings(data)
     price = _optional_model_price(model.get("price"))
     if context_window is not None and context_window <= 0:
         raise ConfigError("model.context_window must be > 0")
@@ -265,6 +287,10 @@ def _settings_from_data(data: dict) -> Settings:
         eviction_threshold_tokens=eviction_threshold_tokens,
         isolation_enabled=isolation_enabled,
         worker_max_concurrency=worker_max_concurrency,
+        loop_guard_enabled=loop_guard_enabled,
+        loop_guard_thresholds=loop_guard_thresholds,
+        loop_guard_exempt_tools=loop_guard_exempt_tools,
+        loop_guard_no_progress_rounds=loop_guard_no_progress_rounds,
     )
 
 
@@ -339,6 +365,60 @@ def _optional_bool(value: object, default: bool, name: str) -> bool:
         if normalized in {"false", "0", "no", "off"}:
             return False
     raise ConfigError(f"{name} must be a boolean")
+
+
+def _optional_int_tuple(
+    value: object,
+    default: tuple[int, ...],
+    name: str,
+) -> tuple[int, ...]:
+    """读取可选整数数组配置，未设置时使用默认值。"""
+
+    if value is None:
+        return default
+    if not isinstance(value, list) or not all(
+        isinstance(item, int) and not isinstance(item, bool) for item in value
+    ):
+        raise ConfigError(f"{name} must be an array of integers")
+    return tuple(value)
+
+
+def _optional_str_tuple(
+    value: object,
+    default: tuple[str, ...],
+    name: str,
+) -> tuple[str, ...]:
+    """读取可选字符串数组配置，未设置时使用默认值。"""
+
+    if value is None:
+        return default
+    if not isinstance(value, list) or not all(
+        isinstance(item, str) and item for item in value
+    ):
+        raise ConfigError(f"{name} must be an array of strings")
+    return tuple(value)
+
+
+def _loop_guard_settings(
+    data: dict,
+) -> tuple[bool, tuple[int, ...], tuple[str, ...], int]:
+    """读取可选的 loop_guard 嵌套配置。"""
+
+    raw = data.get("loop_guard")
+    if raw is None:
+        return True, (3, 5, 8), (), 8
+    if not isinstance(raw, dict):
+        raise ConfigError("loop_guard must be an object")
+    return (
+        _optional_bool(raw.get("enabled"), True, "loop_guard.enabled"),
+        _optional_int_tuple(raw.get("thresholds"), (3, 5, 8), "loop_guard.thresholds"),
+        _optional_str_tuple(raw.get("exempt_tools"), (), "loop_guard.exempt_tools"),
+        _optional_int(
+            raw.get("no_progress_rounds"),
+            8,
+            "loop_guard.no_progress_rounds",
+        ),
+    )
 
 
 def _optional_mcp_stdio_settings(data: dict) -> McpStdioSettings | None:

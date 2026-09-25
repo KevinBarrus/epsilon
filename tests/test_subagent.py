@@ -9,6 +9,7 @@ import pytest
 import core.subagent as subagent
 from core.agent_loop import AgentLoop, ToolBatchEvent
 from core.context import ContextBudget
+from core.loop_guard import LoopGuardConfig
 from core.model import Message, TextDelta, ToolCall, ToolCallEvent, UsageEvent
 from core.session import Session
 from core.subagent import (
@@ -125,6 +126,57 @@ async def test_spawn_agent_uses_independent_read_only_loop(tmp_path) -> None:
     assert metrics[0].total_tokens == 12
     assert metrics[0].outcome == "completed"
     assert metrics[0].context_chars == 0
+
+
+@pytest.mark.asyncio
+async def test_spawn_agent_detects_its_own_loop_and_reports_injections(tmp_path) -> None:
+    """子 Agent 自己抳到空转，并把纠偏次数写进指标。"""
+
+    (tmp_path / "target.txt").write_text("证据", encoding="utf-8")
+    repeats = tuple(
+        (ToolCall(f"read-{index}", "read_file", {"path": "target.txt"}),)
+        for index in range(3)
+    )
+    client = RoleClient(repeats, "结论：仍是同一份证据")
+    metrics = []
+    _, handler = create_spawn_agent_tool(
+        tmp_path,
+        lambda: client,
+        lambda: "high",
+        ContextBudget(10_000, 1_000, 2_000),
+        metrics.append,
+    )
+
+    result = await handler(ToolCall("spawn-loop", "spawn_agent", {"task": "重复读取"}))
+
+    assert result.is_error is False
+    assert metrics[0].loop_guard_injections == 1
+
+
+@pytest.mark.asyncio
+async def test_spawn_agent_honors_disabled_loop_guard(tmp_path) -> None:
+    """显式关闭时空转不再注入纠偏。"""
+
+    (tmp_path / "target.txt").write_text("证据", encoding="utf-8")
+    repeats = tuple(
+        (ToolCall(f"read-{index}", "read_file", {"path": "target.txt"}),)
+        for index in range(4)
+    )
+    client = RoleClient(repeats, "结论：仍是同一份证据")
+    metrics = []
+    _, handler = create_spawn_agent_tool(
+        tmp_path,
+        lambda: client,
+        lambda: "high",
+        ContextBudget(10_000, 1_000, 2_000),
+        metrics.append,
+        loop_guard_config=LoopGuardConfig(enabled=False),
+    )
+
+    result = await handler(ToolCall("spawn-off", "spawn_agent", {"task": "重复读取"}))
+
+    assert result.is_error is False
+    assert metrics[0].loop_guard_injections == 0
 
 
 @pytest.mark.asyncio

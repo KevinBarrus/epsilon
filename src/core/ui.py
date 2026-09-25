@@ -50,6 +50,7 @@ from .context import (
     UserInputTooLarge,
 )
 from .goal import GoalPolicy, create_goal_tool
+from .loop_guard import config_from_settings
 from .prompts import load_prompt
 from .project_instructions import load_project_instructions
 from .session import Session
@@ -447,6 +448,7 @@ async def run_chat(
     )
     tool_manager.set_model_tool_enabled("goal", False)
     resolved_context_budget = context_budget or DEFAULT_CONTEXT_BUDGET
+    loop_guard_config = config_from_settings(settings)
     client_provider = lambda: client_holder.client
     thinking_provider = lambda: agent_loop.thinking_level
     tool_manager.register_local(
@@ -455,6 +457,7 @@ async def run_chat(
             client_provider,
             thinking_provider,
             resolved_context_budget,
+            loop_guard_config=loop_guard_config,
         )
     )
     for create_role_tool in (create_spawn_worker_tool, create_spawn_reviewer_tool):
@@ -465,6 +468,7 @@ async def run_chat(
                 thinking_provider,
                 resolved_context_budget,
                 permission_manager=permission_manager,
+                loop_guard_config=loop_guard_config,
                 **(
                     {
                         "isolation_enabled": settings.isolation_enabled,
@@ -505,6 +509,7 @@ async def run_chat(
         max_tool_rounds=max_tool_rounds,
         artifact_store=artifact_store,
         firewall_enabled=settings.firewall_enabled,
+        loop_guard_config=loop_guard_config,
     )
 
     try:

@@ -14,6 +14,7 @@ from uuid import uuid4
 from core.agent_loop import AgentLoop, AgentRunResult
 from core.artifacts import ArtifactStore
 from core.config import load_settings
+from core.loop_guard import config_from_settings
 from core.context import ContextBudget
 from core.end_policy import WriteVerificationPolicy
 from core.model import Message
@@ -256,6 +257,7 @@ async def run_long_task(
     try:
         async with container.running():
             settings = load_settings()
+            loop_guard_config = config_from_settings(settings)
             model_client = OpenAICompatibleClient(settings)
             client = TimedModelClient(model_client)
             if subagent_enabled:
@@ -286,6 +288,7 @@ async def run_long_task(
                         ),
                         scout_metrics.append,
                         on_event=collect_scout_event,
+                        loop_guard_config=loop_guard_config,
                     )
                 )
             session = Session(prepared.session_root)
@@ -299,6 +302,7 @@ async def run_long_task(
                 session_id=session.session_id,
                 firewall_enabled=firewall_enabled,
                 end_policy=WriteVerificationPolicy(),
+                loop_guard_config=loop_guard_config,
             )
             context_builder = _context_builder(
                 session,

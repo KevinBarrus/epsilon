@@ -39,6 +39,18 @@ from evaluation.swebench import (
 )
 
 
+def _fake_settings(model_name: str = "test") -> SimpleNamespace:
+    """构造只带评测所需字段的配置替身（与 Settings 保持一致）。"""
+
+    return SimpleNamespace(
+        model_name=model_name,
+        loop_guard_enabled=True,
+        loop_guard_thresholds=(3, 5, 8),
+        loop_guard_exempt_tools=(),
+        loop_guard_no_progress_rounds=8,
+    )
+
+
 def test_create_patch_uses_repository_relative_paths(tmp_path: Path) -> None:
     """测试临时目录中的文件修改会变成可应用的相对补丁。"""
 
@@ -552,7 +564,7 @@ async def test_patch_generation_failure_keeps_completed_agent_trace(
     monkeypatch.setattr("evaluation.swebench.AgentLoop", FakeAgentLoop)
     monkeypatch.setattr("evaluation.swebench.OpenAICompatibleClient", lambda settings: object())
     monkeypatch.setattr("evaluation.swebench.TimedModelClient", FakeTimedClient)
-    monkeypatch.setattr("evaluation.swebench.load_settings", lambda: SimpleNamespace(model_name="test"))
+    monkeypatch.setattr("evaluation.swebench.load_settings", _fake_settings)
     monkeypatch.setattr(
         "evaluation.swebench.create_patch",
         lambda *args: (_ for _ in ()).throw(PermissionError("cache denied")),
@@ -842,7 +854,7 @@ async def test_run_task_binds_artifact_store_to_agent_session(
     monkeypatch.setattr("evaluation.swebench.OpenAICompatibleClient", lambda settings: object())
     monkeypatch.setattr("evaluation.swebench.TimedModelClient", FakeTimedClient)
     monkeypatch.setattr(
-        "evaluation.swebench.load_settings", lambda: SimpleNamespace(model_name="test")
+        "evaluation.swebench.load_settings", _fake_settings
     )
     monkeypatch.setattr(
         "evaluation.swebench.create_patch", lambda *args: (("file.py",), "patch")

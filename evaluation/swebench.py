@@ -15,6 +15,7 @@ from time import perf_counter
 from core.agent_loop import AgentLoop, AgentRunResult
 from core.artifacts import ArtifactStore
 from core.config import load_settings
+from core.loop_guard import config_from_settings
 from core.context import ContextBudget, ContextManager, DEFAULT_CONTEXT_BUDGET, estimate_context_tokens
 from core.model import Message, ModelClientError
 from core.openai_client import OpenAICompatibleClient
@@ -184,6 +185,7 @@ async def run_task(
             agent_execution_environment = "official-instance-container"
             stage = "agent-loop"
             settings = load_settings()
+            loop_guard_config = config_from_settings(settings)
             model_name = settings.model_name
             client = TimedModelClient(OpenAICompatibleClient(settings))
             artifact_store = ArtifactStore.for_workspace(prepared.session_root)
@@ -226,6 +228,7 @@ async def run_task(
                 session_id=session.session_id,
                 firewall_enabled=firewall_enabled,
                 end_policy=WriteVerificationPolicy(),
+                loop_guard_config=loop_guard_config,
             )
             context_builder = _context_builder(
                 session,

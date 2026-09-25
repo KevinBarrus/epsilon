@@ -16,6 +16,7 @@ from time import perf_counter
 
 from core.agent_loop import AgentLoop, AgentLoopCancelled, AgentLoopFailed, RetryEvent, ToolBatchEvent, ToolExecutionEvent
 from core.config import load_settings
+from core.loop_guard import config_from_settings
 from core.context import ContextBudget, ContextBuildResult, ContextManager
 from core.errors import AgentError
 from core.goal import Goal, GoalPolicy, create_goal_tool
@@ -289,6 +290,7 @@ async def run(workspace: Path, *, delegate: bool = False, isolate_workers: bool 
     """运行完整任务，并在中断或失败时仍保存真实进度。"""
     baseline = json.loads((workspace.parent / "baseline.json").read_text(encoding="utf-8"))
     settings = load_settings()
+    loop_guard_config = config_from_settings(settings)
     if isolate_workers and not delegate:
         raise ValueError("worktree isolation requires delegation")
     if isolate_workers and not (workspace / ".git").exists():
@@ -361,7 +363,11 @@ async def run(workspace: Path, *, delegate: bool = False, isolate_workers: bool 
             (create_spawn_worker_tool, "worker"),
             (create_spawn_reviewer_tool, "reviewer"),
         ):
-            kwargs = {"on_metrics": child_metrics.append, "on_event": collect_child_event}
+            kwargs = {
+                "on_metrics": child_metrics.append,
+                "on_event": collect_child_event,
+                "loop_guard_config": loop_guard_config,
+            }
             if role != "scout":
                 kwargs.update(permission_manager=permissions, command_executor=command_executor)
             if role == "worker" and isolate_workers:
@@ -510,18 +516,21 @@ async def run(workspace: Path, *, delegate: bool = False, isolate_workers: bool 
     error: str | None = None
     error_category: str | None = None
     final_content = ""
+    parent_loop_guard_injections = 0
     sampler = asyncio.create_task(periodic_sample())
     try:
         await sample("initial")
         outcome = await run_with_wall_clock(
             AgentLoop(
                 client, tools, max_tool_rounds=None, thinking_level="high", end_policy=policy,
+                loop_guard_config=loop_guard_config,
             ).run([Message(role="user", content=DELEGATED_TASK if delegate else TASK)], on_event=collect_event, build_context=build_context),
             TIME_FUSE_SECONDS,
         )
         stop_reason = outcome.stop_reason
         tool_rounds = outcome.tool_rounds
         final_content = outcome.final_content
+        parent_loop_guard_injections = outcome.loop_guard_injections
     except TokenBudgetReached:
         guard = "token_budget_request_boundary"
         goal.status = "budget_limited"
@@ -584,6 +593,11 @@ async def run(workspace: Path, *, delegate: bool = False, isolate_workers: bool 
         "tool_errors": tool_errors + child_tool_errors, "retry_events": retry_events + child_retry_events,
         "parent_tool_errors": tool_errors, "child_tool_errors": child_tool_errors,
         "role_tokens": split, "delegation_counts": dict(Counter(delegation_order)),
+        "loop_guard_injections": parent_loop_guard_injections,
+        "role_loop_guard_injections": {
+            role: [metric.loop_guard_injections for metric in child_metrics if metric.role == role]
+            for role in child_clients
+        },
         "delegation_order": delegation_order,
         "subagent_runs": [vars(metric) for metric in child_metrics],
         "peak_worker_concurrency": peak_worker_concurrency(child_metrics),

@@ -10,6 +10,7 @@ from typing import Literal
 from .agent_loop import AgentLoop, AgentLoopFailed, AgentRunResult
 from .context import ContextBudget, ContextBuildResult
 from .context import ContextManager
+from .loop_guard import LoopGuardConfig
 from .model import Message, ModelClient, ToolCall, ToolResult, UsageEvent
 from .project_instructions import load_project_instructions
 from .prompts import load_prompt
@@ -70,6 +71,7 @@ class SubagentRunMetrics:
     branch: str | None = None
     started_at: float = 0.0  # 子 Agent 运行开始，不含 worktree 准备
     finished_at: float = 0.0  # 子 Agent 运行结束，不含提交和合并
+    loop_guard_injections: int = 0
 
 
 ScoutRunMetrics = SubagentRunMetrics
@@ -95,6 +97,7 @@ def create_spawn_agent_tool(
     on_metrics: Callable[[SubagentRunMetrics], None] | None = None,
     timeout_seconds: float | None = None,
     on_event: Callable[[object], Awaitable[None]] | None = None,
+    loop_guard_config: LoopGuardConfig | None = None,
 ) -> tuple[ToolDefinition, ToolHandler]:
     """创建最多并行三个、只返回有界摘要的 Scout 工具。"""
 
@@ -118,6 +121,7 @@ def create_spawn_agent_tool(
         on_metrics=on_metrics,
         timeout_seconds=timeout_seconds,
         on_event=on_event,
+        loop_guard_config=loop_guard_config,
     )
 
 
@@ -134,6 +138,7 @@ def create_spawn_worker_tool(
     max_concurrency: int = 4,
     on_metrics: Callable[[SubagentRunMetrics], None] | None = None,
     on_event: Callable[[object], Awaitable[None]] | None = None,
+    loop_guard_config: LoopGuardConfig | None = None,
 ) -> tuple[ToolDefinition, ToolHandler]:
     """创建可修改代码、写操作仍需用户审批的串行 Worker 工具。"""
 
@@ -171,6 +176,7 @@ def create_spawn_worker_tool(
         isolation_enabled=isolation_enabled,
         worker_tools_factory=worker_tools,
         max_concurrency=max_concurrency,
+        loop_guard_config=loop_guard_config,
     )
 
 
@@ -184,6 +190,7 @@ def create_spawn_reviewer_tool(
     command_executor: CommandExecutor | None = None,
     on_metrics: Callable[[SubagentRunMetrics], None] | None = None,
     on_event: Callable[[object], Awaitable[None]] | None = None,
+    loop_guard_config: LoopGuardConfig | None = None,
 ) -> tuple[ToolDefinition, ToolHandler]:
     """创建只读审查工具；Reviewer 执行命令仍要经过用户审批。"""
 
@@ -207,6 +214,7 @@ def create_spawn_reviewer_tool(
         permission_manager=permission_manager,
         on_metrics=on_metrics,
         on_event=on_event,
+        loop_guard_config=loop_guard_config,
     )
 
 
@@ -229,6 +237,7 @@ def _create_spawn_role_tool(
     isolation_enabled: bool = False,
     worker_tools_factory: Callable[[Path], Sequence[tuple[ToolDefinition, ToolHandler]]] | None = None,
     max_concurrency: int = 4,
+    loop_guard_config: LoopGuardConfig | None = None,
 ) -> tuple[ToolDefinition, ToolHandler]:
     """按角色组装独立 Agent；子工具集不包含任何 spawn 工具。"""
 
@@ -250,6 +259,7 @@ def _create_spawn_role_tool(
             content = ""
             branch: str | None = None
             merge_status: str | None = None
+            loop_guard_injections = 0
             worktree_path: Path | None = None
             scout_task: asyncio.Task[AgentRunResult] | None = None
             run_started_at = 0.0
@@ -277,6 +287,7 @@ def _create_spawn_role_tool(
                         permission_manager,
                         system_prompt,
                         on_event,
+                        loop_guard_config,
                     )
                 )
                 run_started_at = perf_counter()
@@ -301,6 +312,7 @@ def _create_spawn_role_tool(
                         result = scout_task.result()
                 finally:
                     run_finished_at = perf_counter()
+                loop_guard_injections = result.loop_guard_injections
                 outcome = "completed"
                 content = _limit_summary(result.final_content, role)
                 if worktree_path is not None:
@@ -374,6 +386,7 @@ def _create_spawn_role_tool(
                             branch,
                             run_started_at,
                             run_finished_at,
+                            loop_guard_injections,
                         )
                     )
 
@@ -413,6 +426,7 @@ async def _run_subagent(
     permission_manager: PermissionManager | None,
     system_prompt: str,
     on_event: Callable[[object], Awaitable[None]] | None,
+    loop_guard_config: LoopGuardConfig | None = None,
 ) -> AgentRunResult:
     """用独立上下文和当前角色限定的工具运行一次子 Agent。"""
 
@@ -479,6 +493,7 @@ async def _run_subagent(
         thinking_level=thinking_level,
         firewall_enabled=False,
         agent_role=role,
+        loop_guard_config=loop_guard_config,
     ).run(
         [
             Message(

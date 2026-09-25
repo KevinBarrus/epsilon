@@ -91,6 +91,18 @@ class _FakeAgentLoop:
         return AgentRunResult((), "完成", stop_reason="completed", tool_rounds=2)
 
 
+def _fake_settings(model_name: str = "test-model") -> SimpleNamespace:
+    """构造只带评测所需字段的配置替身（与 Settings 保持一致）。"""
+
+    return SimpleNamespace(
+        model_name=model_name,
+        loop_guard_enabled=True,
+        loop_guard_thresholds=(3, 5, 8),
+        loop_guard_exempt_tools=(),
+        loop_guard_no_progress_rounds=8,
+    )
+
+
 class _FakeContainer:
     """无副作用的任务容器替身。"""
 
@@ -152,7 +164,7 @@ def _install_fakes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, patches: lis
     monkeypatch.setattr("evaluation.long_task.TimedModelClient", _FakeTimedClient)
     monkeypatch.setattr("evaluation.long_task.AgentLoop", _FakeAgentLoop)
     monkeypatch.setattr(
-        "evaluation.long_task.load_settings", lambda: SimpleNamespace(model_name="test-model")
+        "evaluation.long_task.load_settings", _fake_settings
     )
     monkeypatch.setattr("evaluation.long_task.run_harness_check", fake_harness)
     monkeypatch.setattr("evaluation.long_task.run_ordering_tests", fake_tests)

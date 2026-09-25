@@ -14,6 +14,7 @@ from .context import ContextBuildResult, model_request_fingerprint
 from .end_policy import EndPolicySummary, TurnEndPolicy
 from .error_policy import AgentErrorPolicy
 from .errors import AgentError
+from .loop_guard import LoopGuardConfig, ToolCallLoopGuard
 from .model import (
     Message,
     ModelClient,
@@ -98,6 +99,7 @@ class AgentRunResult:
     write_count: int = 0
     post_write_command_results: tuple[ToolResult, ...] = ()
     verification_command_results: tuple[ToolResult, ...] = ()
+    loop_guard_injections: int = 0
 
 
 class AgentLoopCancelled(asyncio.CancelledError):
@@ -154,6 +156,7 @@ class AgentLoop:
         session_id: str = "",
         firewall_enabled: bool = True,
         agent_role: str = "parent",
+        loop_guard_config: LoopGuardConfig | None = None,
     ) -> None:
         """创建 Agent Loop，可选地限制单轮工具调用次数。"""
 
@@ -170,6 +173,8 @@ class AgentLoop:
         self._session_id = session_id
         self._firewall_enabled = firewall_enabled
         self._agent_role = agent_role
+        # 每个 Agent 各持一个 guard，子 Agent 的空转由子 Agent 自己抓到
+        self._loop_guard = ToolCallLoopGuard(loop_guard_config, agent_role)
 
     def set_artifact_session(self, session_id: str) -> None:
         """绑定会话标识，Session 创建晚于 AgentLoop 时补充 artifact 归属。"""
@@ -223,6 +228,7 @@ class AgentLoop:
 
         context = list(messages)
         new_messages: list[Message] = []
+        injections_before = self._loop_guard.injections
         text_parts: list[str] = []
         tool_calls: list[ToolCall] = []
         reasoning_parts: list[str] = []
@@ -310,6 +316,9 @@ class AgentLoop:
                             assistant_content,
                             new_messages,
                             tool_rounds,
+                            loop_guard_injections=(
+                                self._loop_guard.injections - injections_before
+                            ),
                         )
                     context.append(follow_up)
                     continue
@@ -357,6 +366,16 @@ class AgentLoop:
                             batch_duration_ms,
                         )
                     )
+                injection = self._loop_guard.observe(
+                    completed_tool_calls,
+                    results,
+                    self._tool_capabilities(),
+                )
+                if injection is not None:
+                    # 纠偏消息只进入本轮上下文，不写入 new_messages、不落盘
+                    context.append(injection.message)
+                    if on_event is not None:
+                        await on_event(injection.event)
 
             return self._run_result(
                 context,
@@ -364,6 +383,7 @@ class AgentLoop:
                 new_messages,
                 stop_reason="tool_limit",
                 tool_rounds=tool_rounds,
+                loop_guard_injections=self._loop_guard.injections - injections_before,
             )
         except asyncio.CancelledError as exc:
             if text_parts or tool_calls or reasoning_parts:
@@ -391,6 +411,7 @@ class AgentLoop:
         new_messages: Sequence[Message],
         tool_rounds: int,
         stop_reason: Literal["completed", "tool_limit"] = "completed",
+        loop_guard_injections: int = 0,
     ) -> AgentRunResult:
         """将可选收尾策略的统计统一写入运行结果。"""
 
@@ -409,7 +430,16 @@ class AgentLoop:
             summary.write_count,
             summary.post_write_command_results,
             summary.verification_command_results,
+            loop_guard_injections,
         )
+
+    def _tool_capabilities(self) -> dict[str, str | None]:
+        """返回工具名到 capability 的映射，供空转检测判断是否纯读。"""
+
+        return {
+            definition.name: definition.capability
+            for definition in self._tool_manager.list_definitions()
+        }
 
     async def _execute_tool_batch(
         self,
