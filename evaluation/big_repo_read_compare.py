@@ -1,7 +1,11 @@
 """大语料只读对比实验（codex）：先容量探测，再跑 A/B/C。
 
-语料是 codex 仓库（102 个 crate、Rust 约 138 万行），范围=整仓、排除
-`.git` / `target` / `node_modules` 与单文件 > 2MB。
+语料是 codex 仓库。范围 = **生产 Rust + 非代码资源**，排除
+`.git` / `target` / `node_modules`、**测试代码**（`tests/`、`test/`、`*tests.rs`、`*_test.rs`）
+与单文件 > 2MB。
+
+排除测试代码的理由：测试占 Rust 总量约 42%（57 万行），而任务是"为子系统写实现剖析"，
+读测试代码对目标没有贡献。
 
 - A `single`：单 Agent 串行读；
 - B `fanout_fresh`：fresh 只读子 Agent 扇出（各读不相关子系统）；
@@ -21,7 +25,12 @@ import tempfile
 from pathlib import Path
 
 from .big_repo_read_score import score as codex_score
-from .read_summary_compare import copy_repository, repository_hash, run as _run
+from .read_summary_compare import (
+    copy_repository,
+    is_test_code,
+    repository_hash,
+    run as _run,
+)
 
 SOURCE = Path("/home/kevinbarrus/projects/codex")
 EXCLUDED_DIRS = {".git", "target", "node_modules"}
@@ -59,8 +68,23 @@ _ARM_SENTENCE: dict[str, str] = {
 }
 
 
+def codex_scope(relative: Path) -> bool:
+    """codex 语料范围：生产 Rust + docs/ + scripts/ + 顶层 Markdown。
+
+    排除测试 Rust（约占 42%）与生成物噪声（lock/snap/大 JSON 等），
+    让覆盖率反映"读了多少实现"。
+    """
+
+    parts = relative.parts
+    if relative.suffix == ".rs":
+        return not is_test_code(relative)
+    if parts and parts[0] in {"docs", "scripts"}:
+        return True
+    return len(parts) == 1 and relative.suffix.lower() in {".md", ".mdx"}
+
+
 def prepare(arm: str, source: Path = SOURCE) -> Path:
-    """创建 codex 副本（按 2MB 阈值），并记录基线哈希。"""
+    """创建 codex 副本（按范围谓词 + 2MB 阈值），并记录基线哈希。"""
 
     if arm not in ARMS:
         raise ValueError(f"unknown arm: {arm}")
@@ -71,6 +95,8 @@ def prepare(arm: str, source: Path = SOURCE) -> Path:
         workspace,
         max_file_bytes=MAX_FILE_BYTES,
         excluded_dirs=EXCLUDED_DIRS,
+        skip_tests=True,
+        include=codex_scope,
     )
     (root / "baseline.json").write_text(
         json.dumps(
@@ -78,10 +104,10 @@ def prepare(arm: str, source: Path = SOURCE) -> Path:
                 "arm": arm,
                 "source": str(source),
                 "source_hash": repository_hash(
-                    source, MAX_FILE_BYTES, EXCLUDED_DIRS
+                    source, MAX_FILE_BYTES, EXCLUDED_DIRS, skip_tests=True, include=codex_scope
                 ),
                 "copy_hash": repository_hash(
-                    workspace, MAX_FILE_BYTES, EXCLUDED_DIRS
+                    workspace, MAX_FILE_BYTES, EXCLUDED_DIRS, skip_tests=True, include=codex_scope
                 ),
                 **stats,
             },

@@ -1,6 +1,10 @@
 """大语料只读实验（codex）的评分：按子系统的源码级清单 + 路径精确率。
 
-清单按 codex 的**子系统**划分，每个子系统 2~3 条，合计 30 条。
+清单按 codex 的**子系统**划分，合计 40 条 = 30 条"具名常量/字面值" + 10 条**机制类**问题。
+
+机制类问题的答案必须跨文件把逻辑连起来（例如 fork 模式如何截断父线程历史、
+工具并行如何判定、审批被拒后控制流怎么走），因此要求命中多个标识符（`required_hits >= 2`），
+单个 grep 不足以作答。
 **每一条的关键词都逐项验证过不出现在全仓 Markdown 文档里**
 （验证方式：`grep -ril --include='*.md' --include='*.mdx' <关键词>` 命中 0 处），
 因此覆盖率反映的是"读了多少代码"，而不是"读没读文档"。
@@ -42,6 +46,30 @@ SUBSYSTEM_CHECKLIST: dict[str, tuple[ChecklistItem, ...]] = {
             "压缩请求里用户消息的 token 上限是多少？",
             ("compact_user_message_max_tokens",),
         ),
+        ChecklistItem(
+            "core_fork_mode",
+            "子 Agent 的 fork 模式如何继承父线程历史？截断规则是什么？",
+            ("spawnagentforkmode", "lastnturns", "truncate_rollout_to_last_n_fork_turns"),
+            2,
+        ),
+        ChecklistItem(
+            "core_tool_parallel",
+            "工具调用的并行执行是如何判定与组织的？",
+            ("tool_supports_parallel", "toolcallruntime"),
+            2,
+        ),
+        ChecklistItem(
+            "core_approval_denied",
+            "审批被拒绝之后，工具执行的控制流如何变化？",
+            ("reviewdecision::denied", "toolerror::rejected"),
+            2,
+        ),
+        ChecklistItem(
+            "core_auto_compact",
+            "自动压缩在什么时机触发，窗口如何推进？",
+            ("run_inline_auto_compact_task", "advance_auto_compact_window"),
+            2,
+        ),
     ),
     "tui": (
         ChecklistItem(
@@ -75,6 +103,12 @@ SUBSYSTEM_CHECKLIST: dict[str, tuple[ChecklistItem, ...]] = {
             "app_input_too_large",
             "输入过大返回的错误码字符串是什么？",
             ("input_too_large",),
+        ),
+        ChecklistItem(
+            "app_request_processors",
+            "请求处理器是如何分派与并发执行的？哪些阶段必须串行？",
+            ("requestprocessor", "commandexecrequestprocessor"),
+            2,
         ),
     ),
     "exec-server": (
@@ -110,6 +144,12 @@ SUBSYSTEM_CHECKLIST: dict[str, tuple[ChecklistItem, ...]] = {
             "elicit 请求使用的 MCP 方法名是什么？",
             ("elicitation/create",),
         ),
+        ChecklistItem(
+            "mcp_tool_name_normalize",
+            "MCP 工具名是如何归一化并加上前缀的？重名怎么处理？",
+            ("normalize_tools_for_model_with_prefix", "legacy_mcp_tool_name_prefix"),
+            2,
+        ),
     ),
     "plugin": (
         ChecklistItem(
@@ -121,6 +161,12 @@ SUBSYSTEM_CHECKLIST: dict[str, tuple[ChecklistItem, ...]] = {
             "plugin_root_variable",
             "插件根目录通过哪个环境变量传入？",
             ("plugin_root",),
+        ),
+        ChecklistItem(
+            "plugin_env_dedupe",
+            "插件环境变量与请求头的大小写不敏感去重规则是什么？",
+            ("duplicate case-insensitive agent plugins", "client_owned_http_headers"),
+            2,
         ),
     ),
     "sandbox": (
@@ -139,6 +185,12 @@ SUBSYSTEM_CHECKLIST: dict[str, tuple[ChecklistItem, ...]] = {
             "Linux 平台默认只读根目录列表的常量叫什么？",
             ("linux_platform_default_read_roots",),
         ),
+        ChecklistItem(
+            "sandbox_mode_resolve",
+            "沙箱模式是如何解析并选择实现的？",
+            ("resolve_windows_sandbox_mode", "sandbox_setup_is_complete"),
+            2,
+        ),
     ),
     "network-proxy": (
         ChecklistItem(
@@ -150,6 +202,12 @@ SUBSYSTEM_CHECKLIST: dict[str, tuple[ChecklistItem, ...]] = {
             "proxy_attribution_len",
             "归属令牌的最大长度常量是哪个？",
             ("max_attribution_token_len",),
+        ),
+        ChecklistItem(
+            "proxy_attribution_flow",
+            "归属信息是如何在连接上写入与读取的？",
+            ("write_attribution_frame", "read_attribution_token"),
+            2,
         ),
     ),
     "config": (
@@ -196,6 +254,12 @@ SUBSYSTEM_CHECKLIST: dict[str, tuple[ChecklistItem, ...]] = {
             "state_pinned_section",
             "置顶分组的固定标识常量叫什么？",
             ("pinned_thread_section_id",),
+        ),
+        ChecklistItem(
+            "store_writer_lock",
+            "同一线程的并发写入是如何协调的？锁目录与锁文件叫什么？",
+            ("writerlockcoordinator", "coordination.lock"),
+            2,
         ),
     ),
 }

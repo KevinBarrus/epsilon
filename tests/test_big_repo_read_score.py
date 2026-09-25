@@ -10,14 +10,39 @@ from evaluation.big_repo_read_score import (
 
 
 def test_checklist_shape() -> None:
-    """清单按子系统组织，合计 30 条，每子系统 2~3 条。"""
+    """清单按子系统组织，合计 40 条（30 条常量 + 10 条机制题）。"""
 
     total = sum(len(items) for items in SUBSYSTEM_CHECKLIST.values())
-    assert total == 30
+    assert total == 40
     assert 8 <= len(SUBSYSTEM_CHECKLIST) <= 12
     for name, items in SUBSYSTEM_CHECKLIST.items():
-        assert 2 <= len(items) <= 4, name
-        assert all(item.key.startswith(name.split("-")[0]) or item.key.split("_")[0] for item in items)
+        assert 2 <= len(items) <= 8, name
+
+
+def test_mechanism_items_require_multiple_hits() -> None:
+    """机制类问题要求跨文件命中多个标识符，单个 grep 不足以作答。"""
+
+    mechanism = {
+        item.key: item
+        for items in SUBSYSTEM_CHECKLIST.values()
+        for item in items
+        if item.required_hits >= 2
+    }
+    assert len(mechanism) == 10
+    for item in mechanism.values():
+        assert len(item.keywords) >= 2, item.key
+
+
+def test_mechanism_item_needs_both_identifiers() -> None:
+    """只命中一个标识符不算过（防止“grep 到就得分”）。"""
+
+    only_one = "这里提到 spawnagentforkmode 但没有别的。"
+    both = (
+        "fork 模式由 spawnagentforkmode 定义，截断调用 "
+        "truncate_rollout_to_last_n_fork_turns 完成。"
+    )
+    assert coverage_by_subsystem(only_one)["matched_count"] == 0
+    assert coverage_by_subsystem(both)["matched_count"] == 1
 
 
 def test_empty_report_scores_zero() -> None:

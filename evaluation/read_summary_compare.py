@@ -16,6 +16,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import shutil
 import tempfile
 from collections.abc import Callable, Sequence
@@ -60,6 +61,15 @@ from .online import TimedModelClient
 from .read_summary_score import score
 
 SOURCE = Path("/home/kevinbarrus/projects/oncall")
+_TEST_FILE_PATTERN = re.compile(r"tests?\.rs$")
+
+
+def is_test_code(path: Path) -> bool:
+    """判断路径是否测试代码：目录名为 test/tests，或文件名以 tests.rs / _test.rs 结尾。"""
+
+    if any(part in {"test", "tests"} for part in path.parts):
+        return True
+    return bool(_TEST_FILE_PATTERN.search(path.name))
 EXCLUDED_DIRS = {".git", "node_modules", ".venv", "__pycache__"}
 MAX_FILE_BYTES = 1_000_000
 TOKEN_FUSE = 40_000_000
@@ -114,6 +124,8 @@ def repository_hash(
     root: Path,
     max_file_bytes: int = MAX_FILE_BYTES,
     excluded_dirs: set[str] | None = None,
+    skip_tests: bool = False,
+    include: Callable[[Path], bool] | None = None,
 ) -> str:
     """对仓库（按排除规则）求稳定哈希，用于确认原仓库零改动。"""
 
@@ -121,6 +133,11 @@ def repository_hash(
     digest = hashlib.sha256()
     for path in sorted(root.rglob("*")):
         if not path.is_file() or any(part in excluded for part in path.parts):
+            continue
+        relative = path.relative_to(root)
+        if skip_tests and is_test_code(relative):
+            continue
+        if include is not None and not include(relative):
             continue
         if path.stat().st_size > max_file_bytes:
             continue
@@ -134,8 +151,10 @@ def copy_repository(
     target: Path,
     max_file_bytes: int = MAX_FILE_BYTES,
     excluded_dirs: set[str] | None = None,
+    skip_tests: bool = False,
+    include: Callable[[Path], bool] | None = None,
 ) -> dict[str, int]:
-    """按排除规则复制仓库：跳过元数据目录与超过阈值的大文件。"""
+    """按排除规则复制仓库：跳过元数据目录、测试代码与超过阈值的大文件。"""
 
     excluded = EXCLUDED_DIRS if excluded_dirs is None else excluded_dirs
     files = 0
@@ -143,6 +162,8 @@ def copy_repository(
     skipped_large = 0
     for root, dirs, names in os.walk(source):
         dirs[:] = sorted(name for name in dirs if name not in excluded)
+        if skip_tests:
+            dirs[:] = [name for name in dirs if name not in {"test", "tests"}]
         relative_root = Path(root).relative_to(source)
         (target / relative_root).mkdir(parents=True, exist_ok=True)
         for name in sorted(names):
@@ -153,6 +174,11 @@ def copy_repository(
                 continue
             if size > max_file_bytes:
                 skipped_large += 1
+                continue
+            relative = relative_root / name
+            if skip_tests and is_test_code(relative):
+                continue
+            if include is not None and not include(relative):
                 continue
             shutil.copy2(origin, target / relative_root / name)
             files += 1
