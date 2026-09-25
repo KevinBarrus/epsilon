@@ -22,8 +22,8 @@ from evaluation.online import TimedModelClient
 
 def test_big_task_only_has_high_safety_fuses() -> None:
     """评测不再用 15M 小预算人为截断任务。"""
-    assert TOKEN_FUSE == 50_000_000
-    assert TIME_FUSE_SECONDS == 7200
+    assert TOKEN_FUSE == 120_000_000
+    assert TIME_FUSE_SECONDS == 10_800
 
 
 def test_coverage_excludes_dependencies_and_maps_modules(tmp_path: Path) -> None:

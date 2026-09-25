@@ -42,8 +42,8 @@ from .online import TimedModelClient
 SOURCE = Path(__file__).resolve().parents[1]
 EXCLUDED = (".venv", ".git", "evaluation-results", ".epsilon", "__pycache__")
 IMAGE = "swebench/sweb.eval.x86_64.django_1776_django-11001:latest"
-TOKEN_FUSE = 50_000_000
-TIME_FUSE_SECONDS = 7200
+TOKEN_FUSE = 120_000_000
+TIME_FUSE_SECONDS = 10_800
 OBJECTIVE = "把副本 src/core 的全部 Python 模块重构成等价的 TypeScript，直到全部模块都有对应 TS 实现且类型检查通过"
 TASK = (
     "你的工作区是 Epsilon 项目的副本。把 src/core/ 下的全部 Python 源代码重构成 TypeScript，"
