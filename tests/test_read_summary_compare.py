@@ -89,6 +89,18 @@ def test_prepare_writes_baseline(tmp_path: Path) -> None:
         shutil.rmtree(workspace.parent, ignore_errors=True)
 
 
+def test_task_includes_source_questions_for_every_arm() -> None:
+    """源码级问题段对所有档完全相同，只有档位句不同。"""
+
+    from evaluation.read_summary_compare import ARMS, SOURCE_QUESTIONS, TASK, _ARM_SENTENCE
+
+    tasks = {arm: TASK + _ARM_SENTENCE.get(arm, "") for arm in ARMS}
+    assert all(SOURCE_QUESTIONS in task for task in tasks.values())
+    # 去掉档位句后三档任务完全一致
+    stripped = {task.replace(_ARM_SENTENCE.get(arm, ""), "") for arm, task in tasks.items()}
+    assert len(stripped) == 1
+
+
 def test_default_scout_mode_matches_arm() -> None:
     """三档各自的默认子 Agent 模式：A 无委派、B fresh 扇出、C fork。"""
 

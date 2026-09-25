@@ -4,7 +4,9 @@ from pathlib import Path
 
 from evaluation.read_summary_score import (
     CHECKLIST,
+    CHECKLIST_SOURCE,
     coverage,
+    coverage_source,
     mentioned_paths,
     precision,
     score,
@@ -37,7 +39,7 @@ def test_checklist_has_twelve_items() -> None:
 
 
 def test_full_report_matches_all_items() -> None:
-    """覆盖全部要点的报告应拿满覆盖率。"""
+    """覆盖全部要点的报告应拿满文档级覆盖率。"""
 
     result = coverage(FULL_REPORT)
     assert result["matched_count"] == 12
@@ -97,11 +99,53 @@ def test_precision_accepts_basename_only_mention(tmp_path: Path) -> None:
 
 
 def test_score_combines_both_metrics(tmp_path: Path) -> None:
-    """score 同时返回覆盖率与精确率。"""
+    """score 同时返回文档级覆盖率、源码级覆盖率与精确率。"""
 
     (tmp_path / "docs").mkdir()
     (tmp_path / "docs/index.md").write_text("x", encoding="utf-8")
     result = score("本地优先的 AIOps 项目，见 docs/index.md", tmp_path)
 
-    assert set(result) == {"coverage", "precision"}
+    assert set(result) == {"coverage", "coverage_source", "precision"}
     assert result["precision"]["rate"] == 1.0
+
+
+SOURCE_AWARE_REPORT = """
+BM25 那一路用 _TOKEN_PATTERN 做正则切分，tokenize_hybrid_text 再调 _is_chinese_segment
+把中文片段单独切出来。
+信念压缩在 aiops/sop_belief.py：n >= 3 且 p >= 0.72 才压缩。
+会话记忆三档的字面值是 every_30_turns / context_70_percent / manual，压缩在上下文构建层。
+四个角色都在 aiops/diagnostics.py，用 StateGraph.add_node 装配 planner / executor /
+replanner / report，关键状态字段在 AiopsDiagnosticState 里。
+工具证据压缩写入 compressed_tool_evidence 表，由 _compressed_tool_evidence_record 写入。
+索引任务状态有 queued / running / succeeded / failed / cancelled，失败走 retry。
+"""
+
+DOC_ONLY_REPORT = """
+这是一个本地优先的 AIOps 工作台，用 Vue 3 + FastAPI + SQLite + Milvus，
+诊断链路是 Planner -> Executor -> Replanner -> Report，用 LangGraph 编排，
+检索用 BM25 与 RRF 融合再 rerank，密码用 Argon2，Skill 渐进式加载。
+"""
+
+
+def test_source_checklist_has_six_items() -> None:
+    """源码级清单固定为 6 项（本次主指标）。"""
+
+    assert len(CHECKLIST_SOURCE) == 6
+    assert all(item.key.startswith("source_") for item in CHECKLIST_SOURCE)
+
+
+def test_source_aware_report_matches_all_source_items() -> None:
+    """真正读了源码的报告能命中全部 6 项。"""
+
+    result = coverage_source(SOURCE_AWARE_REPORT)
+
+    assert result["matched_count"] == 6
+    assert result["missing"] == []
+
+
+def test_doc_only_report_barely_matches_source_items() -> None:
+    """只读文档的报告在源码级清单上应≤2 项（守住“源码题”的区分度）。"""
+
+    result = coverage_source(DOC_ONLY_REPORT)
+
+    assert result["matched_count"] <= 2

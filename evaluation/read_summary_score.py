@@ -1,10 +1,14 @@
-"""只读汇总实验的质量评分：12 项清单覆盖率 + 报告路径精确率。
+"""只读汇总实验的质量评分：文档级清单 + 源码级清单 + 路径精确率。
 
-清单在实验前就按 oncall 的 `MISSION.md` + `README.md` 定死，跑完只用脚本复算，
-不做人工调参。两个分数：
+两张清单都在实验前按 oncall 的文档与源码定死，跑完只用脚本复算：
 
-- **覆盖率**：12 项中命中的项数 ÷ 12；
+- **文档级覆盖率**（`CHECKLIST`，12 项）：读全文档的能力；
+- **源码级覆盖率**（`CHECKLIST_SOURCE`，6 项，主指标）：答案只在源码里的问题；
 - **精确率**：报告里提到的模块/文件路径中真实存在的比例（防幻觉）。
+
+出题纪律：`CHECKLIST_SOURCE` 的每个关键词都验证过**不在** `README.md` /
+`MISSION.md` / `WORK_DONE.md` / `CLAIM.md` / `docs/` / `openspec/` 里出现，
+否则它就是文档题而不是源码题。
 
 关键词匹配只是代理指标，不是语义理解——结论里必须标注这一点。
 """
@@ -99,21 +103,80 @@ def normalize(text: str) -> str:
     return re.sub(r"\s+", " ", text).lower()
 
 
+# 源码级清单（6 项，主指标）：关键词全部验证过只存在于源码里
+CHECKLIST_SOURCE: tuple[ChecklistItem, ...] = (
+    ChecklistItem(
+        "source_tokenize",
+        "BM25 那一路的中文分词：正则 token 规则 + 中文片段单独切",
+        ("_token_pattern", "_is_chinese_segment", "tokenize_hybrid_text"),
+        1,
+    ),
+    ChecklistItem(
+        "source_belief_threshold",
+        "信念压缩阈值：≥3 次观测且成功概率 ≥ 0.72",
+        ("0.72",),
+        1,
+    ),
+    ChecklistItem(
+        "source_memory_modes",
+        "会话记忆三档的字面枚举值",
+        ("every_30_turns", "context_70_percent"),
+        1,
+    ),
+    ChecklistItem(
+        "source_roles_layout",
+        "四角色在同一文件内（LangGraph 节点装配）而非四个文件",
+        ("add_node", "stategraph", "plan_origin"),
+        1,
+    ),
+    ChecklistItem(
+        "source_evidence_table",
+        "compressed_tool_evidence 表：工具证据压缩后落库",
+        (
+            "compressed_tool_evidence",
+            "add_compressed_tool_evidence",
+            "_compressed_tool_evidence_record",
+            "202607110012",
+        ),
+        # 题面会提到表名，因此要求 2 项命中：至少还要说出现源码才有的写入函数 / 迁移名
+        2,
+    ),
+    ChecklistItem(
+        "source_job_states",
+        "索引任务状态机的字面值",
+        ("queued", "running", "succeeded", "failed", "cancelled"),
+        3,
+    ),
+)
+
+
 def coverage(text: str) -> dict[str, object]:
-    """计算 12 项清单的覆盖率。"""
+    """计算文档级清单（12 项）的覆盖率。"""
+
+    return _coverage(text, CHECKLIST)
+
+
+def coverage_source(text: str) -> dict[str, object]:
+    """计算源码级清单（6 项）的覆盖率。"""
+
+    return _coverage(text, CHECKLIST_SOURCE)
+
+
+def _coverage(text: str, checklist: tuple[ChecklistItem, ...]) -> dict[str, object]:
+    """按给定清单计算覆盖率。"""
 
     normalized = normalize(text)
     matched: list[str] = []
     missing: list[str] = []
-    for item in CHECKLIST:
+    for item in checklist:
         hits = sum(1 for keyword in item.keywords if keyword in normalized)
         (matched if hits >= item.required_hits else missing).append(item.key)
     return {
         "matched": matched,
         "missing": missing,
         "matched_count": len(matched),
-        "total": len(CHECKLIST),
-        "rate": round(len(matched) / len(CHECKLIST), 4),
+        "total": len(checklist),
+        "rate": round(len(matched) / len(checklist), 4),
     }
 
 
@@ -167,9 +230,10 @@ def precision(text: str, workspace: Path) -> dict[str, object]:
 
 
 def score(text: str, workspace: Path) -> dict[str, object]:
-    """返回报告的质量评分（覆盖率 + 精确率）。"""
+    """返回报告的质量评分（文档级覆盖率 + 源码级覆盖率 + 精确率）。"""
 
     return {
         "coverage": coverage(text),
+        "coverage_source": coverage_source(text),
         "precision": precision(text, workspace),
     }
