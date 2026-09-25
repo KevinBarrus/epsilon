@@ -371,7 +371,7 @@ async def test_spawn_worker_parallel_reads_sequential_write_with_approval(tmp_pa
                 ),
             ),
         ),
-        "## Changes\n- result.txt\n## Verification\n- not run\n## Result\n- done",
+        "## CHANGED\n- result.txt\n## EVIDENCE\n- not run\n## BLOCKED\n- done",
     )
     events = []
 
@@ -402,7 +402,7 @@ async def test_spawn_worker_parallel_reads_sequential_write_with_approval(tmp_pa
     assert [batch.execution_mode for batch in child_batches] == ["parallel", "sequential"]
     assert len(child_batches[0].tool_calls) == 2
     assert [call.name for call in child_batches[1].tool_calls] == ["write_file"]
-    assert "result.txt" in result.content and "Verification" in result.content
+    assert "result.txt" in result.content and "EVIDENCE" in result.content
     assert any("修改文件" in message.content for message in client.requests[0])
 
 
@@ -448,7 +448,7 @@ async def test_isolated_workers_run_concurrently_and_merge(tmp_path: Path, confl
             elif self.requests == 2:
                 yield ToolCallEvent(ToolCall("verify", "run_command", {"command": "verify"}))
             else:
-                yield TextDelta("## Changes\n- file written\n## Verification\n- checked\n## Result\n- done")
+                yield TextDelta("## CHANGED\n- file written\n## EVIDENCE\n- checked\n## BLOCKED\n- none")
 
     class PathRecordingExecutor:
         async def execute(self, command, cwd, timeout_seconds):
@@ -607,7 +607,7 @@ async def test_scout_worker_and_reviewer_have_separate_initial_contexts(
 @pytest.mark.parametrize(
     ("role", "sections"),
     [
-        ("worker", ("Changes", "Verification", "Result")),
+        ("worker", ("CHANGED", "EVIDENCE", "BLOCKED")),
         ("reviewer", ("Passed", "Findings", "Evidence")),
     ],
 )

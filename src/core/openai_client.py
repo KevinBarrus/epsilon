@@ -43,6 +43,7 @@ class OpenAICompatibleClient:
 
         self._model_name = settings.model_name
         self._is_deepseek = _is_deepseek_endpoint(settings.base_url)
+        self._prompt_cache_key = settings.prompt_cache_key
         self._first_byte_timeout_seconds = settings.first_byte_timeout_seconds
         self._stream_idle_timeout_seconds = settings.stream_idle_timeout_seconds
         self._stream_usage = settings.stream_usage
@@ -102,6 +103,7 @@ class OpenAICompatibleClient:
         if tools:
             request["tools"] = list(tools)
         _apply_thinking_options(request, thinking_level, self._is_deepseek)
+        _apply_prompt_cache_key(request, self._prompt_cache_key, self._is_deepseek)
         if self._stream_usage:
             request["stream_options"] = {"include_usage": True}
 
@@ -183,6 +185,21 @@ def _apply_thinking_options(
             # 非标准字段必须通过 SDK 的 extra_body 透传
             request["extra_body"] = {"thinking": {"type": "enabled"}}
         request["reasoning_effort"] = thinking_level
+
+
+def _apply_prompt_cache_key(
+    request: dict[str, object],
+    cache_key: str | None,
+    is_deepseek: bool,
+) -> None:
+    """按 provider 能力透传提示缓存键。
+
+    DeepSeek 的前缀缓存是自动的、不接受这个参数；此时只要保证继承前缀
+    逐字节不变即可，因此不写入请求体。
+    """
+
+    if cache_key and not is_deepseek:
+        request["prompt_cache_key"] = cache_key
 
 
 def _reasoning_delta(delta: object) -> str | None:

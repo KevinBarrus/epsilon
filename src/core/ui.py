@@ -458,6 +458,7 @@ async def run_chat(
             thinking_provider,
             resolved_context_budget,
             loop_guard_config=loop_guard_config,
+            default_mode=settings.subagent_scout_mode,
         )
     )
     for create_role_tool in (create_spawn_worker_tool, create_spawn_reviewer_tool):
@@ -469,6 +470,11 @@ async def run_chat(
                 resolved_context_budget,
                 permission_manager=permission_manager,
                 loop_guard_config=loop_guard_config,
+                default_mode=(
+                    settings.subagent_worker_mode
+                    if create_role_tool is create_spawn_worker_tool
+                    else settings.subagent_reviewer_mode
+                ),
                 **(
                     {
                         "isolation_enabled": settings.isolation_enabled,

@@ -4,6 +4,7 @@ import asyncio
 import random
 from asyncio import sleep as yield_to_event_loop
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from time import perf_counter
 from typing import Literal
@@ -26,6 +27,19 @@ from .model import (
     UsageEvent,
 )
 from .tools import ToolManager
+
+# 父 Agent 当前上下文的只读快照，供子 Agent 的 fork 模式继承。
+# 用 ContextVar 而不是改 ToolHandler 签名；asyncio 在 create_task 时会复制它，
+# 因此子 Agent 的写入不会污染父 Agent。
+PARENT_CONTEXT: ContextVar[tuple[Message, ...] | None] = ContextVar(
+    "epsilon_parent_context", default=None
+)
+
+
+def parent_context_snapshot() -> tuple[Message, ...] | None:
+    """返回当前父 Agent 的上下文快照；不在工具执行期时返回 None。"""
+
+    return PARENT_CONTEXT.get()
 
 
 @dataclass(frozen=True)
@@ -331,6 +345,8 @@ class AgentLoop:
                     continue
 
                 tool_rounds += 1
+                # 工具执行期间暴露父上下文快照，供子 Agent 的 fork 模式继承
+                context_token = PARENT_CONTEXT.set(tuple(context))
                 try:
                     results, execution_mode, batch_duration_ms = (
                         await self._execute_tool_batch(
@@ -353,6 +369,8 @@ class AgentLoop:
                             )
                         )
                     raise
+                finally:
+                    PARENT_CONTEXT.reset(context_token)
                 for tool_call, result in zip(completed_tool_calls, results):
                     tool_message = _tool_result_message(
                         tool_call,

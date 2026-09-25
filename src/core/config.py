@@ -57,6 +57,12 @@ class Settings:
     # Worker 工作区隔离默认关闭；开启时要求当前目录是干净的 Git 检出。
     isolation_enabled: bool = False
     worker_max_concurrency: int = 4
+    # 提示缓存键：仅对支持该参数的 provider 透传（DeepSeek 前缀缓存自动，不写请求体）
+    prompt_cache_key: str | None = None
+    # 子 Agent 的默认上下文模式：scout/worker/reviewer 各自可配
+    subagent_scout_mode: str = "fresh"
+    subagent_worker_mode: str = "fork"
+    subagent_reviewer_mode: str = "fresh"
     # Agent 空转检测与纠偏：重复工具调用或长期无进展时注入系统提醒（默认开）
     loop_guard_enabled: bool = True
     loop_guard_thresholds: tuple[int, ...] = (3, 5, 8)
@@ -103,6 +109,13 @@ class Settings:
             raise ConfigError("loop_guard.thresholds must not be empty")
         if self.loop_guard_no_progress_rounds < 0:
             raise ConfigError("loop_guard.no_progress_rounds must be >= 0")
+        for name, mode in (
+            ("subagent.default_mode.scout", self.subagent_scout_mode),
+            ("subagent.default_mode.worker", self.subagent_worker_mode),
+            ("subagent.default_mode.reviewer", self.subagent_reviewer_mode),
+        ):
+            if mode not in _SPAWN_MODES:
+                raise ConfigError(f"{name} must be one of {_SPAWN_MODES}")
         object.__setattr__(self, "first_byte_timeout_seconds", first_byte_timeout)
         object.__setattr__(self, "stream_idle_timeout_seconds", stream_idle_timeout)
 
@@ -257,6 +270,14 @@ def _settings_from_data(data: dict) -> Settings:
         loop_guard_exempt_tools,
         loop_guard_no_progress_rounds,
     ) = _loop_guard_settings(data)
+    prompt_cache_key = _optional_str(
+        model.get("prompt_cache_key"), None, "model.prompt_cache_key"
+    )
+    (
+        subagent_scout_mode,
+        subagent_worker_mode,
+        subagent_reviewer_mode,
+    ) = _subagent_settings(data)
     price = _optional_model_price(model.get("price"))
     if context_window is not None and context_window <= 0:
         raise ConfigError("model.context_window must be > 0")
@@ -291,6 +312,10 @@ def _settings_from_data(data: dict) -> Settings:
         loop_guard_thresholds=loop_guard_thresholds,
         loop_guard_exempt_tools=loop_guard_exempt_tools,
         loop_guard_no_progress_rounds=loop_guard_no_progress_rounds,
+        prompt_cache_key=prompt_cache_key,
+        subagent_scout_mode=subagent_scout_mode,
+        subagent_worker_mode=subagent_worker_mode,
+        subagent_reviewer_mode=subagent_reviewer_mode,
     )
 
 
@@ -399,6 +424,16 @@ def _optional_str_tuple(
     return tuple(value)
 
 
+def _optional_str(value: object, default: str | None, name: str) -> str | None:
+    """读取可选字符串配置，未设置时使用默认值。"""
+
+    if value is None:
+        return default
+    if not isinstance(value, str):
+        raise ConfigError(f"{name} must be a string")
+    return value
+
+
 def _loop_guard_settings(
     data: dict,
 ) -> tuple[bool, tuple[int, ...], tuple[str, ...], int]:
@@ -419,6 +454,31 @@ def _loop_guard_settings(
             "loop_guard.no_progress_rounds",
         ),
     )
+
+
+# 子 Agent 上下文模式的合法取值；与 core.subagent.SPAWN_MODES 一致，有测试守住漂移
+_SPAWN_MODES = ("fresh", "fork", "fork_last_n")
+
+
+def _subagent_settings(data: dict) -> tuple[str, str, str]:
+    """读取可选的 subagent.default_mode 配置，返回按角色默认模式。"""
+
+    raw = data.get("subagent")
+    if raw is None:
+        return "fresh", "fork", "fresh"
+    if not isinstance(raw, dict):
+        raise ConfigError("subagent must be an object")
+    default_mode = raw.get("default_mode")
+    if default_mode is None:
+        return "fresh", "fork", "fresh"
+    if not isinstance(default_mode, dict):
+        raise ConfigError("subagent.default_mode must be an object")
+    scout = _optional_str(default_mode.get("scout"), "fresh", "subagent.default_mode.scout")
+    worker = _optional_str(default_mode.get("worker"), "fork", "subagent.default_mode.worker")
+    reviewer = _optional_str(
+        default_mode.get("reviewer"), "fresh", "subagent.default_mode.reviewer"
+    )
+    return scout or "fresh", worker or "fork", reviewer or "fresh"
 
 
 def _optional_mcp_stdio_settings(data: dict) -> McpStdioSettings | None:

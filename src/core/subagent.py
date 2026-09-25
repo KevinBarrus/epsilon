@@ -7,7 +7,12 @@ from pathlib import Path
 from time import perf_counter
 from typing import Literal
 
-from .agent_loop import AgentLoop, AgentLoopFailed, AgentRunResult
+from .agent_loop import (
+    AgentLoop,
+    AgentLoopFailed,
+    AgentRunResult,
+    parent_context_snapshot,
+)
 from .context import ContextBudget, ContextBuildResult
 from .context import ContextManager
 from .loop_guard import LoopGuardConfig
@@ -34,6 +39,15 @@ from .worktree import WorktreeError, commit_worktree, create_worktree, merge_bra
 
 SCOUT_MAX_CONCURRENCY = 3
 SCOUT_SUMMARY_MAX_CHARS = 6_000
+# 子 Agent 的上下文模式：fresh 空上下文；fork 继承父快照；fork_last_n 只继承最后 n 个 user 回合
+SpawnMode = Literal["fresh", "fork", "fork_last_n"]
+DEFAULT_FORK_TURNS = 4
+ROLE_DEFAULT_MODE: dict[str, SpawnMode] = {
+    "scout": "fresh",
+    "worker": "fork",
+    "reviewer": "fresh",
+}
+SPAWN_MODES: tuple[SpawnMode, ...] = ("fresh", "fork", "fork_last_n")
 SCOUT_SYSTEM_PROMPT = load_prompt("scout")
 SCOUT_PARENT_PROMPT = (
     "Scout delegation is enabled. Use spawn_agent for independent read-only "
@@ -51,6 +65,8 @@ SUBAGENT_PARENT_PROMPT = (
     "委派 spawn_reviewer 时，必须在 context 里转述 Worker 的实际改动内容"
     "（改了哪个函数、从什么改成什么）和验证命令，"
     "让 Reviewer 聚焦检查这些改动；不要让它盲目扫描整个工作区。"
+    "需要复用你已读到的项目结构或已冻结的接口时，把 spawn 的 mode 设为 fork"
+    "（继承你的上下文）；只是独立探索或独立验证时用 fresh（默认按角色）。"
 )
 WORKER_SYSTEM_PROMPT = load_prompt("worker")
 REVIEWER_SYSTEM_PROMPT = load_prompt("reviewer")
@@ -72,9 +88,50 @@ class SubagentRunMetrics:
     started_at: float = 0.0  # 子 Agent 运行开始，不含 worktree 准备
     finished_at: float = 0.0  # 子 Agent 运行结束，不含提交和合并
     loop_guard_injections: int = 0
+    mode: SpawnMode = "fresh"  # 本次子 Agent 的上下文模式
+    cache_hit_tokens: int = 0
+    prompt_tokens: int = 0
+
+    @property
+    def cache_hit_rate(self) -> float | None:
+        """返回本次子 Agent 的提示缓存命中率；没有 token 时为 None。"""
+
+        if self.prompt_tokens <= 0:
+            return None
+        return round(self.cache_hit_tokens / self.prompt_tokens, 4)
 
 
 ScoutRunMetrics = SubagentRunMetrics
+
+
+def changed_paths(summary: str) -> tuple[str, ...]:
+    """从子 Agent 摘要的 CHANGED 小节提取路径清单（去重保序）。"""
+
+    section = ROLE_SUMMARY_SECTIONS["worker"][0]
+    paths: dict[str, None] = {}
+    inside = False
+    for line in summary.splitlines():
+        stripped = line.strip()
+        if stripped in ROLE_SUMMARY_SECTIONS["worker"]:
+            inside = stripped == section
+            continue
+        if not inside:
+            continue
+        candidate = stripped.lstrip("-* ").strip().strip("`")
+        if candidate and candidate != MISSING_SECTION_PLACEHOLDER:
+            paths.setdefault(candidate, None)
+    return tuple(paths)
+
+
+def unverified_changed_paths(summary: str, workspace: Path) -> tuple[str, ...]:
+    """返回 CHANGED 里在工作区中不存在的路径，供父侧校验、防幻觉。"""
+
+    missing = []
+    for path in changed_paths(summary):
+        candidate = (workspace / path).resolve()
+        if not candidate.exists():
+            missing.append(path)
+    return tuple(missing)
 
 
 def scout_parent_message() -> Message:
@@ -89,6 +146,52 @@ def subagent_parent_message() -> Message:
     return Message(role="system", content=SUBAGENT_PARENT_PROMPT)
 
 
+def fork_history(snapshot: Sequence[Message], turns: int = 0) -> tuple[Message, ...]:
+    """从父上下文快照切出 fork 子 Agent 的初始历史。
+
+    - 去掉尾部尚未产生结果的 assistant 工具调用消息，避免把“半个回合”继承下去；
+    - `turns > 0` 时只保留最后 `turns` 个 user 回合，不足则退化为全量。
+    """
+
+    end = len(snapshot)
+    while end > 0:
+        last = snapshot[end - 1]
+        if last.role == "assistant" and last.tool_calls:
+            end -= 1
+            continue
+        break
+    history = list(snapshot[:end])
+    if turns > 0:
+        user_indices = [
+            index for index, message in enumerate(history) if message.role == "user"
+        ]
+        if len(user_indices) > turns:
+            history = history[user_indices[-turns] :]
+    return tuple(history)
+
+
+def resolve_mode(
+    mode_argument: object,
+    default_mode: SpawnMode,
+    force_mode: SpawnMode | None,
+) -> SpawnMode:
+    """确定本次 spawn 的上下文模式，配置优先于模型选择。"""
+
+    if force_mode is not None:
+        return force_mode
+    if isinstance(mode_argument, str) and mode_argument in SPAWN_MODES:
+        return mode_argument
+    return default_mode
+
+
+def resolve_turns(turns_argument: object) -> int:
+    """解析 fork_last_n 的回合数，非法值回落到默认值。"""
+
+    if isinstance(turns_argument, int) and not isinstance(turns_argument, bool) and turns_argument > 0:
+        return turns_argument
+    return DEFAULT_FORK_TURNS
+
+
 def create_spawn_agent_tool(
     workspace: Path,
     client_provider: Callable[[], ModelClient],
@@ -98,6 +201,8 @@ def create_spawn_agent_tool(
     timeout_seconds: float | None = None,
     on_event: Callable[[object], Awaitable[None]] | None = None,
     loop_guard_config: LoopGuardConfig | None = None,
+    default_mode: SpawnMode = "fresh",
+    force_mode: SpawnMode | None = None,
 ) -> tuple[ToolDefinition, ToolHandler]:
     """创建最多并行三个、只返回有界摘要的 Scout 工具。"""
 
@@ -122,6 +227,8 @@ def create_spawn_agent_tool(
         timeout_seconds=timeout_seconds,
         on_event=on_event,
         loop_guard_config=loop_guard_config,
+        default_mode=default_mode,
+        force_mode=force_mode,
     )
 
 
@@ -139,6 +246,8 @@ def create_spawn_worker_tool(
     on_metrics: Callable[[SubagentRunMetrics], None] | None = None,
     on_event: Callable[[object], Awaitable[None]] | None = None,
     loop_guard_config: LoopGuardConfig | None = None,
+    default_mode: SpawnMode = "fork",
+    force_mode: SpawnMode | None = None,
 ) -> tuple[ToolDefinition, ToolHandler]:
     """创建可修改代码、写操作仍需用户审批的串行 Worker 工具。"""
 
@@ -177,6 +286,8 @@ def create_spawn_worker_tool(
         worker_tools_factory=worker_tools,
         max_concurrency=max_concurrency,
         loop_guard_config=loop_guard_config,
+        default_mode=default_mode,
+        force_mode=force_mode,
     )
 
 
@@ -191,6 +302,8 @@ def create_spawn_reviewer_tool(
     on_metrics: Callable[[SubagentRunMetrics], None] | None = None,
     on_event: Callable[[object], Awaitable[None]] | None = None,
     loop_guard_config: LoopGuardConfig | None = None,
+    default_mode: SpawnMode = "fresh",
+    force_mode: SpawnMode | None = None,
 ) -> tuple[ToolDefinition, ToolHandler]:
     """创建只读审查工具；Reviewer 执行命令仍要经过用户审批。"""
 
@@ -215,6 +328,8 @@ def create_spawn_reviewer_tool(
         on_metrics=on_metrics,
         on_event=on_event,
         loop_guard_config=loop_guard_config,
+        default_mode=default_mode,
+        force_mode=force_mode,
     )
 
 
@@ -238,6 +353,8 @@ def _create_spawn_role_tool(
     worker_tools_factory: Callable[[Path], Sequence[tuple[ToolDefinition, ToolHandler]]] | None = None,
     max_concurrency: int = 4,
     loop_guard_config: LoopGuardConfig | None = None,
+    default_mode: SpawnMode = "fresh",
+    force_mode: SpawnMode | None = None,
 ) -> tuple[ToolDefinition, ToolHandler]:
     """按角色组装独立 Agent；子工具集不包含任何 spawn 工具。"""
 
@@ -252,6 +369,8 @@ def _create_spawn_role_tool(
         context = tool_call.arguments.get("context", "")
         if not isinstance(context, str):
             raise ValueError("context must be a string")
+        mode = resolve_mode(tool_call.arguments.get("mode"), default_mode, force_mode)
+        turns = resolve_turns(tool_call.arguments.get("turns"))
         async with semaphore:
             started_at = perf_counter()
             usages: list[UsageEvent] = []
@@ -260,11 +379,16 @@ def _create_spawn_role_tool(
             branch: str | None = None
             merge_status: str | None = None
             loop_guard_injections = 0
+            history: tuple[Message, ...] = ()
             worktree_path: Path | None = None
             scout_task: asyncio.Task[AgentRunResult] | None = None
             run_started_at = 0.0
             run_finished_at = 0.0
             try:
+                if mode != "fresh":
+                    # fork：继承父上下文快照；fork_last_n 再按 user 回合截断
+                    snapshot = parent_context_snapshot() or ()
+                    history = fork_history(snapshot, turns if mode == "fork_last_n" else 0)
                 run_workspace = workspace
                 run_tools = tools
                 if role == "worker" and isolation_enabled:
@@ -289,6 +413,7 @@ def _create_spawn_role_tool(
                         on_event,
                         loop_guard_config,
                         tool_call.call_id,
+                        history,
                     )
                 )
                 run_started_at = perf_counter()
@@ -388,6 +513,9 @@ def _create_spawn_role_tool(
                             run_started_at,
                             run_finished_at,
                             loop_guard_injections,
+                            mode,
+                            sum((usage.cached_tokens or 0) for usage in usages),
+                            sum(usage.prompt_tokens for usage in usages),
                         )
                     )
 
@@ -400,6 +528,19 @@ def _create_spawn_role_tool(
                 "properties": {
                     "task": {"type": "string"},
                     "context": {"type": "string"},
+                    "mode": {
+                        "type": "string",
+                        "enum": list(SPAWN_MODES),
+                        "description": (
+                            "上下文模式。fresh = 空上下文（默认，适合独立探索或独立验证）；"
+                            "fork = 继承你的完整上下文（适合需要复用你已读到的项目结构、"
+                            "已冻结的接口的任务）；fork_last_n = 只继承最后若干回合。"
+                        ),
+                    },
+                    "turns": {
+                        "type": "integer",
+                        "description": "fork_last_n 继承的最后 user 回合数，默认 4。",
+                    },
                 },
                 "required": ["task"],
             },
@@ -429,6 +570,7 @@ async def _run_subagent(
     on_event: Callable[[object], Awaitable[None]] | None,
     loop_guard_config: LoopGuardConfig | None = None,
     run_id: str = "",
+    history: Sequence[Message] = (),
 ) -> AgentRunResult:
     """用独立上下文和当前角色限定的工具运行一次子 Agent。"""
 
@@ -499,6 +641,7 @@ async def _run_subagent(
         run_id=run_id,
     ).run(
         [
+            *history,
             Message(
                 role="user",
                 content=(
@@ -506,28 +649,62 @@ async def _run_subagent(
                     if context
                     else task
                 ),
-            )
+            ),
         ],
         on_event=collect_usage,
         build_context=build_context,
     )
 
 
+# 子 Agent 摘要的固定小节：父 Agent 只接受可核对的证据，而不是散文
+ROLE_SUMMARY_SECTIONS: dict[str, tuple[str, ...]] = {
+    "worker": ("## CHANGED", "## EVIDENCE", "## BLOCKED"),
+    "reviewer": ("## Passed", "## Findings", "## Evidence"),
+}
+MISSING_SECTION_PLACEHOLDER = "（未提供）"
+
+
+def _structured_summary(content: str, headings: tuple[str, ...]) -> str:
+    """把子 Agent 摘要规范成固定小节；缺失的小节补占位，父 Agent 不会丢证据。"""
+
+    sections: dict[str, list[str]] = {heading: [] for heading in headings}
+    preamble: list[str] = []
+    current: str | None = None
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped in headings:
+            current = stripped
+            continue
+        (preamble if current is None else sections[current]).append(line)
+
+    lines = [line for line in preamble if line.strip()]
+    for heading in headings:
+        lines.append(heading)
+        body = [line for line in sections[heading] if line.strip()]
+        lines.extend(body or [MISSING_SECTION_PLACEHOLDER])
+    return "\n".join(lines)
+
+
 def _limit_summary(
     content: str,
     role: Literal["scout", "worker", "reviewer"] = "scout",
 ) -> str:
-    """限制摘要长度，超限时优先保留关键证据和结论分节。"""
+    """把子 Agent 摘要规范成固定小节，并在超限时优先保留必需分节。"""
+
+    if role == "scout":
+        return _limit_scout_summary(content)
+    headings = ROLE_SUMMARY_SECTIONS[role]
+    normalized = _structured_summary(content, headings)
+    if len(normalized) <= SCOUT_SUMMARY_MAX_CHARS:
+        return normalized
+    return _limit_required_sections(normalized, headings)
+
+
+def _limit_scout_summary(content: str) -> str:
+    """限制 Scout 摘要长度，超限时优先保留关键证据和结论分节。"""
 
     if len(content) <= SCOUT_SUMMARY_MAX_CHARS:
         return content
-    if role != "scout":
-        headings = {
-            "worker": ("## Changes", "## Verification", "## Result"),
-            "reviewer": ("## Passed", "## Findings", "## Evidence"),
-        }[role]
-        return _limit_required_sections(content, headings)
-
     headings = ("## Files Read", "## Key Evidence", "## Conclusion")
     sections: dict[str, str] = {}
     current: str | None = None
