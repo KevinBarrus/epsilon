@@ -1,5 +1,6 @@
 """完成门 v2 的证据包与脚本化检查器测试。"""
 
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -346,3 +347,301 @@ def test_gate_feedback_does_not_leak_hidden_checklist() -> None:
 
     leaked = sorted(k for k in keywords if k.lower() in feedback)
     assert leaked == [], f"门反馈泄露了隐藏清单关键词：{leaked}"
+
+
+# ===================== v3：子系统问题模板与标识符存在性核验 =====================
+
+from core.completion_evidence import (  # noqa: E402
+    QUESTION_TYPES,
+    CorpusIndex,
+    classify_identifier,
+    subsystem_checks,
+    subsystem_criteria_text,
+    validate_checks,
+)
+
+# 语料里的真实标识符：常量 / 类型 / 函数各一（刻意用不同类别，便于测"类别不全"）
+CORPUS = """
+pub const MAX_STDOUT_BYTES: usize = 1024;
+pub const MAX_STDERR_BYTES: usize = 1024;
+pub struct LineReader { limit: usize }
+pub struct FrameCodec { codec: u8 }
+pub fn read_line(input: &str) -> usize { 0 }
+pub fn decode_frame(bytes: &[u8]) -> usize { 0 }
+"""
+
+
+def _corpus(tmp_path: Path) -> Path:
+    """搭一个有真实标识符的小语料。"""
+
+    src = tmp_path / "src"
+    src.mkdir(exist_ok=True)
+    (src / "lib.rs").write_text(CORPUS, encoding="utf-8")
+    return tmp_path
+
+
+def _report(tmp_path: Path, sections: dict[str, str], name: str = "report.md") -> Path:
+    """写一份报告；sections 是"小节名 → 正文"。"""
+
+    text = "".join(f"# {title}\n{body}\n\n" for title, body in sections.items())
+    (tmp_path / name).write_text(text, encoding="utf-8")
+    return tmp_path / name
+
+
+def _full_body(idents: Sequence[str], paths: str = "src/lib.rs") -> str:
+    """一段同时回答 5 类问题、且每类都引用了代码级证据的正文。"""
+
+    function, type_name, constant = idents
+    return (
+        f"职责：负责解析，入口是 `{function}`。\n\n"
+        f"交互：被 `{paths}` 里的调用方使用。\n\n"
+        f"关键数据结构：核心类型 `{type_name}`。\n\n"
+        f"关键参数：上限常量 `{constant}`。\n\n"
+        f"失败模式：出错时 `{function}` 报错并降级。\n"
+    )
+
+
+def test_identifiers_per_section_passes_on_real_identifiers(tmp_path: Path) -> None:
+    """正例：每节引用真实存在的常量/类型/函数 → PASS。"""
+
+    workspace = _corpus(tmp_path)
+    _report(
+        workspace,
+        {
+            "protocol": _full_body(["decode_frame", "FrameCodec", "MAX_STDOUT_BYTES"]),
+            "config": _full_body(["read_line", "LineReader", "MAX_STDERR_BYTES"]),
+        },
+    )
+
+    results = run_checks(
+        [
+            {
+                "kind": "identifiers_per_section",
+                "path": "report.md",
+                "sections": ["protocol", "config"],
+                "min_identifiers": 3,
+            }
+        ],
+        workspace,
+    )
+
+    assert results[0].passed, results[0].detail
+
+
+def test_identifiers_per_section_fails_on_fabricated_identifiers(tmp_path: Path) -> None:
+    """反例：编造标识符 → FAIL（存在性核验是这一版的命门）。"""
+
+    workspace = _corpus(tmp_path)
+    _report(
+        workspace,
+        {
+            "protocol": _full_body(["FAKE_FN", "FakeType", "FAKE_CONST"]),
+            "config": _full_body(["made_up", "GhostStruct", "NOT_REAL_CONST"]),
+        },
+    )
+
+    results = run_checks(
+        [
+            {
+                "kind": "identifiers_per_section",
+                "path": "report.md",
+                "sections": ["protocol", "config"],
+                "min_identifiers": 3,
+            }
+        ],
+        workspace,
+    )
+
+    assert not results[0].passed
+    assert "不足" in results[0].detail
+
+
+def test_identifier_deliverable_and_written_files_are_excluded(tmp_path: Path) -> None:
+    """交付物与本次被写过的文件不算"语料"：自己写的名字不能自动算存在。"""
+
+    workspace = _corpus(tmp_path)
+    # 报告里内联定义了一个标识符，又引用它——如果不排除交付物，这就是自证
+    (workspace / "report.md").write_text(
+        "# protocol\n`INVENTED_HERE` 与 `src/lib.rs`\n", encoding="utf-8"
+    )
+    index = CorpusIndex(workspace, exclude=["report.md"])
+
+    assert index.contains("MAX_STDOUT_BYTES")
+    assert not index.contains("INVENTED_HERE")
+
+
+def test_identifiers_per_section_dedups_across_sections(tmp_path: Path) -> None:
+    """同一标识符跨节不重复计数：第二节全用第一节用过的 → 该节判不足。"""
+
+    workspace = _corpus(tmp_path)
+    body = "职责：`decode_frame`、`FrameCodec`、`MAX_STDOUT_BYTES` 都在 `src/lib.rs`。\n"
+    _report(workspace, {"protocol": body, "config": body})
+
+    results = run_checks(
+        [
+            {
+                "kind": "identifiers_per_section",
+                "path": "report.md",
+                "sections": ["protocol", "config"],
+                "min_identifiers": 3,
+            }
+        ],
+        workspace,
+    )
+
+    assert not results[0].passed
+    assert "config(0/3" in results[0].detail
+
+
+def test_identifiers_per_section_requires_all_categories(tmp_path: Path) -> None:
+    """类别不全（只有常量、没有类型/函数）→ FAIL，防止"抄一堆常量"刷分。"""
+
+    workspace = _corpus(tmp_path)
+    body = "职责：`MAX_STDOUT_BYTES`、`MAX_STDERR_BYTES` 与 `src/lib.rs`。\n"
+    _report(workspace, {"protocol": body, "config": body.replace("protocol", "config")})
+
+    results = run_checks(
+        [
+            {
+                "kind": "identifiers_per_section",
+                "path": "report.md",
+                "sections": ["protocol", "config"],
+                "min_identifiers": 2,
+            }
+        ],
+        workspace,
+    )
+
+    assert not results[0].passed
+    assert "缺类别" in results[0].detail
+
+
+def test_identifiers_per_section_is_bounded_and_marks_unverified(tmp_path: Path) -> None:
+    """有界性：核验次数超上限 → unverified（既不算通过、也不算普通失败）。"""
+
+    workspace = _corpus(tmp_path)
+    many = " ".join(f"`ident_{i}`" for i in range(10))
+    _report(workspace, {"protocol": f"职责：{many} 与 `src/lib.rs`。\n"})
+
+    results = run_checks(
+        [
+            {
+                "kind": "identifiers_per_section",
+                "path": "report.md",
+                "sections": ["protocol"],
+                "max_lookups": 3,
+            }
+        ],
+        workspace,
+    )
+
+    assert results[0].unverified
+    assert not results[0].passed
+    assert results[0].status == "unverified"
+    assert "上限" in results[0].detail
+
+
+def test_question_types_per_section_requires_all_five(tmp_path: Path) -> None:
+    """5 类问题缺任一 → FAIL；补全后 PASS。"""
+
+    workspace = _corpus(tmp_path)
+    complete = _full_body(["decode_frame", "FrameCodec", "MAX_STDOUT_BYTES"])
+    # 整段删掉"失败模式"（只改标题没用：那段的"报错/降级"仍会命中关键词）
+    without_failure = "\n\n".join(
+        part for part in complete.split("\n\n") if "失败模式" not in part
+    )
+    _report(workspace, {"protocol": without_failure})
+
+    results = run_checks(
+        [{"kind": "question_types_per_section", "path": "report.md", "sections": ["protocol"]}],
+        workspace,
+    )
+    assert not results[0].passed
+    assert "失败模式" in results[0].detail
+
+    _report(
+        workspace,
+        {"protocol": _full_body(["decode_frame", "FrameCodec", "MAX_STDOUT_BYTES"])},
+    )
+    results = run_checks(
+        [{"kind": "question_types_per_section", "path": "report.md", "sections": ["protocol"]}],
+        workspace,
+    )
+    assert results[0].passed, results[0].detail
+
+
+def test_question_types_need_code_citation_not_just_keywords(tmp_path: Path) -> None:
+    """只堆关键词、不引代码证据 → 不算回答了该类问题。"""
+
+    workspace = _corpus(tmp_path)
+    _report(
+        workspace,
+        {"protocol": "职责：负责解析。\n\n交互：与别人交互。\n\n关键数据结构：有数据结构。\n\n关键参数：有参数。\n\n失败模式：会失败。\n"},
+    )
+
+    results = run_checks(
+        [{"kind": "question_types_per_section", "path": "report.md", "sections": ["protocol"]}],
+        workspace,
+    )
+
+    assert not results[0].passed
+    assert len(QUESTION_TYPES) == 5
+
+
+def test_validate_checks_rejects_unknown_kind_and_missing_params() -> None:
+    """设置期校验：未知检查器 / 缺参数 → 直接报错，不许静默跳过。"""
+
+    with pytest.raises(ValueError, match="不支持的检查器"):
+        validate_checks([{"kind": "no_such_checker"}])
+    with pytest.raises(ValueError, match="缺少必填参数"):
+        validate_checks([{"kind": "sections_cover", "path": "report.md"}])
+    with pytest.raises(ValueError, match="必须是列表"):
+        validate_checks([{"kind": "sections_cover", "path": "report.md", "sections": "protocol"}])
+    validate_checks(subsystem_checks(["protocol", "config"], "report.md"))
+
+
+def test_templated_criteria_leaks_no_hidden_checklist_items() -> None:
+    """模板生成的 criteria 只规定"问哪几类问题"，不得泄露任何隐藏清单事实。"""
+
+    from evaluation.big_repo_read_score import SUBSYSTEM_CHECKLIST
+    from evaluation.read_summary_score import CHECKLIST
+
+    text = subsystem_criteria_text(["protocol", "config", "mcp"], "report.md")
+    hidden = [item.key for item in CHECKLIST] + [
+        item.key for group in SUBSYSTEM_CHECKLIST.values() for item in group
+    ]
+
+    assert hidden
+    for key in hidden:
+        assert key not in text
+
+
+def test_template_covers_all_of_its_own_criteria_lines() -> None:
+    """模板生成的 criteria 每一行都必须被某条脚本检查覆盖。
+
+    否则那一行会被当成"无脚本证据"而只能判 inconclusive——
+    等于把**已经能脚本证明**的条目误判成"没法验证"（真机踩过：
+    报告 5 项检查全过，却因为「职责/交互/…」五行被判 inconclusive 而无法通过）。
+    """
+
+    from core.completion_evidence import CheckResult, uncovered_criteria
+
+    specs = subsystem_checks(["protocol", "config", "mcp"], "report.md")
+    criteria = subsystem_criteria_text(["protocol", "config", "mcp"], "report.md")
+    results = tuple(CheckResult(str(spec["kind"]), True, "") for spec in specs)
+
+    assert uncovered_criteria(criteria, specs, results) == ()
+
+
+def test_unverified_check_criterion_falls_back_to_uncovered() -> None:
+    """检查没核验完（unverified）时，它覆盖的条目必须重新变成"无证据"。"""
+
+    from core.completion_evidence import CheckResult, uncovered_criteria
+
+    specs = [{"kind": "identifiers_per_section", "covers": "真实存在的标识符"}]
+    criteria = "每节必须写出真实存在的标识符"
+    verified = (CheckResult("identifiers_per_section", True, ""),)
+    unverified = (CheckResult("identifiers_per_section", False, "", unverified=True),)
+
+    assert uncovered_criteria(criteria, specs, verified) == ()
+    assert uncovered_criteria(criteria, specs, unverified) == ("每节必须写出真实存在的标识符",)

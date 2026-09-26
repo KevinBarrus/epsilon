@@ -448,10 +448,9 @@ async def run(
             ),
             ledger,
         )
-        try:
-            return await judge_completion(verifier_client, brief)
-        except TokenBudgetReached:
-            return "VERDICT: inconclusive\nUNMET: 验证器 token 预算耗尽"
+        # 预算耗尽属于**验证器故障**：不伪造成 "inconclusive" 判定文本，
+        # 让异常冒到 GoalPolicy，由它记成 verifier_error（否则就是误归因给模型）
+        return await judge_completion(verifier_client, brief)
 
     policy = GoalPolicy(
         goal,

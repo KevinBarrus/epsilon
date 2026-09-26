@@ -125,10 +125,8 @@ async def run(output_root: Path) -> dict[str, object]:
             ),
             ledger,
         )
-        try:
-            return await judge_completion(verifier_client, brief)
-        except TokenBudgetReached:
-            return "VERDICT: inconclusive\nUNMET: 验证器 token 预算耗尽"
+        # 预算耗尽是验证器故障，异常冒到 GoalPolicy 记为 verifier_error
+        return await judge_completion(verifier_client, brief)
 
     policy = GoalPolicy(
         goal,

@@ -148,7 +148,7 @@ async def test_verifier_error_is_rejected_fail_closed() -> None:
 
 @pytest.mark.asyncio
 async def test_verifier_timeout_is_rejected() -> None:
-    """验证器超时 → 拒绝、reason=inconclusive（证据不足，不是验证器坏了）、计数 +1。"""
+    """验证器超时 → 拒绝，但 reason 必须是 verifier_error（验证器故障，不是证据不足）。"""
 
     async def slow(brief: str) -> str:
         await asyncio.sleep(5)
@@ -158,7 +158,29 @@ async def test_verifier_timeout_is_rejected() -> None:
     outcome = await _complete(policy)
 
     assert not outcome.accepted
-    assert outcome.reason == "inconclusive"
+    assert outcome.reason == "verifier_error"
+
+
+@pytest.mark.asyncio
+async def test_verifier_budget_error_is_recorded_as_verifier_error() -> None:
+    """验证器抛预算类错误 → verifier_error。
+
+    v1 把验证器故障全记成 inconclusive，等于把实现缺陷归咎于模型没做完——
+    这条回归测试就是防止再次误归因。
+    """
+
+    class BudgetError(RuntimeError):
+        """模拟 BudgetedClient 的 TokenBudgetReached。"""
+
+    async def broke(brief: str) -> str:
+        raise BudgetError("token budget exhausted")
+
+    policy = _policy(verifier=broke, max_rejections=5)
+    outcome = await _complete(policy)
+
+    assert not outcome.accepted
+    assert outcome.reason == "verifier_error"
+    assert "BudgetError" in outcome.message
 
 
 # --- 6. 拒绝上限 -----------------------------------------------------------
@@ -345,3 +367,37 @@ def test_check_verdict_shape() -> None:
     """CheckVerdict 的三值就是 met / not_met / inconclusive。"""
 
     assert CheckVerdict.__args__ == ("met", "not_met", "inconclusive")
+
+
+# --- 11. UNMET 解析：把验证器真实用过的三种格式都锁住 ----------------------
+
+
+def test_parse_verdict_multiline_bullets_after_marker() -> None:
+    """marker 在行尾、条目在后续行——真实验证器就是这么写的（曾经解析成全空）。"""
+
+    verdict = parse_verdict(
+        "VERDICT: not_met UNMET:\n"
+        "- 缺 A 小节\n"
+        "- 缺 B 小节\n"
+        "- 路径编造\n"
+    )
+
+    assert verdict.outcome == "not_met"
+    assert verdict.unmet == ("缺 A 小节", "缺 B 小节", "路径编造")
+
+
+def test_parse_verdict_standalone_unmet_section() -> None:
+    """marker 单独成行、条目在后续行。"""
+
+    verdict = parse_verdict("VERDICT: not_met\nUNMET:\n- 缺 A\n- 缺 B\n")
+
+    assert verdict.outcome == "not_met"
+    assert verdict.unmet == ("缺 A", "缺 B")
+
+
+def test_parse_verdict_ignores_trailing_prose_after_items() -> None:
+    """条目后面的普通说明不当作未满足项。"""
+
+    verdict = parse_verdict("VERDICT: not_met\nUNMET:\n- 缺 A\n请继续推进。\n")
+
+    assert verdict.unmet == ("缺 A",)

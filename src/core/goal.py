@@ -14,10 +14,13 @@ from time import monotonic
 from typing import Literal
 
 from .completion_evidence import (
+    CheckResult,
     EvidenceBundle,
     extract_changes,
     recent_tail,
     run_checks,
+    uncovered_criteria,
+    validate_checks,
 )
 from .end_policy import EndPolicySummary
 from .model import Message, ToolCall, ToolResult, UsageEvent, UsageLedger
@@ -117,26 +120,51 @@ def verifier_task(goal: "Goal") -> str:
 
 
 def parse_verdict(text: str) -> Verdict:
-    """解析验证器输出；解析不出来一律按 inconclusive 处理（绝不放行）。"""
+    """解析验证器输出；解析不出来一律按 inconclusive 处理（绝不放行）。
+
+    验证器的真实写法有三种，都要接得住：
+    ① `VERDICT: not_met UNMET: - 缺 A - 缺 B`（同一行）；
+    ② `VERDICT: not_met UNMET:` 换行后跟多条 `- 缺 A`（**marker 在行尾、条目在后续行**）；
+    ③ `UNMET:` 单独成行后跟条目。
+    第 ② 种曾经被解析成空清单（只在含 marker 的那一行里找条目），真机踩过。
+    """
 
     outcome: CheckVerdict = "inconclusive"
     unmet: list[str] = []
+    in_unmet_section = False
     for line in text.splitlines():
         stripped = line.strip().strip("`")
-        upper = stripped.upper()
-        if upper.startswith("VERDICT:"):
+        if not stripped:
+            continue
+        if stripped.upper().startswith("VERDICT:"):
             value = stripped.split(":", 1)[1].strip().lower().replace("-", "_")
             for token in value.replace(",", " ").split():
                 if token in {"met", "not_met", "inconclusive"}:
                     outcome = token
                     break
-        # UNMET 可能独立成行，也可能跟在 VERDICT 同一行：统一按标记切分
-        for chunk in re.split(r"(?i)unmet\s*:", stripped)[1:]:
-            # 同一行里可能有多个 "- xxx" 条目，先按破折号切开
-            for item in re.sub(r"\s+[-*]\s+", "\n- ", chunk).splitlines():
-                item = item.strip().lstrip("-* ").strip().rstrip("；;")
-                if item and item.lower() not in _NO_UNMET:
-                    unmet.append(item)
+        # marker 之后同一行也可能有内容，统一按「先切 marker，再切破折号」处理
+        pieces = re.split(r"(?i)unmet\s*[：:]", stripped)
+        if len(pieces) > 1:
+            in_unmet_section = True
+            remainder = pieces[1]
+            is_marker_line = True
+        elif in_unmet_section:
+            remainder = stripped
+            is_marker_line = False
+            # 列表结束（后面是普通说明文字）就停止收集
+            if not re.match(r"[-*•]|\d+[.、)]", stripped):
+                in_unmet_section = False
+                continue
+        else:
+            continue
+        for raw_item in re.split(r"\s+[-*•]\s+|\n", remainder):
+            item = raw_item.strip().lstrip("-*• ").strip().rstrip("；;")
+            # 非 marker 行必须本身是列表项，否则视为列表已结束
+            if not is_marker_line and item and not re.match(r"[-*•]|\d+[.、)]", raw_item.strip()):
+                in_unmet_section = False
+                break
+            if item and item.lower() not in _NO_UNMET:
+                unmet.append(item)
     if outcome == "met":
         return Verdict("met", ())
     return Verdict(outcome, tuple(unmet))
@@ -223,10 +251,12 @@ class GoalPolicy:
         # 完成门：配置了验证器才启用（否则保持旧的自我声明语义）
         self._verifier = verifier
         self._checks = tuple(checks or ())
+        validate_checks(self._checks)  # 设置期就暴露拼错的检查器，不留到运行期
         self._workspace = workspace
         self._changes: list[str] = []
         self._commands: list[str] = []
         self._claim = ""
+        self._last_check_results: tuple[CheckResult, ...] = ()
         self._max_rejections = max(0, max_rejections)
         self._verifier_timeout_seconds = verifier_timeout_seconds
         self._no_tool_nudge_rounds = no_tool_nudge_rounds
@@ -382,6 +412,7 @@ class GoalPolicy:
             if self._workspace is not None and self._checks
             else ()
         )
+        self._last_check_results = checks
         tail: tuple[str, ...] = ()
         try:  # 复用 AgentLoop 在工具执行期写入的上下文快照，不改任何签名
             from .agent_loop import parent_context_snapshot
@@ -403,21 +434,19 @@ class GoalPolicy:
         ).render()
 
     def _unscripted_criteria(self) -> tuple[str, ...]:
-        """找出没有脚本证据的验收条目——它们只能被判 inconclusive。"""
+        """找出**没有取得脚本证据**的验收条目（它们只能被判 inconclusive）。"""
 
-        lines = [line.strip("- \t") for line in verifier_brief(self.goal).splitlines()]
-        lines = [line for line in lines if line]
-        if not self._checks:
-            return tuple(lines)
-        covered = [
-            str(spec.get("covers", "")) for spec in self._checks if spec.get("covers")
-        ]
-        return tuple(
-            line for line in lines if not any(marker in line for marker in covered)
+        return uncovered_criteria(
+            verifier_brief(self.goal), self._checks, self._last_check_results
         )
 
     async def _run_verifier(self, brief: str) -> tuple[Verdict, RejectionReason | None, str]:
-        """跑一次独立验证；超时按 inconclusive、抛错按 verifier_error。"""
+        """跑一次独立验证。
+
+        **故障与证据不足必须分开记**：预算耗尽 / 超时 / 连接报错都是**验证器自己的故障**，
+        记 `verifier_error`；只有"验证器正常跑完但证据不足"才是 `inconclusive`。
+        （v1 把验证器故障全记成 inconclusive，等于把实现缺陷归咎于模型没做完。）
+        """
 
         assert self._verifier is not None
         try:
@@ -425,7 +454,11 @@ class GoalPolicy:
                 self._verifier(verifier_prompt(brief)), self._verifier_timeout_seconds
             )
         except (TimeoutError, asyncio.TimeoutError):
-            return Verdict("inconclusive"), "inconclusive", "验证器超时，未能取得证据"
+            return (
+                Verdict("inconclusive"),
+                "verifier_error",
+                f"验证器超时（{self._verifier_timeout_seconds}s），未取得任何证据",
+            )
         except Exception as exc:  # noqa: BLE001 - 验证器不可用一律 fail-closed
             return Verdict("inconclusive"), "verifier_error", f"验证器不可用：{type(exc).__name__}"
         verdict = parse_verdict(raw)

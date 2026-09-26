@@ -22,6 +22,7 @@ from pathlib import Path
 
 from .big_repo_read_compare import EXCLUDED_DIRS, MAX_FILE_BYTES, repository_hash
 from .big_repo_read_score import coverage_for_subsystems
+from core.completion_evidence import subsystem_checks, subsystem_criteria_text
 from .read_summary_compare import is_test_code, run as _run
 
 SOURCE = Path("/home/kevinbarrus/projects/codex")
@@ -43,31 +44,15 @@ TASK = (
 DELEGATION_SENTENCE = (
     " 请把三个子系统的阅读工作拆给若干只读子 Agent 并行完成，再由你汇总成报告。"
 )
-# 子集实验允许点名子系统（它们就是任务给定的范围）
-ACCEPTANCE_CRITERIA = (
-    f"{REPORT_NAME} 必须包含三个小节，分别对应 protocol、config、mcp；\n"
-    "每个小节必须至少给出 2 个真实存在的代码文件路径；\n"
-    "报告中提到的文件路径必须真实存在，不得编造。"
+# v3：criteria 不列"要哪些事实"，只规定"每个子系统必须回答哪几类问题"——
+# 这样既不泄露隐藏清单，又逼模型真去读代码（要举出真实标识符只能读）。
+MIN_IDENTIFIERS = 3
+MIN_PATHS = 2
+ACCEPTANCE_CRITERIA = subsystem_criteria_text(
+    SUBSET_GROUPS, REPORT_NAME, min_identifiers=MIN_IDENTIFIERS, min_paths=MIN_PATHS
 )
-ACCEPTANCE_CHECKS: tuple[dict[str, object], ...] = (
-    {
-        "kind": "sections_cover",
-        "path": REPORT_NAME,
-        "sections": ["protocol", "config", "mcp"],
-        "covers": "必须包含三个小节",
-    },
-    {
-        "kind": "paths_per_section",
-        "path": REPORT_NAME,
-        "sections": ["protocol", "config", "mcp"],
-        "min_paths": 2,
-        "covers": "至少给出 2 个",
-    },
-    {
-        "kind": "mentioned_paths_exist",
-        "path": REPORT_NAME,
-        "covers": "必须真实存在",
-    },
+ACCEPTANCE_CHECKS: tuple[dict[str, object], ...] = subsystem_checks(
+    SUBSET_GROUPS, REPORT_NAME, min_identifiers=MIN_IDENTIFIERS, min_paths=MIN_PATHS
 )
 _ARM_SENTENCE = {"fanout_fresh": DELEGATION_SENTENCE}
 DEFAULT_SCOUT_MODE: dict[str, str | None] = {

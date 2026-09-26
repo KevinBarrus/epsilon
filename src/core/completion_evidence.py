@@ -53,11 +53,24 @@ def _clip(text: str, limit: int) -> str:
 
 @dataclass(frozen=True)
 class CheckResult:
-    """一条脚本化检查的结果。"""
+    """一条脚本化检查的结果。
+
+    三态：`passed` / `failed` / `unverified`。第三态用于"核验没能做完"（例如核验次数超上限），
+    它**既不算通过也不算失败**——必须让上层按"未取得证据"处理，不能静默通过。
+    """
 
     kind: str
     passed: bool
     detail: str = ""
+    unverified: bool = False
+
+    @property
+    def status(self) -> str:
+        """三态之一：passed / failed / unverified。"""
+
+        if self.unverified:
+            return "unverified"
+        return "passed" if self.passed else "failed"
 
 
 @dataclass(frozen=True)
@@ -85,7 +98,7 @@ class EvidenceBundle:
             ("验收标准（完成前必须满足）", _clip(self.criteria, MAX_CRITERIA_CHARS)),
         ]
         if self.checks:
-            lines = [f"[{'PASS' if r.passed else 'FAIL'}] {r.kind}: {r.detail}" for r in self.checks]
+            lines = [f"[{r.status.upper()}] {r.kind}: {r.detail}" for r in self.checks]
             sections.append(("脚本化检查结果（宿主执行）", _clip("\n".join(lines), MAX_CHECK_CHARS)))
         if self.unscripted:
             sections.append(
@@ -285,6 +298,87 @@ def run_checks(
                         f"exit={completed.returncode} {_clip(command, 120)}",
                     )
                 )
+        elif kind == "identifiers_per_section":
+            # v3 命门：每节必须举出**在代码里真实存在**的标识符（常量/类型/函数名）。
+            # 要凑齐这三类且都被核验存在，只能真去读那部分代码。
+            name = str(spec.get("path", ""))
+            deliverable = _read_deliverable(workspace / name)
+            sections = _as_str_list(spec.get("sections"))
+            minimum = int(spec.get("min_identifiers", 3))
+            categories = _as_str_list(spec.get("categories")) or list(IDENTIFIER_CATEGORIES)
+            cap = int(spec.get("max_lookups", MAX_IDENTIFIER_LOOKUPS))
+            # 交付物与本次被写过的文件排除出语料：否则自己写的名字就「自动存在」了
+            index = CorpusIndex(workspace, exclude=[name, *_changed_paths(changes)])
+            seen: set[str] = set()  # 同一标识符跨节不重复计数
+            lookups = 0
+            overflow = False
+            weak: list[str] = []
+            for section in sections:
+                body = _section_body(deliverable, section)
+                counts = {category: 0 for category in categories}
+                verified = 0
+                for token in _identifiers(body):
+                    if token in seen:
+                        continue
+                    if lookups >= cap:
+                        overflow = True
+                        break
+                    lookups += 1
+                    category = classify_identifier(token)
+                    if category is None or not index.contains(token):
+                        continue
+                    seen.add(token)
+                    verified += 1
+                    if category in counts:
+                        counts[category] += 1
+                missing = [c for c in categories if counts[c] < 1]
+                if verified < minimum or missing:
+                    weak.append(f"{section}({verified}/{minimum}，缺类别 {missing})")
+                if overflow:
+                    break
+            if overflow:
+                results.append(
+                    CheckResult(
+                        kind,
+                        False,
+                        f"核验次数超过上限 {cap}，未能完成存在性核验",
+                        unverified=True,
+                    )
+                )
+            else:
+                results.append(
+                    CheckResult(
+                        kind,
+                        bool(sections) and not weak,
+                        "每节都举出了真实存在的标识符"
+                        if not weak
+                        else f"不足：{weak}",
+                    )
+                )
+        elif kind == "question_types_per_section":
+            # 每节必须真的回答了那 5 类问题：命中关键词**并且**该段引用了代码级证据
+            name = str(spec.get("path", ""))
+            deliverable = _read_deliverable(workspace / name)
+            sections = _as_str_list(spec.get("sections"))
+            types = _as_str_list(spec.get("question_types")) or list(QUESTION_TYPES)
+            weak: list[str] = []
+            for section in sections:
+                segments = _question_segments(_section_body(deliverable, section))
+                missing = []
+                for name_of_type in types:
+                    keywords = QUESTION_TYPES.get(name_of_type, (name_of_type,))
+                    hits = [s for s in segments if any(k in s for k in keywords)]
+                    if not hits or not any(has_citation(s) for s in hits):
+                        missing.append(name_of_type)
+                if missing:
+                    weak.append(f"{section}(缺：{missing})")
+            results.append(
+                CheckResult(
+                    kind,
+                    bool(sections) and not weak,
+                    "5 类问题都有代码级证据" if not weak else f"不足：{weak}",
+                )
+            )
         else:
             # 不认识的检查器：不假装检查过（返回失败，交由上层按 inconclusive 处理）
             results.append(CheckResult(kind or "unknown", False, "不支持的检查器"))
@@ -366,3 +460,261 @@ class BoundedReadGuard:
         if len(lines) <= self._max_lines:
             return content, False
         return "\n".join(lines[: self._max_lines]), True
+
+
+# ===================== v3：子系统问题模板与标识符存在性核验 =====================
+
+# 每个子系统必须回答的 5 类问题（**模板**，不含任何具体事实，所以不泄露隐藏清单）
+QUESTION_TYPES: dict[str, tuple[str, ...]] = {
+    "职责": ("职责", "负责", "作用", "目的是"),
+    "交互": ("交互", "依赖", "调用方", "被谁调用", "协作"),
+    "关键数据结构": ("数据结构", "关键类型", "核心类型", "结构体", "字段"),
+    "关键参数": ("参数", "阈值", "常量", "默认值", "上限"),
+    "失败模式": ("失败模式", "错误处理", "异常", "降级", "报错"),
+}
+
+# 标识符三类：常量 / 类型 / 函数。要求每节都出现，防止"只抄一堆常量"刷分。
+IDENTIFIER_CATEGORIES = ("constant", "type", "function")
+
+# 一次核验里允许的"搜索次数"上限；超限一律按未验证处理（不得静默通过）
+MAX_IDENTIFIER_LOOKUPS = 200
+# 被核验的语料索引也有界
+MAX_CORPUS_FILES = 20_000
+MAX_CORPUS_BYTES = 64_000_000
+# 代码文件扩展名（只把代码当"存在性"依据）
+_CODE_SUFFIXES = frozenset(
+    {
+        ".rs", ".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".java", ".kt", ".c", ".h",
+        ".cc", ".cpp", ".hpp", ".rb", ".php", ".cs", ".swift", ".scala", ".sh", ".sql",
+    }
+)
+
+_BACKTICKED = re.compile(r"`([^`\n]+)`")
+_CODE_BLOCK = re.compile(r"```[^\n]*\n(.*?)```", re.S)
+_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]{2,}")
+_CONSTANT = re.compile(r"^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$|^[A-Z][A-Z0-9_]*[0-9][A-Z0-9_]*$")
+_TYPE = re.compile(r"^[A-Z][A-Za-z0-9]*$")
+_FUNCTION = re.compile(r"^[a-z_][a-z0-9_]{2,}$")
+_NOT_IDENTIFIER = frozenset({"self", "crate", "pub", "fn", "let", "mut", "use", "impl", "true", "false", "None", "Some", "Ok", "Err"})
+
+
+def _identifiers(text: str) -> list[str]:
+    """从正文里抽出被反引号或代码块包裹的候选标识符（保持出现顺序、去重）。"""
+
+    chunks: list[str] = _BACKTICKED.findall(text) + _CODE_BLOCK.findall(text)
+    found: dict[str, None] = {}
+    for chunk in chunks:
+        for match in _IDENTIFIER.finditer(chunk):
+            token = match.group(0)
+            if token in _NOT_IDENTIFIER:
+                continue
+            found.setdefault(token, None)
+    return list(found)
+
+
+def classify_identifier(token: str) -> str | None:
+    """把标识符归到 constant / type / function；不像标识符的返回 None。"""
+
+    if _CONSTANT.match(token):
+        return "constant"
+    if _TYPE.match(token):
+        return "type"
+    if _FUNCTION.match(token):
+        return "function"
+    return None
+
+
+class CorpusIndex:
+    """语料里"真实出现过的标识符"索引（有界构建）。
+
+    **只索引代码文件**，并且**排除交付物与本次被写过的文件**——
+    否则模型自己写进报告的名字就"自动存在"了，存在性核验就失去意义。
+    """
+
+    def __init__(self, workspace: Path, exclude: Sequence[str] = ()) -> None:
+        """构建索引；预算耗尽即停止（宁可少索引，不可无界读盘）。"""
+
+        self._excluded = {str(item) for item in exclude}
+        self.tokens: set[str] = set()
+        self.files = 0
+        total_bytes = 0
+        self.truncated = False
+        for path in sorted(workspace.rglob("*")):
+            if not path.is_file() or path.suffix not in _CODE_SUFFIXES:
+                continue
+            relative = path.relative_to(workspace).as_posix()
+            if relative in self._excluded:
+                continue
+            if self.files >= MAX_CORPUS_FILES or total_bytes >= MAX_CORPUS_BYTES:
+                self.truncated = True
+                break
+            try:
+                content = path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            self.files += 1
+            total_bytes += len(content)
+            self.tokens.update(_IDENTIFIER.findall(content))
+
+    def contains(self, token: str) -> bool:
+        """标识符是否在语料里出现过。"""
+
+        return token in self.tokens
+
+
+def _question_segments(body: str) -> list[str]:
+    """把一小节正文按空行切段，便于按段判定"某类问题是否被回答"。"""
+
+    return [chunk.strip() for chunk in re.split(r"\n\s*\n", body) if chunk.strip()]
+
+
+def has_citation(segment: str) -> bool:
+    """某一段是否引用了代码级证据（反引号里的标识符或路径）。"""
+
+    return bool(_identifiers(segment)) or bool(_mentions(segment))
+
+
+def _changed_paths(changes: Sequence[str]) -> list[str]:
+    """从改动记录里解析出被写过的文件路径（用于把交付物排除出语料索引）。"""
+
+    paths: list[str] = []
+    for entry in changes:
+        parts = str(entry).split()
+        if len(parts) >= 3:
+            paths.append(parts[-1])
+    return paths
+
+
+# 检查器规格：未知检查器或参数缺失/类型不对 → 设置时报错（不许静默跳过）
+CHECK_SPECS: dict[str, dict[str, object]] = {
+    "path_exists": {"required": ("paths",), "list": ("paths",)},
+    "sections_cover": {"required": ("path", "sections"), "list": ("sections",)},
+    "paths_per_section": {
+        "required": ("path", "sections"),
+        "list": ("sections",),
+        "optional": ("min_paths",),
+    },
+    "mentioned_paths_exist": {"required": ("path",)},
+    "files_changed": {"required": ("paths",), "list": ("paths",)},
+    "command_passed": {"required": ("command",)},
+    "identifiers_per_section": {
+        "required": ("path", "sections"),
+        "list": ("sections",),
+        "optional": ("min_identifiers", "categories"),
+    },
+    "question_types_per_section": {
+        "required": ("path", "sections"),
+        "list": ("sections",),
+        "optional": ("question_types",),
+    },
+}
+
+
+def validate_checks(specs: Sequence[Mapping[str, object]]) -> None:
+    """校验 acceptance_checks 结构；不合法直接抛错（设置期就暴露问题）。"""
+
+    for index, spec in enumerate(specs):
+        kind = str(spec.get("kind", "")).strip()
+        if kind not in CHECK_SPECS:
+            raise ValueError(f"acceptance_checks[{index}]：不支持的检查器 {kind!r}")
+        rule = CHECK_SPECS[kind]
+        for key in rule.get("required", ()):  # type: ignore[union-attr]
+            if spec.get(key) in (None, "", []):
+                raise ValueError(f"acceptance_checks[{index}]（{kind}）：缺少必填参数 {key!r}")
+        for key in rule.get("list", ()):  # type: ignore[union-attr]
+            if not isinstance(spec.get(key), list):
+                raise ValueError(f"acceptance_checks[{index}]（{kind}）：{key!r} 必须是列表")
+
+
+def subsystem_criteria_text(
+    subsystems: Sequence[str],
+    report_path: str,
+    min_identifiers: int = 3,
+    min_paths: int = 2,
+) -> str:
+    """生成"子系统问题模板"的验收标准文本（只规定问哪几类问题，不说任何具体事实）。"""
+
+    names = "、".join(subsystems)
+    bullets = "\n".join(f"   {i}. {name}" for i, name in enumerate(QUESTION_TYPES, start=1))
+    return (
+        f"{report_path} 必须为每个子系统（{names}）各写一节，且每节都必须回答下面 5 类问题：\n"
+        f"{bullets}\n"
+        f"其中「关键数据结构」与「关键参数」两类必须写出代码里真实存在的标识符"
+        f"（常量 / 类型 / 函数名，且每节至少含 {min_identifiers} 个、三类各至少 1 个），"
+        f"「交互」或「关键参数」必须给出真实存在的文件路径（每节至少 {min_paths} 个）。\n"
+        "报告中提到的路径与标识符必须真实存在，不得编造。"
+    )
+
+
+def covers_markers(spec: Mapping[str, object]) -> list[str]:
+    """取一条检查声明的覆盖标记；允许写成字符串或列表。"""
+
+    value = spec.get("covers")
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    return [str(value)] if value else []
+
+
+def uncovered_criteria(
+    criteria: str,
+    specs: Sequence[Mapping[str, object]],
+    results: Sequence[CheckResult] = (),
+) -> tuple[str, ...]:
+    """找出**没有取得脚本证据**的验收条目——它们只能被判 inconclusive。
+
+    两种情形都算：① 没有对应的脚本检查；② 对应检查**没核验完**（unverified，
+    例如标识符核验超上限）。第二种绝不能静默通过。
+    """
+
+    lines = [line.strip("- \t") for line in criteria.splitlines()]
+    lines = [line for line in lines if line]
+    if not specs:
+        return tuple(lines)
+    unverified_kinds = {r.kind for r in results if r.unverified}
+    markers = [
+        marker
+        for spec in specs
+        if str(spec.get("kind", "")) not in unverified_kinds
+        for marker in covers_markers(spec)
+    ]
+    return tuple(line for line in lines if not any(marker in line for marker in markers))
+
+
+def subsystem_checks(
+    subsystems: Sequence[str],
+    report_path: str,
+    min_identifiers: int = 3,
+    min_paths: int = 2,
+    max_lookups: int = MAX_IDENTIFIER_LOOKUPS,
+) -> tuple[dict[str, object], ...]:
+    """把"子系统清单"翻译成结构化检查（**子系统清单由 harness 给定，不从隐藏清单推导**）。"""
+
+    sections = list(subsystems)
+    specs: list[dict[str, object]] = [
+        {"kind": "sections_cover", "path": report_path, "sections": sections, "covers": "各写一节"},
+        {
+            "kind": "question_types_per_section",
+            "path": report_path,
+            "sections": sections,
+            # 5 类问题的名字本身也是验收条目，必须由这条检查覆盖——
+            # 否则它们会被当成"无脚本证据"而只能判 inconclusive（真机踩过）
+            "covers": ["必须回答下面 5 类问题", *QUESTION_TYPES],
+        },
+        {
+            "kind": "identifiers_per_section",
+            "path": report_path,
+            "sections": sections,
+            "min_identifiers": min_identifiers,
+            "covers": "真实存在的标识符",
+            "max_lookups": max_lookups,
+        },
+        {
+            "kind": "paths_per_section",
+            "path": report_path,
+            "sections": sections,
+            "min_paths": min_paths,
+            "covers": "真实存在的文件路径",
+        },
+        {"kind": "mentioned_paths_exist", "path": report_path, "covers": "不得编造"},
+    ]
+    return tuple(specs)
