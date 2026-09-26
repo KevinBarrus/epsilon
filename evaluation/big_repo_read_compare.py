@@ -61,6 +61,10 @@ ACCEPTANCE_CRITERIA = (
     "每段必须标注真实代码位置（工作区里确实存在的文件路径）；\n"
     "报告中提到的文件路径必须真实存在，不得编造。"
 )
+# 结构化脚本检查：只用**通用**检查器，不点名任何子系统（避免泄露）
+ACCEPTANCE_CHECKS: tuple[dict[str, object], ...] = (
+    {"kind": "mentioned_paths_exist", "path": REPORT_NAME},
+)
 DELEGATION_SENTENCE = (
     " 请把阅读工作按子系统拆给若干只读子 Agent 并行完成，再由你汇总成报告。"
 )
@@ -141,6 +145,7 @@ async def run(workspace: Path, arm: str, scout_mode: str | None = None) -> dict[
         task_text=TASK,
         arm_sentence=_ARM_SENTENCE,
         criteria=ACCEPTANCE_CRITERIA,
+        acceptance_checks=ACCEPTANCE_CHECKS,
         score_fn=codex_score,
         token_fuse=TOKEN_FUSE,
         time_fuse_seconds=TIME_FUSE_SECONDS,

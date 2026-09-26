@@ -62,8 +62,8 @@ class Settings:
     # 完成门（Completion Gate）：用独立验证器否决模型的完成声明（默认开）
     completion_gate_enabled: bool = True
     completion_gate_max_rejections: int = 2
-    completion_gate_verifier_timeout_seconds: float = 300.0
-    completion_gate_verifier_token_budget: int = 3_000_000
+    completion_gate_verifier_timeout_seconds: float = 60.0
+    completion_gate_verifier_token_budget: int = 100_000
     completion_gate_verifier_thinking: str = "high"
     completion_gate_no_tool_nudge_rounds: int = 3
     # 子 Agent 的默认上下文模式：scout/worker/reviewer 各自可配
@@ -496,7 +496,7 @@ def _completion_gate_settings(
 
     raw = data.get("completion_gate")
     if raw is None:
-        return True, 2, 300.0, 3_000_000, "high", 3
+        return True, 2, 60.0, 100_000, "high", 3
     if not isinstance(raw, dict):
         raise ConfigError("completion_gate must be an object")
     return (
@@ -504,12 +504,12 @@ def _completion_gate_settings(
         _optional_int(raw.get("max_rejections"), 2, "completion_gate.max_rejections"),
         _optional_float(
             raw.get("verifier_timeout_seconds"),
-            300.0,
+            60.0,
             "completion_gate.verifier_timeout_seconds",
         ),
         _optional_int(
             raw.get("verifier_token_budget"),
-            3_000_000,
+            100_000,
             "completion_gate.verifier_token_budget",
         ),
         _optional_str(

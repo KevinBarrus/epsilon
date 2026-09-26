@@ -32,9 +32,9 @@ def _policy(**kwargs) -> GoalPolicy:
 
 
 def _ok_verifier(text: str = "VERDICT: met\nUNMET: 无"):
-    """返回固定结论的假验证器。"""
+    """返回固定结论的假验证器（v2：输入是有界证据简报，不是 Goal）。"""
 
-    async def verify(goal: Goal) -> str:
+    async def verify(brief: str) -> str:
         return text
 
     return verify
@@ -51,17 +51,17 @@ async def _complete(policy: GoalPolicy) -> CompletionOutcome:
 async def test_empty_criteria_falls_back_to_objective() -> None:
     """没有验收标准时，用 objective 作为判定依据。"""
 
-    seen: list[Goal] = []
+    seen: list[str] = []
 
-    async def verify(goal: Goal) -> str:
-        seen.append(goal)
+    async def verify(brief: str) -> str:
+        seen.append(brief)
         return "VERDICT: met"
 
     policy = GoalPolicy(Goal("读完整仓库"), verifier=verify)
     outcome = await _complete(policy)
 
     assert outcome.accepted
-    assert seen and seen[0].acceptance_criteria == ""
+    assert seen and "读完整仓库" in seen[0]
 
 
 def test_verifier_prompt_uses_criteria_or_objective() -> None:
@@ -98,7 +98,7 @@ async def test_met_accepts_and_marks_verified() -> None:
 async def test_not_met_rejects_and_keeps_active() -> None:
     """not_met → 拒绝、回注未满足项、目标保持 active、拒绝计数 +1。"""
 
-    async def verify(goal: Goal) -> str:
+    async def verify(brief: str) -> str:
         return "VERDICT: not_met\nUNMET: B 未覆盖\nUNMET: C 未覆盖"
 
     policy = _policy(verifier=verify)
@@ -135,7 +135,7 @@ async def test_inconclusive_is_also_rejected() -> None:
 async def test_verifier_error_is_rejected_fail_closed() -> None:
     """验证器抛错 → 按拒绝处理（fail-closed），并单独归类为 verifier_error。"""
 
-    async def boom(goal: Goal) -> str:
+    async def boom(brief: str) -> str:
         raise RuntimeError("verifier exploded")
 
     policy = _policy(verifier=boom, max_rejections=5)
@@ -150,7 +150,7 @@ async def test_verifier_error_is_rejected_fail_closed() -> None:
 async def test_verifier_timeout_is_rejected() -> None:
     """验证器超时 → 拒绝、reason=inconclusive（证据不足，不是验证器坏了）、计数 +1。"""
 
-    async def slow(goal: Goal) -> str:
+    async def slow(brief: str) -> str:
         await asyncio.sleep(5)
         return "VERDICT: met"
 
@@ -166,7 +166,7 @@ async def test_verifier_timeout_is_rejected() -> None:
 
 @pytest.mark.asyncio
 async def test_releases_after_max_rejections_but_marks_unverified() -> None:
-    """连拒到上限后放行，但 verified=False，并明确标注未通过验证。"""
+    """连拒到上限后进入 unverified 终态（不再是 complete），并标注未通过验证。"""
 
     policy = _policy(
         verifier=_ok_verifier("VERDICT: not_met\nUNMET: 还差 B"),
@@ -177,9 +177,9 @@ async def test_releases_after_max_rejections_but_marks_unverified() -> None:
     second = await _complete(policy)
     third = await _complete(policy)
 
-    assert [first.accepted, second.accepted, third.accepted] == [False, False, True]
+    assert [first.accepted, second.accepted, third.accepted] == [False, False, False]
     assert third.verified is False
-    assert policy.goal.status == "complete"
+    assert policy.goal.status == "unverified", "超限后不许再写 complete"
     assert policy.goal.verified is False
     assert "未通过验证" in third.message
     assert policy.goal.completion_rejections == 2
@@ -266,7 +266,7 @@ async def test_sync_fallback_cannot_bypass_the_gate() -> None:
 async def test_goal_tool_returns_unmet_items_to_the_model() -> None:
     """拒绝时，未满足项要通过工具结果回注给模型。"""
 
-    async def verify(goal: Goal) -> str:
+    async def verify(brief: str) -> str:
         return "VERDICT: not_met\nUNMET: 缺 B\nUNMET: 缺 C"
 
     policy = _policy(verifier=verify, max_rejections=2)
@@ -330,6 +330,10 @@ def test_parse_verdict_reads_met_and_unmet() -> None:
     verdict = parse_verdict("VERDICT: not_met\nUNMET: 缺 A\nUNMET: 缺 B")
     assert verdict.outcome == "not_met"
     assert verdict.unmet == ("缺 A", "缺 B")
+
+    # 验证器常把 UNMET 写在 VERDICT 同一行，也要能解析
+    inline = parse_verdict("VERDICT: not_met UNMET: - 缺 A - 缺 B")
+    assert inline.outcome == "not_met" and inline.unmet == ("缺 A", "缺 B")
 
     assert parse_verdict("VERDICT: met").outcome == "met"
     assert parse_verdict("VERDICT: met").unmet == ()

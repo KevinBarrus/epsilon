@@ -7,18 +7,25 @@
 import asyncio
 import json
 import re
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from pathlib import Path
 from dataclasses import dataclass, field
 from time import monotonic
 from typing import Literal
 
+from .completion_evidence import (
+    EvidenceBundle,
+    extract_changes,
+    recent_tail,
+    run_checks,
+)
 from .end_policy import EndPolicySummary
 from .model import Message, ToolCall, ToolResult, UsageEvent, UsageLedger
 from .tools.args import string_argument
 from .tools.types import ToolDefinition, ToolHandler
 
 
-GoalStatus = Literal["active", "complete", "budget_limited"]
+GoalStatus = Literal["active", "complete", "unverified", "budget_limited"]
 CheckVerdict = Literal["met", "not_met", "inconclusive"]
 RejectionReason = Literal["not_met", "inconclusive", "verifier_error"]
 
@@ -81,6 +88,18 @@ def verifier_brief(goal: "Goal") -> str:
     return criteria or goal.objective
 
 
+def verifier_prompt(brief: str) -> str:
+    """evaluator 模式的验证提示词：只能依据证据简报判定，不得打开工作区。"""
+
+    return (
+        "你是独立完成验证器。你**只能**根据下面的证据简报判定，"
+        "**不得**打开工作区、**不得**要求更多资料，也不要尝试自己探索代码。\n"
+        "证据不足或无法脚本化的条目，一律判 `inconclusive`。\n\n"
+        f"{brief}\n\n"
+        f"{VERIFIER_AUDIT_BRIEF}"
+    )
+
+
 def verifier_task(goal: "Goal") -> str:
     """拼出交给独立验证器的任务文本。"""
 
@@ -107,12 +126,17 @@ def parse_verdict(text: str) -> Verdict:
         upper = stripped.upper()
         if upper.startswith("VERDICT:"):
             value = stripped.split(":", 1)[1].strip().lower().replace("-", "_")
-            if value in {"met", "not_met", "inconclusive"}:
-                outcome = value
-        elif upper.startswith("UNMET:"):
-            item = stripped.split(":", 1)[1].strip()
-            if item.lower() not in _NO_UNMET:
-                unmet.append(item)
+            for token in value.replace(",", " ").split():
+                if token in {"met", "not_met", "inconclusive"}:
+                    outcome = token
+                    break
+        # UNMET 可能独立成行，也可能跟在 VERDICT 同一行：统一按标记切分
+        for chunk in re.split(r"(?i)unmet\s*:", stripped)[1:]:
+            # 同一行里可能有多个 "- xxx" 条目，先按破折号切开
+            for item in re.sub(r"\s+[-*]\s+", "\n- ", chunk).splitlines():
+                item = item.strip().lstrip("-* ").strip().rstrip("；;")
+                if item and item.lower() not in _NO_UNMET:
+                    unmet.append(item)
     if outcome == "met":
         return Verdict("met", ())
     return Verdict(outcome, tuple(unmet))
@@ -130,6 +154,8 @@ class Goal:
 
     objective: str
     acceptance_criteria: str = ""
+    # 结构化的脚本化检查（由调用方提供，随 goal 持久化）
+    acceptance_checks: list[dict[str, object]] = field(default_factory=list)
     max_rounds: int | None = None
     token_budget: int | None = None
     time_budget_seconds: int | None = None
@@ -149,10 +175,12 @@ class Goal:
             value = getattr(self, name)
             if value is not None and (type(value) is not int or value < 0):
                 raise ValueError(f"goal {name} must be a nonnegative integer")
-        if self.status not in {"active", "complete", "budget_limited"}:
+        if self.status not in {"active", "complete", "unverified", "budget_limited"}:
             raise ValueError("invalid goal status")
         if not isinstance(self.acceptance_criteria, str):
             raise ValueError("invalid goal acceptance_criteria")
+        if not isinstance(self.acceptance_checks, list):
+            raise ValueError("invalid goal acceptance_checks")
         if type(self.verified) is not bool:
             raise ValueError("invalid goal verified")
         if type(self.completion_rejections) is not int or self.completion_rejections < 0:
@@ -176,7 +204,9 @@ class GoalPolicy:
         on_change: Callable[[Goal], None] | None = None,
         clock: Callable[[], float] = monotonic,
         usage_ledger: UsageLedger | None = None,
-        verifier: Callable[[Goal], Awaitable[str]] | None = None,
+        verifier: Callable[[str], Awaitable[str]] | None = None,
+        checks: Sequence[Mapping[str, object]] | None = None,
+        workspace: Path | None = None,
         max_rejections: int = 2,
         verifier_timeout_seconds: float = 300.0,
         no_tool_nudge_rounds: int = 3,
@@ -192,6 +222,11 @@ class GoalPolicy:
         self._usage_ledger = usage_ledger
         # 完成门：配置了验证器才启用（否则保持旧的自我声明语义）
         self._verifier = verifier
+        self._checks = tuple(checks or ())
+        self._workspace = workspace
+        self._changes: list[str] = []
+        self._commands: list[str] = []
+        self._claim = ""
         self._max_rejections = max(0, max_rejections)
         self._verifier_timeout_seconds = verifier_timeout_seconds
         self._no_tool_nudge_rounds = no_tool_nudge_rounds
@@ -265,6 +300,9 @@ class GoalPolicy:
         """
         self._rounds_without_tools = 0
         if self._verifier is not None:
+            changes, commands = extract_changes(tool_calls, results)
+            self._changes.extend(changes)
+            self._commands.extend(commands)
             return
         for call, result in zip(tool_calls, results):
             if call.name == "goal" and call.arguments.get("op") == "complete" and not result.is_error:
@@ -332,23 +370,61 @@ class GoalPolicy:
             return CompletionOutcome(
                 accepted, accepted, "met" if accepted else "inconclusive", None, (), attempt, message
             )
-        verdict, reason, raw = await self._run_verifier()
+        brief = self._assemble_brief()
+        verdict, reason, raw = await self._run_verifier(brief)
         return await self._apply_verdict(verdict, reason, attempt, raw)
 
-    async def _run_verifier(self) -> tuple[Verdict, RejectionReason | None, str]:
-        """跑一次独立验证；超时按 inconclusive、抛错按 verifier_error。
+    def _assemble_brief(self) -> str:
+        """装配有界证据简报（v2 的核心：验证不探索，只判定宿主给的证据）。"""
 
-        返回 (判定, 拒绝原因, 验证器原文节选)——原文要跟着拒绝消息回注给模型，
-        否则"未满足项"只有一句话，模型拿不到可执行的信息。
-        """
+        checks = (
+            run_checks(self._checks, self._workspace, self._changes)
+            if self._workspace is not None and self._checks
+            else ()
+        )
+        tail: tuple[str, ...] = ()
+        try:  # 复用 AgentLoop 在工具执行期写入的上下文快照，不改任何签名
+            from .agent_loop import parent_context_snapshot
+
+            snapshot = parent_context_snapshot()
+            if snapshot:
+                tail = recent_tail(snapshot)
+        except Exception:  # noqa: BLE001 - 拿不到尾巴不影响判定
+            tail = ()
+        return EvidenceBundle(
+            objective=self.goal.objective,
+            criteria=verifier_brief(self.goal),
+            claim=self._claim,
+            changes=tuple(self._changes),
+            commands=tuple(self._commands),
+            checks=checks,
+            tail=tail,
+            unscripted=self._unscripted_criteria(),
+        ).render()
+
+    def _unscripted_criteria(self) -> tuple[str, ...]:
+        """找出没有脚本证据的验收条目——它们只能被判 inconclusive。"""
+
+        lines = [line.strip("- \t") for line in verifier_brief(self.goal).splitlines()]
+        lines = [line for line in lines if line]
+        if not self._checks:
+            return tuple(lines)
+        covered = [
+            str(spec.get("covers", "")) for spec in self._checks if spec.get("covers")
+        ]
+        return tuple(
+            line for line in lines if not any(marker in line for marker in covered)
+        )
+
+    async def _run_verifier(self, brief: str) -> tuple[Verdict, RejectionReason | None, str]:
+        """跑一次独立验证；超时按 inconclusive、抛错按 verifier_error。"""
 
         assert self._verifier is not None
         try:
             raw = await asyncio.wait_for(
-                self._verifier(self.goal), self._verifier_timeout_seconds
+                self._verifier(verifier_prompt(brief)), self._verifier_timeout_seconds
             )
         except (TimeoutError, asyncio.TimeoutError):
-            # 超时是"证据不足"而不是"验证器坏了"
             return Verdict("inconclusive"), "inconclusive", "验证器超时，未能取得证据"
         except Exception as exc:  # noqa: BLE001 - 验证器不可用一律 fail-closed
             return Verdict("inconclusive"), "verifier_error", f"验证器不可用：{type(exc).__name__}"
@@ -363,7 +439,7 @@ class GoalPolicy:
         attempt: int,
         raw_excerpt: str = "",
     ) -> CompletionOutcome:
-        """按判定结果接受、拒绝或（超限后）放行并标注未验证。"""
+        """按判定结果接受、拒绝，或（超限后）进入 unverified 终态。"""
 
         if verdict.outcome == "met":
             self._tick()
@@ -376,7 +452,8 @@ class GoalPolicy:
         elif self.goal.completion_rejections < self._max_rejections:
             unmet_text = (
                 "\n".join(f"- {item}" for item in verdict.unmet)
-                or "- 验证器未给出具体未满足项，请自行复核对验收标准"
+                or "- 验证器未给出结构化未满足项，请对照验收标准自行复核"
+                + (f"\n验证器原文：{raw_excerpt}" if raw_excerpt else "")
             )
             self.goal.completion_rejections += 1
             self._persist()
@@ -394,20 +471,22 @@ class GoalPolicy:
                 + "\n请继续推进原目标，不要重复声明完成。",
             )
         else:
+            # 超限不再写 complete：进入独立终态 unverified（停下来交给人）
             self._tick()
-            self.goal.status = "complete"
+            self.goal.status = "unverified"
             self.goal.verified = False
             self._persist()
             outcome = CompletionOutcome(
-                True,
+                False,
                 False,
                 verdict.outcome,
                 reason,
                 verdict.unmet,
                 attempt,
-                "已完成，但未通过验证（已达拒绝上限 "
+                "已达拒绝上限 "
                 + str(self._max_rejections)
-                + " 次，放行）。请在总结中标注“未通过验证”。",
+                + " 次仍未通过验证，目标进入 unverified（未通过验证，停下来交给人）。"
+                + "请在总结中如实说明哪些验收项没有证据。",
             )
         await self._emit(outcome)
         return outcome
@@ -428,9 +507,16 @@ class GoalPolicy:
             )
         )
 
+    def _record_claim(self, assistant_content: str) -> None:
+        """记录最后一次非空助手文本，作为"完成声称"的证据。"""
+
+        if assistant_content.strip():
+            self._claim = assistant_content.strip()
+
     def _update_degeneration(self, assistant_content: str) -> None:
         """更新防退化信号：连续无工具轮数 + 重复总结（只做归一化精确比较）。"""
 
+        self._record_claim(assistant_content)
         self._nudges = []
         self._rounds_without_tools += 1
         if self._no_tool_nudge_rounds > 0 and self._rounds_without_tools >= self._no_tool_nudge_rounds:

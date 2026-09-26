@@ -19,7 +19,7 @@ import os
 import re
 import shutil
 import tempfile
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from time import perf_counter
 
@@ -32,15 +32,19 @@ from core.agent_loop import (
 from core.config import load_settings
 from core.context import ContextBudget, ContextBuildResult, ContextManager
 from core.errors import AgentError
-from core.goal import CompletionGateEvent, Goal, GoalPolicy, create_goal_tool, verifier_task
+from core.goal import (
+    CompletionGateEvent,
+    Goal,
+    GoalPolicy,
+    create_goal_tool,
+)
 from core.loop_guard import action_digest, config_from_settings
-from core.model import Message, ModelClient, UsageLedger, UsageTrackingClient
+from core.model import Message, ModelClient, TextDelta, UsageLedger, UsageTrackingClient
 from core.openai_client import OpenAICompatibleClient
 from core.prompts import load_prompt
 from core.subagent import (
     SubagentRunMetrics,
     create_spawn_agent_tool,
-    run_readonly_audit,
     scout_parent_message,
 )
 from core.tools import (
@@ -303,6 +307,18 @@ def scout_summary(
     return summary
 
 
+async def judge_completion(client: ModelClient, brief: str) -> str:
+    """evaluator 模式：单次模型调用、**不给任何工具**，只能依据证据简报判定。"""
+
+    text = ""
+    async for event in client.stream_response(
+        [Message(role="user", content=brief)], tools=()
+    ):
+        if isinstance(event, TextDelta):
+            text += event.content
+    return text
+
+
 async def run(
     workspace: Path,
     arm: str,
@@ -318,6 +334,7 @@ async def run(
     report_name: str = REPORT_NAME,
     source_hash_fn: Callable[[Path], str] | None = None,
     criteria: str = "",
+    acceptance_checks: Sequence[Mapping[str, object]] = (),
 ) -> dict[str, object]:
     """运行一档任务，并在中断或失败时仍保存真实进度。
 
@@ -342,6 +359,7 @@ async def run(
     goal = Goal(
         objective,
         acceptance_criteria=criteria,
+        acceptance_checks=[dict(spec) for spec in acceptance_checks],
         token_budget=token_fuse,
         time_budget_seconds=time_fuse_seconds,
     )
@@ -413,8 +431,8 @@ async def run(
         with child_events_path.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-    async def verify_completion(current: Goal) -> str:
-        """独立、只读的完成审计；预算耗尽或不可用一律 inconclusive。"""
+    async def verify_completion(brief: str) -> str:
+        """evaluator 模式：单次调用、不给工具，只判定宿主装配的证据简报。"""
 
         verifier_client = BudgetedClient(
             UsageTrackingClient(TimedModelClient(model), ledger),
@@ -422,16 +440,7 @@ async def run(
             settings.completion_gate_verifier_token_budget,
         )
         try:
-            return await run_readonly_audit(
-                verifier_task(current),
-                workspace,
-                verifier_client,
-                settings.completion_gate_verifier_thinking,
-                budget,
-                timeout_seconds=settings.completion_gate_verifier_timeout_seconds,
-                on_event=collect_child_event,
-                loop_guard_config=loop_guard_config,
-            )
+            return await judge_completion(verifier_client, brief)
         except TokenBudgetReached:
             return "VERDICT: inconclusive\nUNMET: 验证器 token 预算耗尽"
 
@@ -440,6 +449,8 @@ async def run(
         on_change=save_goal,
         usage_ledger=ledger,
         verifier=verify_completion if settings.completion_gate_enabled else None,
+        checks=acceptance_checks,
+        workspace=workspace,
         max_rejections=settings.completion_gate_max_rejections,
         verifier_timeout_seconds=settings.completion_gate_verifier_timeout_seconds,
         no_tool_nudge_rounds=settings.completion_gate_no_tool_nudge_rounds,

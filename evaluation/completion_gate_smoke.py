@@ -24,11 +24,10 @@ from core.goal import (
     Goal,
     GoalPolicy,
     create_goal_tool,
-    verifier_task,
 )
 from core.model import Message, ToolCall, UsageLedger, UsageTrackingClient
 from core.openai_client import OpenAICompatibleClient
-from core.subagent import run_readonly_audit
+from .read_summary_compare import judge_completion
 from core.tools import (
     ApprovalDecision,
     ApprovalResult,
@@ -92,6 +91,14 @@ async def run(output_root: Path) -> dict[str, object]:
     goal = Goal(
         OBJECTIVE,
         acceptance_criteria=CRITERIA,
+        acceptance_checks=[
+            {
+                "kind": "sections_cover",
+                "path": REPORT_NAME,
+                "sections": ["ALPHA-111", "BETA-222", "GAMMA-333"],
+                "covers": "必须包含",
+            }
+        ],
         token_budget=TOKEN_FUSE,
         time_budget_seconds=TIME_FUSE_SECONDS,
     )
@@ -106,26 +113,16 @@ async def run(output_root: Path) -> dict[str, object]:
         with events_path.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-    async def verify(current: Goal) -> str:
+    async def verify(brief: str) -> str:
+        """evaluator 模式：单次调用、不给工具，只判定证据简报。"""
+
         verifier_client = BudgetedClient(
             UsageTrackingClient(TimedModelClient(model), ledger),
             ledger,
             settings.completion_gate_verifier_token_budget,
         )
         try:
-            return await run_readonly_audit(
-                verifier_task(current),
-                workspace,
-                verifier_client,
-                settings.completion_gate_verifier_thinking,
-                ContextBudget(
-                    settings.context_window or 100_000,
-                    settings.reserve_tokens,
-                    settings.keep_recent_tokens,
-                ),
-                timeout_seconds=settings.completion_gate_verifier_timeout_seconds,
-                on_event=collect_event,
-            )
+            return await judge_completion(verifier_client, brief)
         except TokenBudgetReached:
             return "VERDICT: inconclusive\nUNMET: 验证器 token 预算耗尽"
 
@@ -133,6 +130,8 @@ async def run(output_root: Path) -> dict[str, object]:
         goal,
         usage_ledger=ledger,
         verifier=verify,
+        checks=goal.acceptance_checks,
+        workspace=workspace,
         max_rejections=settings.completion_gate_max_rejections,
         verifier_timeout_seconds=settings.completion_gate_verifier_timeout_seconds,
         no_tool_nudge_rounds=settings.completion_gate_no_tool_nudge_rounds,

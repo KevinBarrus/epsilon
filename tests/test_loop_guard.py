@@ -645,8 +645,8 @@ def test_settings_completion_gate_defaults(tmp_path: Path) -> None:
 
     assert settings.completion_gate_enabled is True
     assert settings.completion_gate_max_rejections == 2
-    assert settings.completion_gate_verifier_timeout_seconds == 300.0
-    assert settings.completion_gate_verifier_token_budget == 3_000_000
+    assert settings.completion_gate_verifier_timeout_seconds == 60.0
+    assert settings.completion_gate_verifier_token_budget == 100_000
     assert settings.completion_gate_verifier_thinking == "high"
     assert settings.completion_gate_no_tool_nudge_rounds == 3
 
