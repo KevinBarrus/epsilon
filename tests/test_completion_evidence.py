@@ -199,6 +199,25 @@ def test_check_files_changed(tmp_path: Path) -> None:
     assert ok[0].passed and not bad[0].passed
 
 
+def test_paths_per_section_ignores_preamble_mention(tmp_path: Path) -> None:
+    """检查器必须认标题行，不能把前言里提到的同名单词当成小节正文。"""
+
+    workspace = tmp_path
+    (workspace / "src").mkdir()
+    (workspace / "src/real.py").write_text("x", encoding="utf-8")
+    (workspace / "report.md").write_text(
+        "本报告覆盖 protocol、config 两个子系统。\n\n# protocol\n见 src/real.py 与 src/real.py\n",
+        encoding="utf-8",
+    )
+
+    result = run_checks(
+        [{"kind": "paths_per_section", "path": "report.md", "sections": ["protocol"], "min_paths": 1}],
+        workspace,
+    )
+
+    assert result[0].passed, result[0].detail
+
+
 def test_check_command_passed(tmp_path: Path) -> None:
     """command_passed：退出码为 0 才通过。"""
 

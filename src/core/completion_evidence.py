@@ -300,12 +300,24 @@ def _as_str_list(value: object) -> list[str]:
 
 
 def _section_body(text: str, heading: str) -> str:
-    """取某个标题到下一个标题之间的正文。"""
+    """取某个小节到下一个标题之间的正文。
 
-    start = text.find(heading)
+    **优先匹配标题行**（以 # 开头且包含该名字）：否则会撞上正文里第一次提到的同名
+    单词，把前言当成小节正文（真机踩过：明明写了 5 个真实路径却判成 0/2）。
+    """
+
+    start = -1
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#") and heading in stripped:
+            start = text.index(line) + len(line)
+            break
     if start < 0:
-        return ""
-    rest = text[start + len(heading) :]
+        start = text.find(heading)
+        if start < 0:
+            return ""
+        start += len(heading)
+    rest = text[start:]
     lines: list[str] = []
     for line in rest.splitlines():
         if line.startswith("#") and line.strip() != heading:

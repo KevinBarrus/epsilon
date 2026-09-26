@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from pathlib import Path
 
 from .read_summary_score import (
@@ -308,4 +309,24 @@ def score(text: str, workspace: Path) -> dict[str, object]:
     return {
         "coverage_source": coverage_by_subsystem(text),
         "precision": _precision(text, workspace, CODEX_PATH_PATTERN),
+    }
+
+
+def coverage_for_subsystems(text: str, subsystems: Sequence[str]) -> dict[str, object]:
+    """只统计指定子系统的覆盖率（用于"中等语料"子集实验）。"""
+
+    normalized = normalize(text)
+    items = [(name, item) for name, group in SUBSYSTEM_CHECKLIST.items() if name in subsystems for item in group]
+    matched: list[str] = []
+    missing: list[str] = []
+    for _, item in items:
+        hits = sum(1 for keyword in item.keywords if keyword in normalized)
+        (matched if hits >= item.required_hits else missing).append(item.key)
+    return {
+        "subsystems": list(subsystems),
+        "matched": matched,
+        "missing": missing,
+        "matched_count": len(matched),
+        "total": len(items),
+        "rate": round(len(matched) / len(items), 4) if items else None,
     }

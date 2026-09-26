@@ -334,6 +334,7 @@ async def run(
     report_name: str = REPORT_NAME,
     source_hash_fn: Callable[[Path], str] | None = None,
     criteria: str = "",
+    gate_enabled: bool | None = None,
     acceptance_checks: Sequence[Mapping[str, object]] = (),
 ) -> dict[str, object]:
     """运行一档任务，并在中断或失败时仍保存真实进度。
@@ -342,6 +343,7 @@ async def run(
     """
 
     sentences = arm_sentence if arm_sentence is not None else _ARM_SENTENCE
+    gate_on = settings.completion_gate_enabled if gate_enabled is None else gate_enabled
     # 校验"原仓库零改动"必须用与 baseline 完全相同的范围口径，否则比的是两个哈希
     if source_hash_fn is not None:
         hash_source = source_hash_fn
@@ -434,10 +436,17 @@ async def run(
     async def verify_completion(brief: str) -> str:
         """evaluator 模式：单次调用、不给工具，只判定宿主装配的证据简报。"""
 
-        verifier_client = BudgetedClient(
-            UsageTrackingClient(TimedModelClient(model), ledger),
+        # 验证器的预算必须用**自己的账本**衡量：共享总账早在主循环里超过这个额度，
+        # 否则每次验证都会立刻被判超预算（这正是所有 inconclusive 的真因）。
+        # 外层再包一层 UsageTrackingClient，把验证器用量计入共享总账（评测要算钱）。
+        verifier_ledger = UsageLedger()
+        verifier_client = UsageTrackingClient(
+            BudgetedClient(
+                UsageTrackingClient(TimedModelClient(model), verifier_ledger),
+                verifier_ledger,
+                settings.completion_gate_verifier_token_budget,
+            ),
             ledger,
-            settings.completion_gate_verifier_token_budget,
         )
         try:
             return await judge_completion(verifier_client, brief)
@@ -448,7 +457,7 @@ async def run(
         goal,
         on_change=save_goal,
         usage_ledger=ledger,
-        verifier=verify_completion if settings.completion_gate_enabled else None,
+        verifier=verify_completion if gate_on else None,
         checks=acceptance_checks,
         workspace=workspace,
         max_rejections=settings.completion_gate_max_rejections,
@@ -610,7 +619,7 @@ async def run(
         },
         "scout_summary": scout_summary(child_metrics, child_events),
         "completion_gate": {
-            "enabled": settings.completion_gate_enabled,
+            "enabled": gate_on,
             "rejections": goal.completion_rejections,
             "verified": goal.verified,
             "rejected_not_met": sum(1 for e in gate_events if e.reason == "not_met"),

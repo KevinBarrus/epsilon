@@ -116,10 +116,14 @@ async def run(output_root: Path) -> dict[str, object]:
     async def verify(brief: str) -> str:
         """evaluator 模式：单次调用、不给工具，只判定证据简报。"""
 
-        verifier_client = BudgetedClient(
-            UsageTrackingClient(TimedModelClient(model), ledger),
+        verifier_ledger = UsageLedger()
+        verifier_client = UsageTrackingClient(
+            BudgetedClient(
+                UsageTrackingClient(TimedModelClient(model), verifier_ledger),
+                verifier_ledger,
+                settings.completion_gate_verifier_token_budget,
+            ),
             ledger,
-            settings.completion_gate_verifier_token_budget,
         )
         try:
             return await judge_completion(verifier_client, brief)
