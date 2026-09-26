@@ -2,7 +2,7 @@
 
 ## 目标
 
-让用户可以通过配置文件配置一个 stdio MCP Server，启动 864code 时自动发现并注册 MCP 工具
+让用户可以通过配置文件配置一个 stdio MCP Server，启动 epsilon 时自动发现并注册 MCP 工具
 
 ## 已完成
 

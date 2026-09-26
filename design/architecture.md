@@ -2,11 +2,11 @@
 
 ## 1. 项目定位
 
-864code 是一个结构清晰、可恢复、可扩展的 Python Coding Agent Runtime。
+epsilon 是一个结构清晰、可恢复、可扩展的 Python Coding Agent Runtime。
 
 第一阶段的目标是把一次 Coding Agent 会话做好，并让整个运行过程能够被理解、解释、测试和恢复。项目暂时不追求同时实现完整的产品级 Runtime、长程控制面、自进化平台和复杂控制论系统。
 
-864code 的核心职责是：
+epsilon 的核心职责是：
 
 - 接收用户任务；
 - 调用模型；
@@ -245,7 +245,7 @@ Tool Call
 第一版采用 JSONL 保存 Session 历史：
 
 ```text
-.864code/
+.epsilon/
 └── sessions/
     ├── <session-id>.jsonl
     └── .<session-id>.pending.jsonl
@@ -290,7 +290,7 @@ Skills、MCP、Memory、Evaluation 和 SubAgent 都属于扩展能力，但它�
 
 ### MCP
 
-负责连接外部 MCP Server，并将外部工具或资源适配成 864code 内部协议。MCP 的连接和错误不应污染核心 Agent Loop。
+负责连接外部 MCP Server，并将外部工具或资源适配成 epsilon 内部协议。MCP 的连接和错误不应污染核心 Agent Loop。
 
 ### Memory
 
@@ -380,7 +380,7 @@ Skills、MCP、Memory、Evaluation 和 SubAgent 都属于扩展能力，但它�
 
 ### Pi
 
-学习其简单、直接的模型—工具循环。864code 第一版的 Agent Loop 应保持类似的可读性。
+学习其简单、直接的模型—工具循环。epsilon 第一版的 Agent Loop 应保持类似的可读性。
 
 ### Codex
 
@@ -410,7 +410,7 @@ Skills、MCP、Memory、Evaluation 和 SubAgent 都属于扩展能力，但它�
 
 ## 14. 总结
 
-864code 采用：
+epsilon 采用：
 
 > 以 Session 和简单 AgentLoop 为核心的 Python Agent Runtime，将 Turn/Step 保持为未持久化的执行边界，使用 JSONL 保存会话历史，通过独立的 Context Manager 和 Tool Manager 管理上下文与工具，并为 Skills、Memory、Evaluation 和 SubAgent 预留清晰的扩展边界。
 

@@ -18,15 +18,15 @@
 
 ```toml
 [project.scripts]
-864code = "core.main:main"
+epsilon = "core.main:main"
 ```
 
 命令行为：
 
 ```bash
-864code              # 创建新会话
-864code resume       # 打开会话选择器
-864code resume ID    # 直接恢复指定会话
+epsilon              # 创建新会话
+epsilon resume       # 打开会话选择器
+epsilon resume ID    # 直接恢复指定会话
 ```
 
 不再把 `--session-id` 作为主要入口，恢复功能统一归入 `resume` 子命令。可以保留旧参数作为兼容入口，但不新增第二套交互逻辑。
@@ -38,7 +38,7 @@
 继续使用当前的 JSONL 文件，不新增数据库和元数据文件：
 
 ```text
-.864code/sessions/<session_id>.jsonl
+.epsilon/sessions/<session_id>.jsonl
 ```
 
 `SessionStore` 新增列出会话的方法，返回最小的会话摘要：
@@ -141,7 +141,7 @@ Session.restore()
 5. 将 `main.py` 改为支持 `resume [session_id]`；
 6. 将恢复后的 Session 历史一次性渲染到 `ChatScreen`；
 7. 增加带 ID 恢复、不带 ID 选择和恢复后继续对话测试；
-8. 在 `pyproject.toml` 增加 `864code` 命令入口；
+8. 在 `pyproject.toml` 增加 `epsilon` 命令入口；
 9. 运行完整测试集并手动验证选择器交互。
 
 不修改 `screen.py` 的布局、滚动和输入快捷键实现，只通过现有 `ChatScreen.add_entry()` 加载历史消息。
@@ -150,7 +150,7 @@ Session.restore()
 
 ### 会话列表测试
 
-- 正确发现 `.864code/sessions/` 下的 JSONL 文件；
+- 正确发现 `.epsilon/sessions/` 下的 JSONL 文件；
 - 标题取第一条用户消息；
 - 标题会去除换行并截断；
 - 按更新时间倒序排列；
@@ -176,11 +176,11 @@ Session.restore()
 
 ## 9. 验收标准
 
-- 用户可以使用 `864code resume` 进入会话选择器；
+- 用户可以使用 `epsilon resume` 进入会话选择器；
 - 用户可以使用上下箭头移动选择；
 - 当前选中会话为蓝色，其他会话保持默认字体颜色；
 - Enter 可以进入选中的会话；
-- `864code resume <session_id>` 可以跳过选择器直接进入；
+- `epsilon resume <session_id>` 可以跳过选择器直接进入；
 - 会话列表显示标题、最近时间和短 Session ID；
 - 恢复后历史消息立即显示并定位到底部；
 - 恢复后继续对话会追加到原会话文件；

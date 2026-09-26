@@ -2,7 +2,7 @@
 
 ## 一、设计目标
 
-上下文管理参考 Pi 的核心策略，同时保持 864code 的实现简洁：
+上下文管理参考 Pi 的核心策略，同时保持 epsilon 的实现简洁：
 
 ```text
 SessionStore：保存完整 JSONL 历史

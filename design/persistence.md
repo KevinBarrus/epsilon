@@ -17,7 +17,7 @@
 使用当前工作区根目录下的隐藏目录：
 
 ```text
-.864code/
+.epsilon/
 └── sessions/
     └── <session_id>.jsonl
 ```
@@ -29,7 +29,7 @@
 - 不把运行时数据写入源码目录；
 - 不依赖全局用户目录，便于面试现场展示和测试。
 
-`.864code/` 属于运行时产物，实施时加入 `.gitignore`，不提交到代码仓库。
+`.epsilon/` 属于运行时产物，实施时加入 `.gitignore`，不提交到代码仓库。
 
 ## 3. 数据格式
 
@@ -63,7 +63,7 @@ JSONL 不是一个大的 JSON 数组，而是“每行一个完整 JSON 对象�
 
 定义 `SessionStore`，负责 JSONL 文件读写：
 
-- 根据工作区创建 `.864code/sessions/`；
+- 根据工作区创建 `.epsilon/sessions/`；
 - 新建或追加指定 Session 的 JSONL 文件；
 - 按文件顺序读取消息；
 - 将 JSON 记录转换为 `Message`；
@@ -134,7 +134,7 @@ SessionStore 读取对应 JSONL
 5. 在应用启动时创建新 Session；
 6. 暂时提供一个简单的恢复入口，先用明确的 `session_id` 参数，不提前增加会话选择界面；
 7. 更新 `src/core/AGENTS.md`，说明 Session 与持久化模块边界；
-8. 将 `.864code/` 加入 `.gitignore`。
+8. 将 `.epsilon/` 加入 `.gitignore`。
 
 实现过程中不修改 `screen.py` 的布局、滚动和输入处理逻辑。
 
@@ -165,7 +165,7 @@ SessionStore 读取对应 JSONL
 - 用户消息、正常模型回复和取消后的部分回复都能恢复；
 - TUI 不依赖文件格式和存储细节；
 - 损坏记录不会被静默忽略；
-- `.864code/` 不进入 Git；
+- `.epsilon/` 不进入 Git；
 - `uv run pytest` 全部通过。
 
 ## 9. 暂不实现的内容

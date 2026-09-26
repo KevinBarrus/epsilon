@@ -2,13 +2,13 @@
 
 ## 结论
 
-864code 第一阶段使用 Python 3.11+ 开发。
+epsilon 第一阶段使用 Python 3.11+ 开发。
 
 如果后续经过实际测量，确认某个独立模块成为明确的性能瓶颈，再考虑使用 Rust 重写该模块。Rust 不是第一阶段的默认实现语言，而是面向经过验证的性能瓶颈的补充方案。
 
 ## 选择 Python 的原因
 
-864code 当前最重要的目标是做出一个自己能够完全理解、解释和持续迭代的 Coding Agent。Python 在开发速度、代码可读性和 Agent 生态之间提供了较好的平衡。
+epsilon 当前最重要的目标是做出一个自己能够完全理解、解释和持续迭代的 Coding Agent。Python 在开发速度、代码可读性和 Agent 生态之间提供了较好的平衡。
 
 - LLM、OpenAI-compatible API、MCP、Git、文件处理和评测工具都有成熟支持。
 - Agent Loop、上下文管理、工具协议和记忆模块可以用较少的代码表达。

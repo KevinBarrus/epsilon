@@ -194,7 +194,7 @@
 ## 问题 19 方案：限制文件读取和搜索范围（已完成）
 
 - `read_file` 在读取前以文件大小拒绝超限文件，避免先全量读入
-- `search_files` 改用 `os.walk`，剪枝 `.git`、`.864code`、`node_modules`、`.venv` 等目录
+- `search_files` 改用 `os.walk`，剪枝 `.git`、`.epsilon`、`node_modules`、`.venv` 等目录
 - 搜索跳过超过单文件上限和含 NUL 字节的文件，并在达到结果输出预算后立即停止
 - 不解析 `.gitignore`，避免将搜索工具变成版本控制规则实现
 
