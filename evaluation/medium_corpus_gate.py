@@ -21,7 +21,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from .big_repo_read_compare import EXCLUDED_DIRS, MAX_FILE_BYTES, repository_hash
-from .big_repo_read_score import coverage_for_subsystems
+from .big_repo_read_score import SUBSYSTEM_CHECKLIST, coverage_for_subsystems
 from core.completion_evidence import subsystem_checks, subsystem_criteria_text
 from .read_summary_compare import is_test_code, run as _run
 
@@ -46,6 +46,9 @@ DELEGATION_SENTENCE = (
 )
 # v3：criteria 不列"要哪些事实"，只规定"每个子系统必须回答哪几类问题"——
 # 这样既不泄露隐藏清单，又逼模型真去读代码（要举出真实标识符只能读）。
+SUBSET_ITEMS = tuple(
+    item for name in SUBSET_GROUPS for item in SUBSYSTEM_CHECKLIST.get(name, ())
+)
 MIN_IDENTIFIERS = 3
 MIN_PATHS = 2
 ACCEPTANCE_CRITERIA = subsystem_criteria_text(
@@ -144,6 +147,7 @@ async def run(
         token_fuse=TOKEN_FUSE,
         time_fuse_seconds=TIME_FUSE_SECONDS,
         report_name=REPORT_NAME,
+        items=SUBSET_ITEMS,
         source_hash_fn=lambda root: repository_hash(root, MAX_FILE_BYTES, EXCLUDED_DIRS),
         gate_enabled=gate_enabled,
     )

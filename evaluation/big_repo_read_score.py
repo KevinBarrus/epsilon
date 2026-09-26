@@ -303,6 +303,12 @@ def coverage_by_subsystem(text: str) -> dict[str, object]:
     }
 
 
+# 全部 40 条（30 常量题 + 10 机制题）
+ALL_ITEMS: tuple[ChecklistItem, ...] = tuple(
+    item for group in SUBSYSTEM_CHECKLIST.values() for item in group
+)
+
+
 def score(text: str, workspace: Path) -> dict[str, object]:
     """返回报告的评分（子系统源码级覆盖率 + 路径精确率）。"""
 

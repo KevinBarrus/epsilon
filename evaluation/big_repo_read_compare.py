@@ -24,7 +24,7 @@ import json
 import tempfile
 from pathlib import Path
 
-from .big_repo_read_score import score as codex_score
+from .big_repo_read_score import ALL_ITEMS, score as codex_score
 from .read_summary_compare import (
     copy_repository,
     is_test_code,
@@ -150,6 +150,7 @@ async def run(workspace: Path, arm: str, scout_mode: str | None = None) -> dict[
         token_fuse=TOKEN_FUSE,
         time_fuse_seconds=TIME_FUSE_SECONDS,
         report_name=REPORT_NAME,
+        items=ALL_ITEMS,
         source_hash_fn=lambda root: repository_hash(
             root, MAX_FILE_BYTES, EXCLUDED_DIRS, skip_tests=True, include=codex_scope
         ),

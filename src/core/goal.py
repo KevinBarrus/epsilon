@@ -270,6 +270,12 @@ class GoalPolicy:
             usage_ledger.set_observer(self._observe_total_usage)
 
     @property
+    def last_check_results(self) -> tuple[CheckResult, ...]:
+        """最近一次装配证据包时跑出的脚本检查结果（供评测输出主指标）。"""
+
+        return self._last_check_results
+
+    @property
     def summary(self) -> EndPolicySummary:
         """兼容 AgentLoop 的通用收尾统计接口。"""
         return EndPolicySummary(

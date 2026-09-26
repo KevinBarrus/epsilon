@@ -66,6 +66,7 @@ from .big_task_single_goal import (
     usage_breakdown,
 )
 from .events import child_event_record, event_to_record
+from .metric_layers import build_layers
 from .online import TimedModelClient
 from .read_summary_score import score
 
@@ -335,6 +336,7 @@ async def run(
     source_hash_fn: Callable[[Path], str] | None = None,
     criteria: str = "",
     gate_enabled: bool | None = None,
+    items: Sequence[object] = (),
     acceptance_checks: Sequence[Mapping[str, object]] = (),
 ) -> dict[str, object]:
     """运行一档任务，并在中断或失败时仍保存真实进度。
@@ -581,7 +583,18 @@ async def run(
     report_text = report_path.read_text(encoding="utf-8") if report_path.is_file() else ""
     split = usage_breakdown(timed_client, child_clients)
     client_usage_total = split["parent"] + sum(sum(split[role]) for role in child_clients)
+    quality = score_fn(report_text, workspace) if report_text else None
+    layers = build_layers(
+        quality=quality,
+        items=items,
+        tokens=ledger.total_tokens,
+        wall_clock_seconds=duration,
+        tool_errors=sum(1 for record in parent_events if record.get("is_error")) + child_tool_errors,
+        retries=goal.completion_rejections,
+        check_results=policy.last_check_results,
+    )
     return {
+        **layers,
         "arm": arm,
         "workspace": str(workspace),
         "model_name": settings.model_name,
@@ -645,7 +658,7 @@ async def run(
         "eviction_count": len(evictions),
         "report_path": str(report_path),
         "report_chars": len(report_text),
-        "quality": score_fn(report_text, workspace) if report_text else None,
+        "quality": quality,
         "read_duplication": read_duplication(parent_events, child_events),
         "original_code_unchanged": baseline["source_hash"] == hash_source(source),
         "events_path": str(events_path),
